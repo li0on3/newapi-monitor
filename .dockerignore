@@ -1,0 +1,13 @@
+.env
+.env.*
+.git/
+.github/
+.ssh_password
+.dashboard_credentials
+*.tar.gz
+__pycache__/
+tests/
+state/
+web/node_modules/
+web/dist/
+web/*.tsbuildinfo

@@ -1,0 +1,6 @@
+monitor.example.com {
+    handle_path /monitor/* {
+        reverse_proxy 127.0.0.1:18081
+    }
+    redir /monitor /monitor/ 308
+}

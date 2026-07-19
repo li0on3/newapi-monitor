@@ -1,0 +1,144 @@
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: newapi-monitor-local-pg
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: root
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: new-api
+    volumes:
+      - local_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U root -d new-api"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - local-monitor
+
+  redis:
+    image: redis:7-alpine
+    container_name: newapi-monitor-local-redis
+    restart: unless-stopped
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD}"]
+    networks:
+      - local-monitor
+
+  mock-upstream:
+    image: python:3.13-alpine
+    container_name: newapi-monitor-local-upstream
+    restart: unless-stopped
+    command: ["python", "/app/mock_upstream.py"]
+    volumes:
+      - ./mock_upstream.py:/app/mock_upstream.py:ro
+    ports:
+      - "18080:8080"
+    networks:
+      - local-monitor
+
+  mailpit:
+    image: axllent/mailpit:latest
+    container_name: newapi-monitor-local-mailpit
+    restart: unless-stopped
+    ports:
+      - "1025:1025"
+      - "8025:8025"
+    networks:
+      - local-monitor
+
+  new-api:
+    image: calciumion/new-api:latest
+    container_name: newapi-monitor-local-app
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      SQL_DSN: postgresql://root:${POSTGRES_PASSWORD}@postgres:5432/new-api
+      REDIS_CONN_STRING: redis://:${REDIS_PASSWORD}@redis:6379
+      SESSION_SECRET: ${SESSION_SECRET}
+      TZ: Asia/Shanghai
+      ERROR_LOG_ENABLED: "true"
+      NODE_NAME: monitor-local
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      mock-upstream:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://localhost:3000/api/status | grep -q '\"success\":true'"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks:
+      - local-monitor
+
+  monitor:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: newapi-monitor-local-agent
+    restart: unless-stopped
+    user: "0:0"
+    ports:
+      - "18081:8080"
+    environment:
+      NEW_API_BASE_URL: http://new-api:3000
+      NEW_API_ACCESS_TOKEN: ${NEW_API_ACCESS_TOKEN}
+      NEW_API_USER_ID: ${NEW_API_USER_ID}
+      RELAY_API_TOKEN: ${RELAY_API_TOKEN}
+      STATE_DB: /data/monitor.db
+      POLL_SECONDS: "2"
+      CHANNEL_SYNC_INTERVAL_SECONDS: "2"
+      CHANNEL_INTERVAL_SECONDS: "12"
+      LOG_INTERVAL_SECONDS: "10"
+      RESOURCE_INTERVAL_SECONDS: "5"
+      REPORT_INTERVAL_SECONDS: "60"
+      LOG_INITIAL_LOOKBACK_SECONDS: "3600"
+      LOG_OVERLAP_SECONDS: "30"
+      SLOW_REQUEST_SECONDS: "1"
+      CHANNEL_SLOW_SECONDS: "5"
+      RESOURCE_SUSTAIN_SECONDS: "10"
+      SYSTEM_CPU_THRESHOLD: "95"
+      SYSTEM_MEMORY_THRESHOLD: "95"
+      SYSTEM_DISK_THRESHOLD: "95"
+      CONTAINER_CPU_THRESHOLD: "95"
+      CONTAINER_MEMORY_THRESHOLD: "95"
+      DOCKER_CONTAINER_NAME: newapi-monitor-local-app
+      DOCKER_CONTAINER_NAMES: newapi-monitor-local-app,newapi-monitor-local-pg,newapi-monitor-local-redis
+      DASHBOARD_ADMIN_USERNAME: ${DASHBOARD_ADMIN_USERNAME}
+      DASHBOARD_ADMIN_PASSWORD: ${DASHBOARD_ADMIN_PASSWORD}
+      DASHBOARD_COOKIE_SECURE: "false"
+      DASHBOARD_COOKIE_PATH: /
+      DASHBOARD_ALLOWED_HOSTS: localhost,127.0.0.1
+      MONITOR_SECRET_KEY: ${MONITOR_SECRET_KEY:-local-development-secret-key-change-me}
+      MONITOR_WORKER_ENABLED: "true"
+      SMTP_HOST: mailpit
+      SMTP_PORT: "1025"
+      SMTP_FROM: newapi-monitor@example.local
+      SMTP_TO: ${SMTP_TO}
+      SMTP_STARTTLS: "false"
+      SMTP_SSL: "false"
+      SEND_STARTUP_EMAIL: "true"
+      SUBJECT_PREFIX: "[New API本地监控]"
+      TZ: Asia/Shanghai
+    volumes:
+      - local_monitor_state:/data
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      new-api:
+        condition: service_healthy
+      mailpit:
+        condition: service_started
+    networks:
+      - local-monitor
+
+volumes:
+  local_pg_data:
+  local_monitor_state:
+
+networks:
+  local-monitor:
+    driver: bridge

@@ -1,0 +1,22 @@
+name: Bug report
+description: 报告可复现的问题，不要提交任何密钥或 Cookie
+title: "[Bug] "
+labels: [bug]
+body:
+  - type: textarea
+    attributes:
+      label: 问题描述
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: 复现步骤
+    validations:
+      required: true
+  - type: input
+    attributes:
+      label: 版本或 commit
+  - type: textarea
+    attributes:
+      label: 已脱敏日志
+      description: 请删除域名、IP、Token、Cookie、邮箱和请求正文

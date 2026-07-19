@@ -1,0 +1,99 @@
+services:
+  docker-proxy:
+    image: tecnativa/docker-socket-proxy:0.3.0
+    container_name: newapi-monitor-docker-proxy
+    restart: unless-stopped
+    environment:
+      CONTAINERS: "1"
+      INFO: "1"
+      PING: "1"
+      VERSION: "1"
+      POST: "0"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    tmpfs:
+      - /run:size=8m,mode=0755
+      - /tmp:size=8m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 64
+    mem_limit: 64m
+    cpus: 0.25
+    networks:
+      - monitor-internal
+    logging:
+      driver: json-file
+      options:
+        max-size: 5m
+        max-file: "2"
+
+  monitor:
+    image: ${MONITOR_IMAGE:-newapi-monitor:local}
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: newapi-monitor
+    restart: unless-stopped
+    init: true
+    env_file:
+      - ${MONITOR_ENV_FILE:-.env}
+    environment:
+      DOCKER_HOST: tcp://docker-proxy:2375
+    ports:
+      - "${MONITOR_BIND_ADDRESS:-127.0.0.1}:${MONITOR_PORT:-18081}:8080"
+    volumes:
+      - monitor_state:/data
+    depends_on:
+      docker-proxy:
+        condition: service_started
+      state-init:
+        condition: service_completed_successfully
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 128
+    mem_limit: 256m
+    cpus: 0.75
+    networks:
+      - monitor-internal
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/api/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+  state-init:
+    image: ${MONITOR_IMAGE:-newapi-monitor:local}
+    user: "0:0"
+    entrypoint: ["sh", "-c", "chown -R 10001:10001 /data && chmod 0700 /data"]
+    volumes:
+      - monitor_state:/data
+    read_only: true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - FOWNER
+      - DAC_OVERRIDE
+    security_opt:
+      - no-new-privileges:true
+    restart: "no"
+
+volumes:
+  monitor_state:
+
+networks:
+  monitor-internal:
+    driver: bridge
