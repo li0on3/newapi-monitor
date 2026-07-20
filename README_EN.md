@@ -2,6 +2,8 @@
 
 [简体中文](README.md) | [English](README_EN.md)
 
+[![CI](https://github.com/li0on3/newapi-monitor/actions/workflows/ci.yml/badge.svg)](https://github.com/li0on3/newapi-monitor/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/li0on3/newapi-monitor/actions/workflows/codeql.yml/badge.svg)](https://github.com/li0on3/newapi-monitor/actions/workflows/codeql.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
 An independently deployed monitoring and alerting platform for New API. It does not modify New API source code. Data is collected through read-only management APIs, real relay probes, real usage logs, and a restricted Docker Socket Proxy. The project is designed for single-host and small-scale New API installations.
