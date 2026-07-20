@@ -1,10 +1,13 @@
-.PHONY: init doctor test build image up down logs backup
+.PHONY: init doctor release-check test build image up down logs backup
 
 init:
 	python manage.py init
 
 doctor:
 	python manage.py doctor
+
+release-check:
+	python manage.py release-check
 
 test:
 	python -m unittest discover -s tests -v

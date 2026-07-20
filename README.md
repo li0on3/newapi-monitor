@@ -1,5 +1,9 @@
 # New API 外置监控平台
 
+[简体中文](README.md) | [English](README_EN.md)
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+
 独立部署、无需修改 New API 源码的监控与告警平台。它通过 New API 管理接口、真实 Relay 请求、真实使用日志和 Docker 只读接口采集数据，适合单机或小规模 New API 环境。
 
 ## 核心能力
@@ -10,7 +14,7 @@
 - 最近 5 次中 3 次或最近 10 次中 5 次超过慢请求阈值时告警；单次超过严重阈值立即告警。
 - 宿主机 CPU、内存、磁盘以及 Docker 容器资源、状态、重启和 OOM 监控。
 - 渠道、日志、资源和渠道同步采集器的新鲜度自检，防止“监控页面还活着但数据已经停止更新”。
-- SMTP 异常、恢复和周期报告；事件在数据库中分别保留触发原因与恢复依据，并可搜索、筛选和审计。
+- 邮件、企业微信自建应用、企业微信群机器人、飞书自建应用和飞书群机器人多渠道通知；单个渠道故障不阻断其他渠道，支持页面配置与真实测试。
 - New API Session 单点登录、角色映射、紧急管理员、登录限速和配置审计。
 - 页面动态配置，不写回 New API，不影响 New API 升级。
 - 管理端与普通用户可使用独立的总览渠道清单；隐藏渠道只影响对应角色的展示和状态汇总，不停止探测、日志采集或告警。
@@ -50,7 +54,7 @@ python manage.py init
 - `NEW_API_BASE_URL`
 - `NEW_API_ACCESS_TOKEN`
 - `NEW_API_USER_ID`
-- `SMTP_HOST`、`SMTP_TO` 及对应认证参数
+- 至少一种通知渠道；可先使用 SMTP 环境变量，也可以启动后在“系统配置 → 通知中心”配置企微或飞书
 - `DASHBOARD_ALLOWED_HOSTS`，填写监控页面实际域名
 
 真实探测建议在系统启动后通过“渠道配置”页面启用，不需要手工编写 JSON。
@@ -84,6 +88,19 @@ docker compose ps
 ```
 
 请使用 Nginx、OpenResty、Caddy 或其他 HTTPS 反向代理对外提供 `/monitor/`。
+反向代理必须将 `/monitor/` 下的所有深层路径转发到监控服务，前端支持直接刷新和浏览器前进/后退：
+
+```text
+/monitor/                       总览
+/monitor/logs                   使用日志
+/monitor/resources              机器资源
+/monitor/incidents              事件
+/monitor/channels               渠道配置
+/monitor/system                 系统配置
+/monitor/system/notifications   通知中心
+```
+
+通知中心的每个已配置渠道均可单独点击“触发测试告警”；渠道无需先启用，但未保存的配置必须先保存，避免测试内容与实际生效配置不一致。
 
 ## 健康检查
 
@@ -126,7 +143,7 @@ curl -fsS http://127.0.0.1:18081/api/health
 ## 数据与安全
 
 - 不保存模型提示词和响应正文，只保存监控所需指标与错误摘要。
-- New API 管理 Token、Relay Token 和 SMTP 密码在 SQLite 中使用 `MONITOR_SECRET_KEY` 加密。
+- New API 管理 Token、Relay Token、SMTP 密码、企微/飞书应用 Secret、Webhook 地址和签名密钥在 SQLite 中使用 `MONITOR_SECRET_KEY` 加密。
 - 生产容器以 UID `10001` 非 Root 用户运行，根文件系统只读，移除全部 Linux capabilities。
 - Docker Socket 不直接暴露给监控程序，只通过只读 Socket Proxy 提供必要接口。
 - 状态变更接口使用严格 Pydantic Schema、角色校验和同源请求校验头。
@@ -136,7 +153,7 @@ curl -fsS http://127.0.0.1:18081/api/health
 - Key 查询只调用 New API 的只读 `/api/usage/token/` 与 `/api/log/token` 接口，不持久化原始 Key，也不会修改 New API 数据。
 - 配置变更和角色变更写入审计表，秘密字段始终脱敏。
 
-详细安全边界见 [SECURITY.md](SECURITY.md)。
+详细安全边界见 [SECURITY.md](SECURITY.md)，后续计划见 [ROADMAP.md](ROADMAP.md)。
 
 ## 备份
 
@@ -172,6 +189,7 @@ docker compose up -d
 
 ```bash
 python -m pip install -r requirements.txt
+python manage.py release-check
 python -m unittest discover -s tests -v
 
 cd web

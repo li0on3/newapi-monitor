@@ -1,0 +1,25 @@
+name: Feature request / 功能建议
+description: Propose a focused improvement / 提交有明确使用场景的改进建议
+title: "[Feature] "
+labels: [enhancement]
+body:
+  - type: textarea
+    attributes:
+      label: Problem / 问题
+      description: What operational problem are you trying to solve? / 需要解决什么实际运维问题？
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Proposed outcome / 期望结果
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Alternatives and trade-offs / 替代方案与取舍
+  - type: checkboxes
+    attributes:
+      label: Security / 安全确认
+      options:
+        - label: I removed all credentials, cookies, private domains, IPs, and raw production logs. / 已移除密钥、Cookie、私有域名、IP 和生产日志原文。
+          required: true

@@ -1,5 +1,7 @@
 # Security Policy
 
+[简体中文](SECURITY.md) | [English](SECURITY_EN.md)
+
 ## Supported versions
 
 安全修复只保证合入最新主分支。生产部署应固定到已验证的 Git commit 或 release，不建议长期运行不受控的 `latest` 代码。

@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import secrets
 import shutil
 import sqlite3
@@ -55,7 +56,7 @@ def command_init(args: argparse.Namespace) -> int:
         "env_file": str(target),
         "emergency_admin": values.get("DASHBOARD_ADMIN_USERNAME", "admin"),
         "emergency_password": password,
-        "next": "填写 NEW_API_*、SMTP_* 和 DASHBOARD_ALLOWED_HOSTS 后运行 python manage.py doctor",
+        "next": "填写 NEW_API_*、至少一种通知渠道和 DASHBOARD_ALLOWED_HOSTS 后运行 python manage.py doctor",
     }, ensure_ascii=False, indent=2))
     return 0
 
@@ -73,7 +74,6 @@ def command_doctor(args: argparse.Namespace) -> int:
     required = (
         "NEW_API_BASE_URL", "NEW_API_ACCESS_TOKEN", "NEW_API_USER_ID",
         "DASHBOARD_ADMIN_PASSWORD", "MONITOR_SECRET_KEY", "DASHBOARD_ALLOWED_HOSTS",
-        "SMTP_HOST", "SMTP_TO",
     )
     for key in required:
         value = values.get(key, "")
@@ -94,6 +94,23 @@ def command_doctor(args: argparse.Namespace) -> int:
         problems.append("DASHBOARD_ALLOWED_HOSTS 不应在生产环境使用通配符 *")
     if values.get("SMTP_STARTTLS", "").lower() == "true" and values.get("SMTP_SSL", "").lower() == "true":
         problems.append("SMTP_STARTTLS 与 SMTP_SSL 不能同时启用")
+    notification_enabled = False
+    notification_requirements = {
+        "EMAIL_ENABLED": ("SMTP_HOST", "SMTP_TO"),
+        "WECOM_APP_ENABLED": ("WECOM_CORP_ID", "WECOM_AGENT_ID", "WECOM_APP_SECRET"),
+        "WECOM_WEBHOOK_ENABLED": ("WECOM_WEBHOOK_URL",),
+        "FEISHU_APP_ENABLED": ("FEISHU_APP_ID", "FEISHU_APP_SECRET", "FEISHU_RECEIVE_ID"),
+        "FEISHU_WEBHOOK_ENABLED": ("FEISHU_WEBHOOK_URL",),
+    }
+    for enabled_key, requirements in notification_requirements.items():
+        if values.get(enabled_key, "").lower() != "true":
+            continue
+        notification_enabled = True
+        for key in requirements:
+            if not values.get(key, "") or any(marker in values.get(key, "") for marker in PLACEHOLDER_MARKERS):
+                problems.append(f"{enabled_key} 已启用，但 {key} 未配置或仍为示例值")
+    if not notification_enabled:
+        warnings.append("尚未启用通知渠道；监控会运行，但异常只记录在事件页面")
     if values.get("MONITOR_BIND_ADDRESS", "127.0.0.1") not in {"127.0.0.1", "::1", "localhost"}:
         warnings.append("监控端口不是仅回环监听，请确认外层防火墙和 TLS 反向代理")
     if values.get("DASHBOARD_COOKIE_SECURE", "true").lower() != "true":
@@ -170,6 +187,53 @@ def command_backup(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_release_check(_: argparse.Namespace) -> int:
+    problems: list[str] = []
+    version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
+    if not re.fullmatch(r"\d+\.\d+\.\d+", version):
+        problems.append("VERSION 必须使用 x.y.z 语义化版本")
+    package = json.loads((ROOT / "web" / "package.json").read_text(encoding="utf-8"))
+    if package.get("version") != version:
+        problems.append("VERSION 与 web/package.json 版本不一致")
+
+    required_files = (
+        "README.md", "README_EN.md", "CONTRIBUTING.md", "CONTRIBUTING_EN.md",
+        "SECURITY.md", "SECURITY_EN.md", "ROADMAP.md", "ROADMAP_EN.md",
+        "CHANGELOG.md", "CHANGELOG_EN.md", "LICENSE",
+    )
+    for name in required_files:
+        if not (ROOT / name).is_file():
+            problems.append(f"缺少发布文件：{name}")
+
+    tracked = subprocess.run(
+        ["git", "ls-files", "-z"], cwd=ROOT, capture_output=True, check=False
+    )
+    if tracked.returncode != 0:
+        problems.append("无法读取 Git 跟踪文件")
+        tracked_files: list[str] = []
+    else:
+        tracked_files = [name for name in tracked.stdout.decode("utf-8").split("\0") if name]
+    forbidden_names = {".env", ".env.local", ".env.deploy", ".dashboard_credentials"}
+    forbidden_suffixes = (".db", ".db-wal", ".db-shm", ".pem", ".key", ".tar.gz")
+    for name in tracked_files:
+        path = Path(name)
+        if path.name in forbidden_names or name.endswith(forbidden_suffixes) or "state/" in name.replace("\\", "/"):
+            problems.append(f"禁止提交的文件：{name}")
+            continue
+        try:
+            content = (ROOT / path).read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            if path.suffix.lower() not in {".png", ".jpg", ".jpeg", ".gif", ".ico"}:
+                problems.append(f"非 UTF-8 文本文件：{name}")
+            continue
+        if ("OWNER" + "/REPOSITORY") in content:
+            problems.append(f"尚未替换 GitHub 仓库占位符：{name}")
+
+    report = {"ok": not problems, "version": version, "tracked_files": len(tracked_files), "problems": problems}
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+    return 0 if not problems else 1
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="New API Monitor deployment and maintenance helper")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -187,6 +251,9 @@ def main() -> int:
     backup_parser.add_argument("--database", default="/data/monitor.db")
     backup_parser.add_argument("--output-dir", default=str(ROOT / "backups"))
     backup_parser.set_defaults(handler=command_backup)
+
+    release_parser = subparsers.add_parser("release-check", help="检查公开仓库与发布文件完整性")
+    release_parser.set_defaults(handler=command_release_check)
 
     args = parser.parse_args()
     return int(args.handler(args))

@@ -1,5 +1,7 @@
 # Contributing
 
+[简体中文](CONTRIBUTING.md) | [English](CONTRIBUTING_EN.md)
+
 ## 开发环境
 
 - Python 3.13+
@@ -23,3 +25,4 @@ bun run build
 - 新增接口必须默认鉴权；状态变更接口必须通过请求校验头并使用明确的 Pydantic Schema。
 - 修改前端后必须执行 TypeScript 与生产构建。
 - 修改部署文件后必须执行 `docker compose config --quiet` 和镜像构建。
+- 行为、配置、安全边界或部署步骤变化时，必须同步更新中英文文档。

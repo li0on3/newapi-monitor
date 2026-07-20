@@ -1,22 +1,22 @@
-name: Bug report
-description: 报告可复现的问题，不要提交任何密钥或 Cookie
+name: Bug report / 缺陷报告
+description: Report a reproducible issue without secrets or cookies / 报告可复现问题，不要提交密钥或 Cookie
 title: "[Bug] "
 labels: [bug]
 body:
   - type: textarea
     attributes:
-      label: 问题描述
+      label: Problem / 问题描述
     validations:
       required: true
   - type: textarea
     attributes:
-      label: 复现步骤
+      label: Reproduction / 复现步骤
     validations:
       required: true
   - type: input
     attributes:
-      label: 版本或 commit
+      label: Version or commit / 版本或 commit
   - type: textarea
     attributes:
-      label: 已脱敏日志
-      description: 请删除域名、IP、Token、Cookie、邮箱和请求正文
+      label: Redacted logs / 已脱敏日志
+      description: Remove domains, IPs, tokens, cookies, email addresses, and request bodies. / 请删除域名、IP、Token、Cookie、邮箱和请求正文。
