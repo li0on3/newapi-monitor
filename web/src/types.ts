@@ -33,11 +33,15 @@ export type Channel = {
   };
   source_name?: string;
   display_enabled?: boolean;
+  overview_admin_visible?: boolean;
+  overview_viewer_visible?: boolean;
   monitor_config?: ChannelMonitorConfig;
 };
 
 export type ChannelMonitorConfig = {
   display_enabled?: boolean;
+  overview_admin_visible?: boolean;
+  overview_viewer_visible?: boolean;
   display_name?: string;
   sort_order?: number;
   probe_enabled?: boolean;

@@ -63,7 +63,37 @@ class SettingsStoreTests(unittest.TestCase):
         self.assertEqual("upstream-name", source["name"])
         self.assertEqual("Codex 专线", decorated["name"])
         self.assertFalse(decorated["display_enabled"])
+        self.assertFalse(decorated["overview_admin_visible"])
+        self.assertFalse(decorated["overview_viewer_visible"])
         self.assertEqual("gpt-5.4", decorated["monitor_config"]["probe_model"])
+
+    def test_overview_visibility_is_scoped_by_audience_and_updated_atomically(self):
+        before_version = self.store.version()
+
+        result = self.store.update_channel_visibility(
+            {
+                7: {"overview_admin_visible": True, "overview_viewer_visible": False},
+                8: {"overview_admin_visible": False, "overview_viewer_visible": True},
+            },
+            actor="root",
+            remote_addr="127.0.0.1",
+        )
+
+        channels = [
+            {"channel_id": 7, "name": "admin-only", "enabled": True},
+            {"channel_id": 8, "name": "viewer-only", "enabled": True},
+        ]
+        admin_items = self.store.decorate_channels(channels, audience="admin")
+        viewer_items = self.store.decorate_channels(channels, audience="viewer")
+
+        self.assertEqual([7], [item["channel_id"] for item in admin_items])
+        self.assertEqual([8], [item["channel_id"] for item in viewer_items])
+        self.assertTrue(result[7]["overview_admin_visible"])
+        self.assertFalse(result[7]["overview_viewer_visible"])
+        self.assertEqual(before_version, self.store.version())
+        audit = self.store.audit(limit=10)
+        self.assertEqual(1, len(audit))
+        self.assertEqual("overview.visibility.update", audit[0]["action"])
 
     def test_role_mapping_and_user_override(self):
         self.assertEqual("admin", self.store.resolve_role("alice", 100))

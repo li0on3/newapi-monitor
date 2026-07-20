@@ -193,7 +193,8 @@ class SettingsStore:
         if channel_id <= 0:
             raise ValueError("invalid channel id")
         allowed = {
-            "display_enabled", "display_name", "sort_order", "probe_enabled",
+            "display_enabled", "overview_admin_visible", "overview_viewer_visible",
+            "display_name", "sort_order", "probe_enabled",
             "probe_model", "probe_path", "probe_format", "probe_prompt",
             "max_output_tokens", "alert_enabled", "maintenance_mode",
         }
@@ -202,7 +203,15 @@ class SettingsStore:
             raise ValueError("unknown channel settings: " + ", ".join(sorted(unknown)))
         current = self.channel_settings().get(channel_id, {})
         merged = {**current, **updates}
-        merged["display_enabled"] = bool(merged.get("display_enabled", True))
+        legacy_display = bool(merged.get("display_enabled", True))
+        if "display_enabled" in updates:
+            if "overview_admin_visible" not in updates:
+                merged["overview_admin_visible"] = legacy_display
+            if "overview_viewer_visible" not in updates:
+                merged["overview_viewer_visible"] = legacy_display
+        merged["overview_admin_visible"] = bool(merged.get("overview_admin_visible", legacy_display))
+        merged["overview_viewer_visible"] = bool(merged.get("overview_viewer_visible", legacy_display))
+        merged["display_enabled"] = merged["overview_admin_visible"]
         merged["probe_enabled"] = bool(merged.get("probe_enabled", False))
         merged["alert_enabled"] = bool(merged.get("alert_enabled", True))
         merged["maintenance_mode"] = bool(merged.get("maintenance_mode", False))
@@ -228,20 +237,87 @@ class SettingsStore:
             connection.commit()
         return merged
 
+    def update_channel_visibility(
+        self,
+        updates: dict[int, dict[str, bool]],
+        actor: str,
+        remote_addr: str = "",
+    ) -> dict[int, dict[str, Any]]:
+        if not updates:
+            return {}
+        current_settings = self.channel_settings()
+        before: dict[str, dict[str, bool]] = {}
+        after: dict[str, dict[str, bool]] = {}
+        merged_settings: dict[int, dict[str, Any]] = {}
+        for channel_id, visibility in updates.items():
+            if channel_id <= 0:
+                raise ValueError("invalid channel id")
+            current = current_settings.get(channel_id, {})
+            legacy_display = bool(current.get("display_enabled", True))
+            admin_visible = bool(visibility["overview_admin_visible"])
+            viewer_visible = bool(visibility["overview_viewer_visible"])
+            before[str(channel_id)] = {
+                "overview_admin_visible": bool(current.get("overview_admin_visible", legacy_display)),
+                "overview_viewer_visible": bool(current.get("overview_viewer_visible", legacy_display)),
+            }
+            after[str(channel_id)] = {
+                "overview_admin_visible": admin_visible,
+                "overview_viewer_visible": viewer_visible,
+            }
+            merged_settings[channel_id] = {
+                **current,
+                "display_enabled": admin_visible,
+                "overview_admin_visible": admin_visible,
+                "overview_viewer_visible": viewer_visible,
+            }
+
+        now = int(time.time())
+        with self._connect() as connection:
+            for channel_id, config in merged_settings.items():
+                connection.execute(
+                    """
+                    INSERT INTO monitor_channel_settings(channel_id, config_json, updated_at, updated_by)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(channel_id) DO UPDATE SET
+                        config_json = excluded.config_json,
+                        updated_at = excluded.updated_at,
+                        updated_by = excluded.updated_by
+                    """,
+                    (channel_id, json.dumps(config, ensure_ascii=False), now, actor),
+                )
+            self._audit(
+                connection,
+                now,
+                actor,
+                "overview.visibility.update",
+                "channels",
+                before,
+                after,
+                remote_addr,
+            )
+            connection.commit()
+        return merged_settings
+
     def decorate_channels(
         self,
         channels: list[dict[str, Any]],
         include_hidden: bool = False,
+        audience: str = "admin",
     ) -> list[dict[str, Any]]:
         settings = self.channel_settings()
         result = []
         for source in channels:
             item = dict(source)
             config = settings.get(int(item["channel_id"]), {})
-            display_enabled = bool(config.get("display_enabled", True))
+            legacy_display = bool(config.get("display_enabled", True))
+            admin_visible = bool(config.get("overview_admin_visible", legacy_display))
+            viewer_visible = bool(config.get("overview_viewer_visible", legacy_display))
+            display_enabled = viewer_visible if audience == "viewer" else admin_visible
             item["source_name"] = item.get("name", "")
             item["name"] = str(config.get("display_name") or item.get("name") or "")
             item["display_enabled"] = display_enabled
+            item["overview_admin_visible"] = admin_visible
+            item["overview_viewer_visible"] = viewer_visible
             item["monitor_config"] = config
             if include_hidden or (bool(item.get("enabled")) and display_enabled):
                 result.append(item)

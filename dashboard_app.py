@@ -97,6 +97,8 @@ class ChannelSettingsPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     display_enabled: bool | None = None
+    overview_admin_visible: bool | None = None
+    overview_viewer_visible: bool | None = None
     display_name: str | None = Field(None, max_length=128)
     sort_order: int | None = Field(None, ge=-100000, le=100000)
     probe_enabled: bool | None = None
@@ -116,6 +118,20 @@ class ChannelSettingsPayload(BaseModel):
         if not value.startswith("/") or value.startswith("//") or "://" in value:
             raise ValueError("probe_path must be a relative API path")
         return value
+
+
+class ChannelVisibilityItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    channel_id: int = Field(ge=1)
+    overview_admin_visible: bool
+    overview_viewer_visible: bool
+
+
+class ChannelVisibilityPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[ChannelVisibilityItem] = Field(min_length=1, max_length=1000)
 
 
 class AccessRolePayload(BaseModel):
@@ -528,29 +544,39 @@ def me(user: AuthenticatedUser) -> dict[str, Any]:
 
 
 @app.get("/api/dashboard/summary")
-def dashboard_summary(_: AuthenticatedUser) -> dict[str, Any]:
+def dashboard_summary(user: AuthenticatedUser) -> dict[str, Any]:
     if runtime.settings is None:
         return repository().summary()
-    visible = runtime.settings.decorate_channels(repository().channels(), include_hidden=False)
+    audience = "viewer" if user["role"] == "viewer" else "admin"
+    visible = runtime.settings.decorate_channels(
+        repository().channels(),
+        include_hidden=False,
+        audience=audience,
+    )
     visible_channel_ids = {int(item["channel_id"]) for item in visible}
     return repository().summary(channel_ids=visible_channel_ids)
 
 
 @app.get("/api/channels")
-def channels(_: AuthenticatedUser) -> dict[str, Any]:
+def channels(user: AuthenticatedUser) -> dict[str, Any]:
     items = repository().channels()
     if runtime.settings is not None:
-        items = runtime.settings.decorate_channels(items)
+        audience = "viewer" if user["role"] == "viewer" else "admin"
+        items = runtime.settings.decorate_channels(items, audience=audience)
     return {"items": items}
 
 
 @app.get("/api/channels/{channel_id}")
-def channel(channel_id: int, _: AuthenticatedUser) -> dict[str, Any]:
+def channel(channel_id: int, user: AuthenticatedUser) -> dict[str, Any]:
     item = repository().channel(channel_id)
     if item is None:
         raise HTTPException(status_code=404, detail="channel not found")
-    if runtime.settings is not None and not runtime.settings.decorate_channels([item], include_hidden=False):
-        raise HTTPException(status_code=404, detail="channel not found")
+    if runtime.settings is not None:
+        audience = "viewer" if user["role"] == "viewer" else "admin"
+        visible = runtime.settings.decorate_channels([item], include_hidden=False, audience=audience)
+        if not visible:
+            raise HTTPException(status_code=404, detail="channel not found")
+        item = visible[0]
     return item
 
 
@@ -658,6 +684,34 @@ def get_channel_settings(_: OperatorUser) -> dict[str, Any]:
     return {"items": runtime.settings.decorate_channels(repository().channels(), include_hidden=True)}
 
 
+@app.put("/api/channel-settings/visibility")
+def update_channel_visibility(
+    payload: ChannelVisibilityPayload,
+    request: Request,
+    user: AdminUser,
+) -> dict[str, Any]:
+    if runtime.settings is None:
+        raise HTTPException(status_code=503, detail="settings are unavailable")
+    updates = {
+        item.channel_id: {
+            "overview_admin_visible": item.overview_admin_visible,
+            "overview_viewer_visible": item.overview_viewer_visible,
+        }
+        for item in payload.items
+    }
+    if len(updates) != len(payload.items):
+        raise HTTPException(status_code=400, detail="duplicate channel id")
+    try:
+        configs = runtime.settings.update_channel_visibility(
+            updates,
+            user["username"],
+            runtime.remote_addr(request),
+        )
+    except (KeyError, TypeError, ValueError) as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    return {"updated": len(configs), "version": runtime.settings.version()}
+
+
 @app.put("/api/channel-settings/{channel_id}")
 def update_channel_settings(
     channel_id: int,
@@ -667,10 +721,15 @@ def update_channel_settings(
 ) -> dict[str, Any]:
     if runtime.settings is None:
         raise HTTPException(status_code=503, detail="settings are unavailable")
+    updates = payload.model_dump(exclude_unset=True)
+    if user["role"] != "admin" and {
+        "display_enabled", "overview_admin_visible", "overview_viewer_visible"
+    }.intersection(updates):
+        raise HTTPException(status_code=403, detail="administrator permission required for overview visibility")
     try:
         config = runtime.settings.update_channel(
             channel_id,
-            payload.model_dump(exclude_unset=True),
+            updates,
             user["username"],
             runtime.remote_addr(request),
         )

@@ -147,7 +147,7 @@ function Login({ onSuccess }: { onSuccess: (username: string) => void }) {
 }
 
 function Toggle({ checked, onChange, label }: { checked: boolean; onChange: (checked: boolean) => void; label: string }) {
-  return <label className="toggle-row"><span>{label}</span><button type="button" className={classNames('switch', checked && 'switch-on')} role="switch" aria-checked={checked} onClick={() => onChange(!checked)}><i /></button></label>;
+  return <label className="toggle-row"><span>{label}</span><button type="button" className={classNames('switch', checked && 'switch-on')} role="switch" aria-label={label} aria-checked={checked} onClick={() => onChange(!checked)}><i /></button></label>;
 }
 
 function ChannelSettingsView() {
@@ -180,13 +180,14 @@ function ChannelSettingsView() {
   useEffect(() => { void load(); }, [load]);
   const edit = (channelId: number, key: keyof ChannelMonitorConfig, value: string | number | boolean) => {
     setItems((current) => current.map((item) => item.channel_id === channelId
-      ? { ...item, monitor_config: { ...item.monitor_config, [key]: value, ...(key === 'probe_format' ? { probe_path: value === 'anthropic' ? '/v1/messages' : value === 'chat' ? '/v1/chat/completions' : '/v1/responses' } : {}) }, display_enabled: key === 'display_enabled' ? Boolean(value) : item.display_enabled, name: key === 'display_name' ? String(value || item.source_name || item.name) : item.name }
+      ? { ...item, monitor_config: { ...item.monitor_config, [key]: value, ...(key === 'probe_format' ? { probe_path: value === 'anthropic' ? '/v1/messages' : value === 'chat' ? '/v1/chat/completions' : '/v1/responses' } : {}) }, name: key === 'display_name' ? String(value || item.source_name || item.name) : item.name }
       : item));
   };
   const save = async (channel: Channel) => {
     setSaving(channel.channel_id);
     try {
-      await api(`channel-settings/${channel.channel_id}`, { method: 'PUT', body: JSON.stringify(channel.monitor_config || {}) });
+      const { display_enabled: _legacyVisibility, overview_admin_visible: _adminVisibility, overview_viewer_visible: _viewerVisibility, ...config } = channel.monitor_config || {};
+      await api(`channel-settings/${channel.channel_id}`, { method: 'PUT', body: JSON.stringify(config) });
       await load();
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : '渠道配置保存失败');
@@ -208,7 +209,8 @@ function ChannelSettingsView() {
           <label className="config-wide"><span>探测路径</span><input value={config.probe_path ?? ''} placeholder="自动选择协议默认路径" onChange={(event) => edit(channel.channel_id, 'probe_path', event.target.value)} /></label>
           <label className="config-wide"><span>探测提示词</span><input value={config.probe_prompt ?? ''} placeholder="1（建议使用最小探测内容）" onChange={(event) => edit(channel.channel_id, 'probe_prompt', event.target.value)} /></label>
         </div>
-        <div className="config-toggle-grid"><Toggle checked={config.display_enabled ?? true} onChange={(value) => edit(channel.channel_id, 'display_enabled', value)} label="监控页展示" /><Toggle checked={config.probe_enabled ?? false} onChange={(value) => edit(channel.channel_id, 'probe_enabled', value)} label="使用真实请求探测" /><Toggle checked={config.alert_enabled ?? true} onChange={(value) => edit(channel.channel_id, 'alert_enabled', value)} label="渠道告警" /><Toggle checked={config.maintenance_mode ?? false} onChange={(value) => edit(channel.channel_id, 'maintenance_mode', value)} label="维护模式" /></div>
+        <div className="config-visibility-note"><Eye size={15} /><span>总览展示范围由管理员在“系统配置 → 总览展示”中统一管理。</span></div>
+        <div className="config-toggle-grid"><Toggle checked={config.probe_enabled ?? false} onChange={(value) => edit(channel.channel_id, 'probe_enabled', value)} label="使用真实请求探测" /><Toggle checked={config.alert_enabled ?? true} onChange={(value) => edit(channel.channel_id, 'alert_enabled', value)} label="渠道告警" /><Toggle checked={config.maintenance_mode ?? false} onChange={(value) => edit(channel.channel_id, 'maintenance_mode', value)} label="维护模式" /></div>
         <button className="primary-button compact-button" disabled={saving === channel.channel_id} onClick={() => void save(channel)}>{saving === channel.channel_id ? <RefreshCw className="spin" size={15} /> : <Save size={15} />}保存渠道配置</button>
       </article>;
     })}</div>
@@ -217,7 +219,7 @@ function ChannelSettingsView() {
 
 type SettingField = { key: string; label: string; type?: 'number' | 'text' | 'password' | 'boolean' | 'select'; options?: Array<[string, string]>; hint?: string };
 type SettingSectionId = 'connection' | 'collection' | 'thresholds' | 'mail' | 'advanced';
-type SettingsPageId = SettingSectionId | 'status' | 'access' | 'audit';
+type SettingsPageId = SettingSectionId | 'status' | 'overview' | 'access' | 'audit';
 const SETTING_SECTIONS: Array<{ id: SettingSectionId; title: string; short: string; description: string; icon: ReactNode; fields: SettingField[] }> = [
   { id: 'connection', title: 'New API 连接', short: '连接与凭据', icon: <Network size={18} />, description: '管理接口只读同步与真实探测凭据。敏感字段不会回显。', fields: [
     { key: 'new_api_base_url', label: 'New API 地址' }, { key: 'new_api_user_id', label: '管理用户 ID', type: 'number' }, { key: 'new_api_access_token', label: '管理访问令牌', type: 'password', hint: '留空保持原值' }, { key: 'relay_api_token', label: '真实探测令牌', type: 'password', hint: '留空保持原值' },
@@ -242,14 +244,26 @@ function SettingsView() {
   const [audit, setAudit] = useState<Array<Record<string, unknown>>>([]);
   const [users, setUsers] = useState<Array<{ username: string; role: string }>>([]);
   const [systemStatus, setSystemStatus] = useState<SystemHealth | null>(null);
+  const [overviewChannels, setOverviewChannels] = useState<Channel[]>([]);
+  const [overviewBaseline, setOverviewBaseline] = useState('[]');
   const [activePage, setActivePage] = useState<SettingsPageId>('status');
   const [newUser, setNewUser] = useState('');
   const [newRole, setNewRole] = useState('viewer');
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState('');
   const load = useCallback(async () => {
-    const [settingsPayload, auditPayload, usersPayload, statusPayload] = await Promise.all([api<{ values: Record<string, unknown> }>('settings'), api<{ items: Array<Record<string, unknown>> }>('config-audit?limit=30'), api<{ items: Array<{ username: string; role: string }> }>('access/users'), api<SystemHealth>('system/status')]);
+    const [settingsPayload, auditPayload, usersPayload, statusPayload, channelPayload] = await Promise.all([api<{ values: Record<string, unknown> }>('settings'), api<{ items: Array<Record<string, unknown>> }>('config-audit?limit=30'), api<{ items: Array<{ username: string; role: string }> }>('access/users'), api<SystemHealth>('system/status'), api<{ items: Channel[] }>('channel-settings')]);
     setValues(settingsPayload.values); setBaseline(settingsPayload.values); setAudit(auditPayload.items); setUsers(usersPayload.items); setSystemStatus(statusPayload);
+    const normalizedChannels = channelPayload.items.map((channel) => {
+      const legacyVisible = channel.monitor_config?.display_enabled ?? true;
+      return {
+        ...channel,
+        overview_admin_visible: channel.overview_admin_visible ?? channel.monitor_config?.overview_admin_visible ?? legacyVisible,
+        overview_viewer_visible: channel.overview_viewer_visible ?? channel.monitor_config?.overview_viewer_visible ?? legacyVisible,
+      };
+    });
+    setOverviewChannels(normalizedChannels);
+    setOverviewBaseline(JSON.stringify(normalizedChannels.map((channel) => [channel.channel_id, channel.overview_admin_visible, channel.overview_viewer_visible])));
   }, []);
   useEffect(() => { void load().catch((error) => setMessage(error instanceof Error ? error.message : '配置加载失败')); }, [load]);
   const setValue = (key: string, value: unknown) => setValues((current) => ({ ...current, [key]: value }));
@@ -262,21 +276,48 @@ function SettingsView() {
     finally { setSaving(false); }
   };
   const addUser = async () => { if (!newUser.trim()) return; await api(`access/users/${encodeURIComponent(newUser.trim())}`, { method: 'PUT', body: JSON.stringify({ role: newRole }) }); setNewUser(''); await load(); };
+  const setOverviewVisibility = (channelId: number, audience: 'admin' | 'viewer', visible: boolean) => setOverviewChannels((current) => current.map((channel) => channel.channel_id === channelId ? { ...channel, [audience === 'admin' ? 'overview_admin_visible' : 'overview_viewer_visible']: visible } : channel));
+  const setAllOverviewVisibility = (audience: 'admin' | 'viewer', visible: boolean) => setOverviewChannels((current) => current.map((channel) => ({ ...channel, [audience === 'admin' ? 'overview_admin_visible' : 'overview_viewer_visible']: visible })));
+  const saveOverviewVisibility = async () => {
+    setSaving(true); setMessage('');
+    try {
+      await api('channel-settings/visibility', { method: 'PUT', body: JSON.stringify({ items: overviewChannels.map((channel) => ({ channel_id: channel.channel_id, overview_admin_visible: channel.overview_admin_visible ?? true, overview_viewer_visible: channel.overview_viewer_visible ?? true })) }) });
+      setMessage('总览展示范围已保存，对应用户下次刷新时立即生效');
+      await load();
+    } catch (error) { setMessage(error instanceof Error ? error.message : '总览展示配置保存失败'); }
+    finally { setSaving(false); }
+  };
   const activeSection = SETTING_SECTIONS.find((section) => section.id === activePage);
   const dirty = JSON.stringify(values) !== JSON.stringify(baseline);
+  const overviewDirty = JSON.stringify(overviewChannels.map((channel) => [channel.channel_id, channel.overview_admin_visible, channel.overview_viewer_visible])) !== overviewBaseline;
   const pages: Array<{ id: SettingsPageId; title: string; description: string; icon: ReactNode; count?: number }> = [
     { id: 'status', title: '运行状态', description: '采集链路自检', icon: <ShieldCheck size={18} />, count: systemStatus ? Object.keys(systemStatus.collectors).length : 0 },
+    { id: 'overview', title: '总览展示', description: '按角色控制渠道', icon: <Eye size={18} />, count: overviewChannels.filter((channel) => channel.enabled).length },
     ...SETTING_SECTIONS.map((section) => ({ id: section.id, title: section.title, description: section.short, icon: section.icon, count: section.fields.length })),
     { id: 'access', title: '角色映射', description: '访问与权限', icon: <UserCog size={18} />, count: users.length },
     { id: 'audit', title: '配置审计', description: '最近变更记录', icon: <Clock3 size={18} />, count: audit.length },
   ];
   return <section>
-    <div className="section-heading settings-heading"><div><span className="eyebrow">RUNTIME CONTROL CENTER</span><h2>系统配置</h2><p>按任务分区管理，只展示当前配置组；配置保存在监控数据库中，不写入 New API。</p></div><div className={classNames('settings-dirty-state', dirty && 'settings-dirty')}><i />{dirty ? '有未保存更改' : '配置已同步'}</div></div>
+    <div className="section-heading settings-heading"><div><span className="eyebrow">RUNTIME CONTROL CENTER</span><h2>系统配置</h2><p>按任务分区管理，只展示当前配置组；配置保存在监控数据库中，不写入 New API。</p></div><div className={classNames('settings-dirty-state', (dirty || overviewDirty) && 'settings-dirty')}><i />{dirty || overviewDirty ? '有未保存更改' : '配置已同步'}</div></div>
     {message && <div className="config-message">{message}</div>}
     <div className="settings-workspace">
       <aside className="settings-nav" aria-label="系统配置分类">{pages.map((page) => <button type="button" className={classNames(activePage === page.id && 'active')} key={page.id} onClick={() => setActivePage(page.id)}><span className="settings-nav-icon">{page.icon}</span><span><strong>{page.title}</strong><small>{page.description}</small></span>{page.count != null && <b>{page.count}</b>}<ChevronRight size={15} /></button>)}</aside>
       <div className="settings-stage">
         {activePage === 'status' && <article className="settings-card settings-focus-card"><div className="settings-card-head settings-focus-head"><div className="settings-section-mark"><ShieldCheck size={18} /></div><div><span className="eyebrow">SELF MONITORING</span><h3>采集链路状态</h3><p>监控程序同时检查自身是否仍在持续产生新数据，避免“页面正常但采集已经停止”。</p></div><StatusPill tone={systemStatus?.status === 'ok' ? 'ok' : 'bad'}>{systemStatus?.status === 'ok' ? '全部正常' : '存在降级'}</StatusPill></div><div className="collector-health-grid"><div className="collector-health-card"><span>数据库</span><strong>{systemStatus?.database === 'ok' ? '正常' : '异常'}</strong><small>{systemStatus?.database_error || 'SQLite 可读写'}</small></div><div className="collector-health-card"><span>监控进程</span><strong>{systemStatus?.monitor_worker === 'running' ? '运行中' : systemStatus?.monitor_worker || '未知'}</strong><small>{systemStatus?.monitor_error || '工作线程持续运行'}</small></div>{Object.entries(systemStatus?.collectors || {}).map(([name, collector]) => { const labels: Record<string, string> = { channel_sync: '渠道同步', channel_probe: '渠道探测', logs: '使用日志', resources: '机器资源' }; return <div className={classNames('collector-health-card', collector.status === 'stale' && 'collector-health-stale')} key={name}><span>{labels[name] || name}</span><strong>{collector.status === 'ok' ? '正常' : collector.status === 'starting' ? '启动中' : '数据过期'}</strong><small>最后成功 {collector.age_seconds}s 前 · 阈值 {collector.stale_after_seconds}s</small>{collector.consecutive_failures > 0 && <em>连续失败 {collector.consecutive_failures} 次</em>}{collector.last_error && <code title={collector.last_error}>{collector.last_error}</code>}</div>; })}</div><div className="settings-action-bar"><div><strong>最后检查 {systemStatus ? formatFullTime(systemStatus.timestamp) : '—'}</strong><small>数据超过动态失效阈值后，健康检查变为 503，并生成异常与恢复事件。</small></div><button className="secondary-button" onClick={() => void load()}><RefreshCw size={16} />立即刷新</button></div></article>}
+        {activePage === 'overview' && <article className="settings-card settings-focus-card overview-settings-card">
+          <div className="settings-card-head settings-focus-head"><div className="settings-section-mark"><Eye size={18} /></div><div><span className="eyebrow">ROLE-BASED OVERVIEW</span><h3>总览渠道展示</h3><p>管理端与普通用户使用独立渠道清单；总览状态、渠道卡片和异常判断都按当前登录角色计算。</p></div><span className="settings-field-count">{overviewChannels.length} 个渠道</span></div>
+          <div className="overview-audience-summary">
+            <div><span className="overview-audience-icon admin"><ShieldCheck size={18} /></span><div><strong>管理端</strong><small>管理员与运维员可见</small></div><b>{overviewChannels.filter((channel) => channel.enabled && channel.overview_admin_visible).length}</b></div>
+            <div><span className="overview-audience-icon viewer"><Eye size={18} /></span><div><strong>普通用户</strong><small>只读总览用户可见</small></div><b>{overviewChannels.filter((channel) => channel.enabled && channel.overview_viewer_visible).length}</b></div>
+            <p><AlertTriangle size={15} />隐藏仅影响对应角色的总览展示和状态汇总，不会停止渠道探测、日志采集或告警。</p>
+          </div>
+          <div className="overview-visibility-toolbar"><div><strong>批量设置</strong><small>先批量调整，再对个别渠道微调。</small></div><div><button onClick={() => setAllOverviewVisibility('admin', true)}>管理端全开</button><button onClick={() => setAllOverviewVisibility('admin', false)}>管理端全关</button><button onClick={() => setAllOverviewVisibility('viewer', true)}>普通用户全开</button><button onClick={() => setAllOverviewVisibility('viewer', false)}>普通用户全关</button><button onClick={() => setOverviewChannels((current) => current.map((channel) => ({ ...channel, overview_viewer_visible: channel.overview_admin_visible })))}>普通用户跟随管理端</button></div></div>
+          <div className="overview-visibility-table">
+            <div className="overview-visibility-head"><span>渠道</span><span>New API</span><span>管理端总览</span><span>普通用户总览</span></div>
+            {overviewChannels.map((channel) => <div className={classNames('overview-visibility-row', !channel.enabled && 'disabled')} key={channel.channel_id}><div><span className="provider-mark compact">{channel.name.slice(0, 2).toUpperCase()}</span><span><strong>{channel.name}</strong><small>#{channel.channel_id} · {channel.group || 'default'}</small></span></div><StatusPill tone={channel.enabled ? 'ok' : 'muted'}>{channel.enabled ? '已启用' : '已禁用'}</StatusPill><Toggle checked={channel.overview_admin_visible ?? true} onChange={(visible) => setOverviewVisibility(channel.channel_id, 'admin', visible)} label="管理端" /><Toggle checked={channel.overview_viewer_visible ?? true} onChange={(visible) => setOverviewVisibility(channel.channel_id, 'viewer', visible)} label="普通用户" /></div>)}
+          </div>
+          <div className="settings-action-bar"><div><strong>{overviewDirty ? '展示范围尚未应用' : '角色展示范围已生效'}</strong><small>保存后无需重启，管理员和普通用户刷新总览即可看到各自渠道。</small></div><button className="secondary-button" disabled={!overviewDirty || saving} onClick={() => void load()}>撤销更改</button><button className="primary-button settings-save" disabled={!overviewDirty || saving || !overviewChannels.length} onClick={() => void saveOverviewVisibility()}>{saving ? <RefreshCw className="spin" size={16} /> : <Save size={16} />}保存展示范围</button></div>
+        </article>}
         {activeSection && <article className="settings-card settings-focus-card"><div className="settings-card-head settings-focus-head"><div className="settings-section-mark">{activeSection.icon}</div><div><span className="eyebrow">CONFIGURATION GROUP</span><h3>{activeSection.title}</h3><p>{activeSection.description}</p></div><span className="settings-field-count">{activeSection.fields.length} 项</span></div><div className="settings-fields">{activeSection.fields.map((field) => field.type === 'boolean' ? <Toggle key={field.key} label={field.label} checked={Boolean(values[field.key])} onChange={(value) => setValue(field.key, value)} /> : <label key={field.key}><span>{field.label}</span><input type={field.type === 'password' ? 'password' : field.type === 'number' ? 'number' : 'text'} value={String(values[field.key] ?? '')} placeholder={field.hint} onChange={(event) => setValue(field.key, field.type === 'number' ? Number(event.target.value) : event.target.value)} /><small>{field.hint}</small></label>)}</div><div className="settings-action-bar"><div><strong>{dirty ? '更改尚未应用' : '当前配置已生效'}</strong><small>{dirty ? '保存后采集器将在数秒内热加载，无需重启。' : '你可以切换左侧分类继续检查其他配置。'}</small></div><button className="secondary-button" disabled={!dirty || saving} onClick={() => { setValues(baseline); setMessage('已撤销本次未保存更改'); }}>撤销更改</button><button className="primary-button settings-save" disabled={!dirty || saving} onClick={() => void save()}>{saving ? <RefreshCw className="spin" size={16} /> : <Save size={16} />}保存并应用</button></div></article>}
         {activePage === 'access' && <article className="settings-card settings-focus-card"><div className="settings-card-head settings-focus-head"><div className="settings-section-mark"><UserCog size={18} /></div><div><span className="eyebrow">ACCESS CONTROL</span><h3>角色映射</h3><p>普通 New API 用户默认只能查看总览，Admin 自动为运维员，Root 自动为管理员；这里可以对指定用户覆盖。</p></div></div><div className="user-add user-add-wide"><input placeholder="New API 用户名" value={newUser} onChange={(event) => setNewUser(event.target.value)} /><select value={newRole} onChange={(event) => setNewRole(event.target.value)}><option value="viewer">只读总览</option><option value="operator">运维</option><option value="admin">管理员</option></select><button onClick={() => void addUser()}><UserCog size={15} />添加映射</button></div><div className="role-list">{users.map((user) => <div key={user.username}><strong>{user.username}</strong><span>{user.role}</span><button onClick={async () => { await api(`access/users/${encodeURIComponent(user.username)}`, { method: 'PUT', body: JSON.stringify({ role: null }) }); await load(); }}><X size={14} /></button></div>)}{!users.length && <p>暂无用户覆盖规则</p>}</div></article>}
         {activePage === 'audit' && <article className="settings-card settings-focus-card"><div className="settings-card-head settings-focus-head"><div className="settings-section-mark"><Clock3 size={18} /></div><div><span className="eyebrow">CHANGE HISTORY</span><h3>配置审计</h3><p>最近30次系统、渠道和权限变更，便于快速定位误操作。</p></div><span className="settings-field-count">{audit.length} 条</span></div><div className="audit-list audit-list-wide">{audit.map((entry) => <div key={String(entry.id)}><span>{formatFullTime(Number(entry.created_at))}</span><strong>{String(entry.actor)}</strong><small>{String(entry.action)} · {String(entry.target)}</small></div>)}</div></article>}
