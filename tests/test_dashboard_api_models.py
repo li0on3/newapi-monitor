@@ -6,6 +6,7 @@ from pydantic import ValidationError
 from dashboard_app import (
     ChannelSettingsPayload,
     KeyUsageQueryPayload,
+    NotificationTestPayload,
     SettingsUpdatePayload,
     require_admin,
     require_operator,
@@ -40,6 +41,34 @@ class DashboardApiModelTests(unittest.TestCase):
             KeyUsageQueryPayload.model_validate({"api_key": "bad key"})
         with self.assertRaises(ValidationError):
             KeyUsageQueryPayload.model_validate({"api_key": "sk-" + "x" * 600})
+
+    def test_notification_settings_validate_official_webhook_hosts(self):
+        settings = SettingsUpdatePayload.model_validate(
+            {
+                "wecom_app_enabled": True,
+                "wecom_corp_id": "ww-test",
+                "wecom_agent_id": 1000004,
+                "wecom_webhook_url": "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=test",
+                "feishu_receive_id_type": "chat_id",
+                "feishu_webhook_url": "https://open.feishu.cn/open-apis/bot/v2/hook/test",
+            }
+        )
+        self.assertTrue(settings.wecom_app_enabled)
+        self.assertEqual("chat_id", settings.feishu_receive_id_type)
+
+        with self.assertRaises(ValidationError):
+            SettingsUpdatePayload.model_validate(
+                {"wecom_webhook_url": "https://internal.example/webhook"}
+            )
+        with self.assertRaises(ValidationError):
+            SettingsUpdatePayload.model_validate(
+                {"feishu_webhook_url": "http://open.feishu.cn/open-apis/bot/v2/hook/test"}
+            )
+
+        payload = NotificationTestPayload.model_validate({"channel": "wecom_app"})
+        self.assertEqual("wecom_app", payload.channel)
+        with self.assertRaises(ValidationError):
+            NotificationTestPayload.model_validate({"channel": "unknown"})
 
     def test_viewer_cannot_use_privileged_dependencies(self):
         viewer = {"username": "viewer", "role": "viewer"}

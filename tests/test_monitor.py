@@ -2,6 +2,9 @@ import time
 import sqlite3
 import tempfile
 import unittest
+import base64
+import hashlib
+import hmac
 from pathlib import Path
 from unittest import mock
 
@@ -13,12 +16,16 @@ from newapi_monitor import (
     CollectorFreshnessTracker,
     Config,
     LatencyStateTracker,
+    FeishuWebhookNotifier,
     NewAPIClient,
+    NotificationDispatcher,
     RealProbeRule,
     RelayProbeClient,
     ResourceStateTracker,
     ServiceStateTracker,
     StateStore,
+    WeComAppNotifier,
+    WeComWebhookNotifier,
     build_auth_headers,
     evaluate_latency_window,
     is_channel_test_log,
@@ -457,6 +464,111 @@ class ConfigTests(unittest.TestCase):
         config = Config.from_values({"channel_settings": {"7": {"maintenance_mode": True}}})
 
         self.assertTrue(config.channel_settings[7]["maintenance_mode"])
+
+    def test_notification_configuration_does_not_require_smtp(self):
+        config = Config.from_values(
+            {
+                "new_api_access_token": "admin-token",
+                "new_api_user_id": 1,
+                "email_enabled": False,
+                "wecom_app_enabled": True,
+                "wecom_corp_id": "ww-test",
+                "wecom_agent_id": 1000004,
+                "wecom_app_secret": "secret",
+                "wecom_to_user": "@all",
+            }
+        )
+
+        config.validate()
+        self.assertTrue(config.wecom_app_enabled)
+        self.assertFalse(config.email_enabled)
+
+
+class NotificationTests(unittest.TestCase):
+    def test_wecom_application_fetches_token_and_sends_text_message(self):
+        notifier = WeComAppNotifier("ww-test", 1000004, "app-secret", "@all", "", "")
+
+        with mock.patch(
+            "newapi_monitor.request_json",
+            side_effect=[
+                {"errcode": 0, "access_token": "tenant-token", "expires_in": 7200},
+                {"errcode": 0, "errmsg": "ok"},
+            ],
+        ) as request_json:
+            notifier.send("渠道异常", "上游返回 502")
+
+        token_call, message_call = request_json.call_args_list
+        self.assertIn("/cgi-bin/gettoken?", token_call.args[0])
+        self.assertNotIn("app-secret", message_call.args[0])
+        self.assertEqual("@all", message_call.args[1]["touser"])
+        self.assertEqual(1000004, message_call.args[1]["agentid"])
+        self.assertIn("渠道异常", message_call.args[1]["text"]["content"])
+
+    def test_wecom_webhook_uses_fixed_text_payload(self):
+        notifier = WeComWebhookNotifier(
+            "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=test-key"
+        )
+
+        with mock.patch(
+            "newapi_monitor.request_json",
+            return_value={"errcode": 0, "errmsg": "ok"},
+        ) as request_json:
+            notifier.send("资源告警", "内存超过 85%")
+
+        payload = request_json.call_args.args[1]
+        self.assertEqual("text", payload["msgtype"])
+        self.assertIn("内存超过 85%", payload["text"]["content"])
+
+    def test_feishu_webhook_adds_documented_signature(self):
+        notifier = FeishuWebhookNotifier(
+            "https://open.feishu.cn/open-apis/bot/v2/hook/test-hook",
+            "sign-secret",
+        )
+        expected = base64.b64encode(
+            hmac.new(b"1700000000\nsign-secret", digestmod=hashlib.sha256).digest()
+        ).decode("ascii")
+
+        with mock.patch("newapi_monitor.time.time", return_value=1700000000), mock.patch(
+            "newapi_monitor.request_json",
+            return_value={"code": 0, "msg": "success"},
+        ) as request_json:
+            notifier.send("恢复通知", "渠道已经恢复")
+
+        payload = request_json.call_args.args[1]
+        self.assertEqual("1700000000", payload["timestamp"])
+        self.assertEqual(expected, payload["sign"])
+        self.assertEqual("text", payload["msg_type"])
+
+    def test_dispatcher_keeps_successful_delivery_when_an_optional_channel_fails(self):
+        successful = mock.Mock(name="wecom_app")
+        successful.name = "wecom_app"
+        failed = mock.Mock(name="email")
+        failed.name = "email"
+        failed.send.side_effect = RuntimeError("smtp unavailable")
+        dispatcher = NotificationDispatcher.__new__(NotificationDispatcher)
+        dispatcher.senders = [successful, failed]
+
+        result = dispatcher.send("测试通知", "正文")
+
+        self.assertEqual(["wecom_app"], result["succeeded"])
+        self.assertEqual(["email"], result["failed"])
+        successful.send.assert_called_once_with("测试通知", "正文")
+
+    def test_dispatcher_can_test_a_configured_but_disabled_channel(self):
+        config = Config.from_values(
+            {
+                "email_enabled": False,
+                "wecom_webhook_enabled": False,
+                "wecom_webhook_url": "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=test-key",
+            }
+        )
+
+        with mock.patch.object(WeComWebhookNotifier, "send") as send:
+            dispatcher = NotificationDispatcher(config, test_channel="wecom_webhook")
+            result = dispatcher.send("测试告警", "验证通知链路", channel="wecom_webhook")
+
+        self.assertEqual(["wecom_webhook"], result["succeeded"])
+        send.assert_called_once_with("测试告警", "验证通知链路")
 
 
 class ChannelSyncWorkerTests(unittest.TestCase):

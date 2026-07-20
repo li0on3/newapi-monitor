@@ -8,7 +8,10 @@ export class ApiError extends Error {
 }
 
 function apiUrl(path: string): string {
-  return new URL(`api/${path.replace(/^\//, '')}`, window.location.href).toString();
+  const appBase = window.location.pathname === '/monitor' || window.location.pathname.startsWith('/monitor/')
+    ? '/monitor/'
+    : '/';
+  return new URL(`${appBase}api/${path.replace(/^\//, '')}`, window.location.origin).toString();
 }
 
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {

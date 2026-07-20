@@ -21,9 +21,9 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from dashboard_auth import AuthStore
 from dashboard_data import DashboardRepository
 from dashboard_key_usage import KeyUsageClient, KeyUsageError, SlidingWindowRateLimiter, role_allows_key_lookup
-from dashboard_settings import SettingsStore
+from dashboard_settings import SECRET_KEYS, SettingsStore
 from dashboard_sso import NewAPISessionVerifier
-from newapi_monitor import Config, MonitorApp, StateStore, env_bool, env_int
+from newapi_monitor import Config, MonitorApp, NotificationDispatcher, StateStore, env_bool, env_int
 
 
 logging.basicConfig(
@@ -78,6 +78,27 @@ class SettingsUpdatePayload(BaseModel):
     smtp_to: str | None = Field(None, max_length=4096)
     smtp_starttls: bool | None = None
     smtp_ssl: bool | None = None
+    email_enabled: bool | None = None
+    wecom_app_enabled: bool | None = None
+    wecom_corp_id: str | None = Field(None, max_length=128)
+    wecom_agent_id: int | None = Field(None, ge=1, le=2_147_483_647)
+    wecom_app_secret: str | None = Field(None, max_length=4096)
+    wecom_to_user: str | None = Field(None, max_length=4096)
+    wecom_to_party: str | None = Field(None, max_length=4096)
+    wecom_to_tag: str | None = Field(None, max_length=4096)
+    wecom_webhook_enabled: bool | None = None
+    wecom_webhook_url: str | None = Field(None, max_length=4096)
+    feishu_app_enabled: bool | None = None
+    feishu_app_id: str | None = Field(None, max_length=256)
+    feishu_app_secret: str | None = Field(None, max_length=4096)
+    feishu_receive_id_type: str | None = Field(
+        None,
+        pattern="^(open_id|user_id|union_id|email|chat_id)$",
+    )
+    feishu_receive_id: str | None = Field(None, max_length=512)
+    feishu_webhook_enabled: bool | None = None
+    feishu_webhook_url: str | None = Field(None, max_length=4096)
+    feishu_webhook_secret: str | None = Field(None, max_length=4096)
     send_startup_email: bool | None = None
     subject_prefix: str | None = Field(None, max_length=256)
     key_usage_enabled: bool | None = None
@@ -97,6 +118,41 @@ class SettingsUpdatePayload(BaseModel):
         if parsed.username or parsed.password or parsed.query or parsed.fragment:
             raise ValueError("new_api_base_url must not contain credentials, query or fragment")
         return value.strip().rstrip("/")
+
+    @field_validator("wecom_webhook_url")
+    @classmethod
+    def validate_wecom_webhook_url(cls, value: str | None) -> str | None:
+        if value in {None, "", "********"}:
+            return value
+        parsed = urllib.parse.urlsplit(value.strip())
+        if (
+            parsed.scheme != "https"
+            or parsed.hostname != "qyapi.weixin.qq.com"
+            or parsed.path != "/cgi-bin/webhook/send"
+            or not urllib.parse.parse_qs(parsed.query).get("key")
+        ):
+            raise ValueError("wecom_webhook_url must be an official WeCom bot webhook")
+        return value.strip()
+
+    @field_validator("feishu_webhook_url")
+    @classmethod
+    def validate_feishu_webhook_url(cls, value: str | None) -> str | None:
+        if value in {None, "", "********"}:
+            return value
+        parsed = urllib.parse.urlsplit(value.strip())
+        if (
+            parsed.scheme != "https"
+            or parsed.hostname not in {"open.feishu.cn", "open.larksuite.com"}
+            or not parsed.path.startswith("/open-apis/bot/v2/hook/")
+        ):
+            raise ValueError("feishu_webhook_url must be an official Feishu bot webhook")
+        return value.strip()
+
+
+class NotificationTestPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    channel: str = Field(pattern="^(email|wecom_app|wecom_webhook|feishu_app|feishu_webhook)$")
 
 
 class KeyUsageQueryPayload(BaseModel):
@@ -330,6 +386,24 @@ class Runtime:
             "smtp_to": os.getenv("SMTP_TO", ""),
             "smtp_starttls": env_bool("SMTP_STARTTLS", False),
             "smtp_ssl": env_bool("SMTP_SSL", False),
+            "email_enabled": env_bool("EMAIL_ENABLED", bool(os.getenv("SMTP_TO", ""))),
+            "wecom_app_enabled": env_bool("WECOM_APP_ENABLED", False),
+            "wecom_corp_id": os.getenv("WECOM_CORP_ID", ""),
+            "wecom_agent_id": env_int("WECOM_AGENT_ID", 0),
+            "wecom_app_secret": os.getenv("WECOM_APP_SECRET", ""),
+            "wecom_to_user": os.getenv("WECOM_TO_USER", "@all"),
+            "wecom_to_party": os.getenv("WECOM_TO_PARTY", ""),
+            "wecom_to_tag": os.getenv("WECOM_TO_TAG", ""),
+            "wecom_webhook_enabled": env_bool("WECOM_WEBHOOK_ENABLED", False),
+            "wecom_webhook_url": os.getenv("WECOM_WEBHOOK_URL", ""),
+            "feishu_app_enabled": env_bool("FEISHU_APP_ENABLED", False),
+            "feishu_app_id": os.getenv("FEISHU_APP_ID", ""),
+            "feishu_app_secret": os.getenv("FEISHU_APP_SECRET", ""),
+            "feishu_receive_id_type": os.getenv("FEISHU_RECEIVE_ID_TYPE", "chat_id"),
+            "feishu_receive_id": os.getenv("FEISHU_RECEIVE_ID", ""),
+            "feishu_webhook_enabled": env_bool("FEISHU_WEBHOOK_ENABLED", False),
+            "feishu_webhook_url": os.getenv("FEISHU_WEBHOOK_URL", ""),
+            "feishu_webhook_secret": os.getenv("FEISHU_WEBHOOK_SECRET", ""),
             "send_startup_email": env_bool("SEND_STARTUP_EMAIL", True),
             "subject_prefix": os.getenv("SUBJECT_PREFIX", "[New API监控]"),
             "key_usage_enabled": env_bool("KEY_USAGE_ENABLED", True),
@@ -711,7 +785,7 @@ def update_settings(payload: SettingsUpdatePayload, request: Request, user: Admi
         updates = payload.model_dump(exclude_unset=True)
         candidate.update({
             key: value for key, value in updates.items()
-            if not (key in {"new_api_access_token", "relay_api_token", "smtp_password"} and (value is None or str(value) in {"", "********"}))
+            if not (key in SECRET_KEYS and (value is None or str(value) in {"", "********"}))
         })
         for key in (
             "dashboard_refresh_seconds", "channel_sync_interval_seconds", "channel_interval_seconds",
@@ -737,6 +811,20 @@ def update_settings(payload: SettingsUpdatePayload, request: Request, user: Admi
         raise HTTPException(status_code=400, detail=str(error)) from error
     runtime.refresh_repository()
     return {"values": values, "version": runtime.settings.version(), "reloading": True}
+
+
+@app.post("/api/notifications/test")
+def test_notification(payload: NotificationTestPayload, user: AdminUser) -> dict[str, Any]:
+    try:
+        dispatcher = NotificationDispatcher(runtime.monitor_config(), test_channel=payload.channel)
+        result = dispatcher.send(
+            "测试通知",
+            f"由 {user['username']} 从监控平台发送。\n时间：{time.strftime('%Y-%m-%d %H:%M:%S')}",
+            channel=payload.channel,
+        )
+    except (TypeError, ValueError, RuntimeError) as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    return {"success": True, **result}
 
 
 @app.get("/api/channel-settings")

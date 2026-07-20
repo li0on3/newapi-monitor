@@ -152,6 +152,37 @@ class SettingsStoreTests(unittest.TestCase):
         self.assertIn("$encrypted", payload)
         self.assertNotIn("bootstrap-secret", raw)
 
+    def test_encrypts_notification_credentials_and_webhook_urls(self):
+        encrypted_db = str(Path(self.temp_dir.name) / "notification-settings.db")
+        store = SettingsStore(
+            encrypted_db,
+            defaults={
+                "wecom_app_secret": "wecom-secret",
+                "wecom_webhook_url": "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=secret-key",
+                "feishu_app_secret": "feishu-secret",
+                "feishu_webhook_secret": "sign-secret",
+            },
+            secret_key="test-secret-key-with-at-least-32-bytes",
+        )
+
+        public = store.public_values()
+        self.assertEqual("********", public["wecom_app_secret"])
+        self.assertEqual("********", public["wecom_webhook_url"])
+        self.assertEqual("********", public["feishu_app_secret"])
+        self.assertEqual("********", public["feishu_webhook_secret"])
+
+        connection = sqlite3.connect(encrypted_db)
+        try:
+            rows = connection.execute(
+                "SELECT key, value_json FROM monitor_settings ORDER BY key"
+            ).fetchall()
+        finally:
+            connection.close()
+        serialized = "\n".join(value for _, value in rows)
+        self.assertNotIn("wecom-secret", serialized)
+        self.assertNotIn("secret-key", serialized)
+        self.assertNotIn("feishu-secret", serialized)
+
 
 if __name__ == "__main__":
     unittest.main()

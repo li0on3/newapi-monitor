@@ -11,7 +11,16 @@ from typing import Any, Iterator
 from cryptography.fernet import Fernet, InvalidToken
 
 
-SECRET_KEYS = {"new_api_access_token", "relay_api_token", "smtp_password"}
+SECRET_KEYS = {
+    "new_api_access_token",
+    "relay_api_token",
+    "smtp_password",
+    "wecom_app_secret",
+    "wecom_webhook_url",
+    "feishu_app_secret",
+    "feishu_webhook_url",
+    "feishu_webhook_secret",
+}
 MONITOR_ROLES = {"viewer", "operator", "admin"}
 
 
@@ -75,8 +84,9 @@ class SettingsStore:
                     (key, json.dumps(self._encode_value(key, value), ensure_ascii=False), now, "bootstrap"),
                 )
             if self.cipher is not None:
+                placeholders = ", ".join("?" for _ in SECRET_KEYS)
                 rows = connection.execute(
-                    "SELECT key, value_json FROM monitor_settings WHERE key IN (?, ?, ?)",
+                    f"SELECT key, value_json FROM monitor_settings WHERE key IN ({placeholders})",
                     tuple(sorted(SECRET_KEYS)),
                 ).fetchall()
                 for row in rows:

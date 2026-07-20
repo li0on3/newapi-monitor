@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import base64
 import hashlib
+import hmac
 import json
 import logging
 import math
@@ -21,6 +23,37 @@ from typing import Any, Callable, Iterable
 
 
 LOGGER = logging.getLogger("newapi-monitor")
+
+
+def request_json(
+    url: str,
+    payload: dict[str, Any] | None = None,
+    headers: dict[str, str] | None = None,
+    timeout_seconds: int = 15,
+) -> dict[str, Any]:
+    request_headers = {"Accept": "application/json", **(headers or {})}
+    data = None
+    method = "GET"
+    if payload is not None:
+        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        request_headers["Content-Type"] = "application/json; charset=utf-8"
+        method = "POST"
+    request = urllib.request.Request(url, data=data, headers=request_headers, method=method)
+    try:
+        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+            body = response.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as error:
+        body = error.read().decode("utf-8", errors="replace")[:1000]
+        raise RuntimeError(f"notification endpoint returned HTTP {error.code}: {body}") from error
+    except (urllib.error.URLError, TimeoutError) as error:
+        raise RuntimeError(f"notification endpoint unavailable: {error}") from error
+    try:
+        result = json.loads(body)
+    except json.JSONDecodeError as error:
+        raise RuntimeError("notification endpoint returned invalid JSON") from error
+    if not isinstance(result, dict):
+        raise RuntimeError("notification endpoint returned a non-object response")
+    return result
 
 
 def env_bool(name: str, default: bool = False) -> bool:
@@ -542,6 +575,24 @@ class Config:
     smtp_to: list[str]
     smtp_starttls: bool
     smtp_ssl: bool
+    email_enabled: bool
+    wecom_app_enabled: bool
+    wecom_corp_id: str
+    wecom_agent_id: int
+    wecom_app_secret: str
+    wecom_to_user: str
+    wecom_to_party: str
+    wecom_to_tag: str
+    wecom_webhook_enabled: bool
+    wecom_webhook_url: str
+    feishu_app_enabled: bool
+    feishu_app_id: str
+    feishu_app_secret: str
+    feishu_receive_id_type: str
+    feishu_receive_id: str
+    feishu_webhook_enabled: bool
+    feishu_webhook_url: str
+    feishu_webhook_secret: str
     send_startup_email: bool
     subject_prefix: str
 
@@ -638,6 +689,24 @@ class Config:
             smtp_to=recipients,
             smtp_starttls=bool(value("smtp_starttls", "SMTP_STARTTLS", False)),
             smtp_ssl=bool(value("smtp_ssl", "SMTP_SSL", False)),
+            email_enabled=bool(value("email_enabled", "EMAIL_ENABLED", bool(recipients))),
+            wecom_app_enabled=bool(value("wecom_app_enabled", "WECOM_APP_ENABLED", False)),
+            wecom_corp_id=str(value("wecom_corp_id", "WECOM_CORP_ID", "")),
+            wecom_agent_id=int(value("wecom_agent_id", "WECOM_AGENT_ID", 0)),
+            wecom_app_secret=str(value("wecom_app_secret", "WECOM_APP_SECRET", "")),
+            wecom_to_user=str(value("wecom_to_user", "WECOM_TO_USER", "@all")),
+            wecom_to_party=str(value("wecom_to_party", "WECOM_TO_PARTY", "")),
+            wecom_to_tag=str(value("wecom_to_tag", "WECOM_TO_TAG", "")),
+            wecom_webhook_enabled=bool(value("wecom_webhook_enabled", "WECOM_WEBHOOK_ENABLED", False)),
+            wecom_webhook_url=str(value("wecom_webhook_url", "WECOM_WEBHOOK_URL", "")),
+            feishu_app_enabled=bool(value("feishu_app_enabled", "FEISHU_APP_ENABLED", False)),
+            feishu_app_id=str(value("feishu_app_id", "FEISHU_APP_ID", "")),
+            feishu_app_secret=str(value("feishu_app_secret", "FEISHU_APP_SECRET", "")),
+            feishu_receive_id_type=str(value("feishu_receive_id_type", "FEISHU_RECEIVE_ID_TYPE", "chat_id")),
+            feishu_receive_id=str(value("feishu_receive_id", "FEISHU_RECEIVE_ID", "")),
+            feishu_webhook_enabled=bool(value("feishu_webhook_enabled", "FEISHU_WEBHOOK_ENABLED", False)),
+            feishu_webhook_url=str(value("feishu_webhook_url", "FEISHU_WEBHOOK_URL", "")),
+            feishu_webhook_secret=str(value("feishu_webhook_secret", "FEISHU_WEBHOOK_SECRET", "")),
             send_startup_email=bool(value("send_startup_email", "SEND_STARTUP_EMAIL", True)),
             subject_prefix=str(value("subject_prefix", "SUBJECT_PREFIX", "[New API监控]")),
         )
@@ -650,10 +719,31 @@ class Config:
             missing.append("NEW_API_USER_ID")
         if self.real_probe_rules and not self.relay_api_token:
             missing.append("RELAY_API_TOKEN")
-        if not self.smtp_host:
-            missing.append("SMTP_HOST")
-        if not self.smtp_to:
-            missing.append("SMTP_TO")
+        if self.email_enabled:
+            if not self.smtp_host:
+                missing.append("SMTP_HOST")
+            if not self.smtp_to:
+                missing.append("SMTP_TO")
+        if self.wecom_app_enabled:
+            if not self.wecom_corp_id:
+                missing.append("WECOM_CORP_ID")
+            if self.wecom_agent_id <= 0:
+                missing.append("WECOM_AGENT_ID")
+            if not self.wecom_app_secret:
+                missing.append("WECOM_APP_SECRET")
+            if not any((self.wecom_to_user, self.wecom_to_party, self.wecom_to_tag)):
+                missing.append("WECOM_RECIPIENT")
+        if self.wecom_webhook_enabled and not self.wecom_webhook_url:
+            missing.append("WECOM_WEBHOOK_URL")
+        if self.feishu_app_enabled:
+            if not self.feishu_app_id:
+                missing.append("FEISHU_APP_ID")
+            if not self.feishu_app_secret:
+                missing.append("FEISHU_APP_SECRET")
+            if not self.feishu_receive_id:
+                missing.append("FEISHU_RECEIVE_ID")
+        if self.feishu_webhook_enabled and not self.feishu_webhook_url:
+            missing.append("FEISHU_WEBHOOK_URL")
         if missing:
             raise ValueError("missing required settings: " + ", ".join(missing))
 
@@ -1358,6 +1448,8 @@ class ResourceCollector:
 
 
 class Mailer:
+    name = "email"
+
     def __init__(self, config: Config):
         self.config = config
 
@@ -1383,6 +1475,231 @@ class Mailer:
             if self.config.smtp_user:
                 client.login(self.config.smtp_user, self.config.smtp_password)
             client.send_message(message)
+
+
+def notification_text(prefix: str, subject: str, body: str, limit: int = 3800) -> str:
+    content = f"{prefix} {subject}\n\n{body}".strip()
+    if len(content) <= limit:
+        return content
+    return content[: limit - 12] + "\n…内容已截断"
+
+
+class WeComAppNotifier:
+    name = "wecom_app"
+
+    def __init__(
+        self,
+        corp_id: str,
+        agent_id: int,
+        secret: str,
+        to_user: str,
+        to_party: str,
+        to_tag: str,
+        prefix: str = "[New API监控]",
+    ):
+        self.corp_id = corp_id
+        self.agent_id = agent_id
+        self.secret = secret
+        self.to_user = to_user
+        self.to_party = to_party
+        self.to_tag = to_tag
+        self.prefix = prefix
+        self._access_token = ""
+        self._access_token_expires_at = 0.0
+
+    def _token(self) -> str:
+        now = time.time()
+        if self._access_token and now < self._access_token_expires_at:
+            return self._access_token
+        url = "https://qyapi.weixin.qq.com/cgi-bin/gettoken?" + urllib.parse.urlencode(
+            {"corpid": self.corp_id, "corpsecret": self.secret}
+        )
+        result = request_json(url)
+        if int(result.get("errcode") or 0) != 0 or not result.get("access_token"):
+            raise RuntimeError(f"WeCom token failed: {result.get('errmsg') or result.get('errcode')}")
+        self._access_token = str(result["access_token"])
+        self._access_token_expires_at = now + max(60, int(result.get("expires_in") or 7200) - 300)
+        return self._access_token
+
+    def send(self, subject: str, body: str) -> None:
+        token = self._token()
+        url = "https://qyapi.weixin.qq.com/cgi-bin/message/send?" + urllib.parse.urlencode(
+            {"access_token": token}
+        )
+        result = request_json(
+            url,
+            {
+                "touser": self.to_user,
+                "toparty": self.to_party,
+                "totag": self.to_tag,
+                "msgtype": "text",
+                "agentid": self.agent_id,
+                "text": {"content": notification_text(self.prefix, subject, body)},
+                "safe": 0,
+                "enable_duplicate_check": 1,
+                "duplicate_check_interval": 1800,
+            },
+        )
+        if int(result.get("errcode") or 0) != 0:
+            raise RuntimeError(f"WeCom application failed: {result.get('errmsg') or result.get('errcode')}")
+
+
+class WeComWebhookNotifier:
+    name = "wecom_webhook"
+
+    def __init__(self, webhook_url: str, prefix: str = "[New API监控]"):
+        self.webhook_url = webhook_url
+        self.prefix = prefix
+
+    def send(self, subject: str, body: str) -> None:
+        result = request_json(
+            self.webhook_url,
+            {
+                "msgtype": "text",
+                "text": {"content": notification_text(self.prefix, subject, body)},
+            },
+        )
+        if int(result.get("errcode") or 0) != 0:
+            raise RuntimeError(f"WeCom webhook failed: {result.get('errmsg') or result.get('errcode')}")
+
+
+class FeishuAppNotifier:
+    name = "feishu_app"
+
+    def __init__(
+        self,
+        app_id: str,
+        app_secret: str,
+        receive_id_type: str,
+        receive_id: str,
+        prefix: str = "[New API监控]",
+    ):
+        self.app_id = app_id
+        self.app_secret = app_secret
+        self.receive_id_type = receive_id_type
+        self.receive_id = receive_id
+        self.prefix = prefix
+        self._tenant_token = ""
+        self._tenant_token_expires_at = 0.0
+
+    def _token(self) -> str:
+        now = time.time()
+        if self._tenant_token and now < self._tenant_token_expires_at:
+            return self._tenant_token
+        result = request_json(
+            "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
+            {"app_id": self.app_id, "app_secret": self.app_secret},
+        )
+        if int(result.get("code") or 0) != 0 or not result.get("tenant_access_token"):
+            raise RuntimeError(f"Feishu token failed: {result.get('msg') or result.get('code')}")
+        self._tenant_token = str(result["tenant_access_token"])
+        self._tenant_token_expires_at = now + max(60, int(result.get("expire") or 7200) - 300)
+        return self._tenant_token
+
+    def send(self, subject: str, body: str) -> None:
+        token = self._token()
+        url = "https://open.feishu.cn/open-apis/im/v1/messages?" + urllib.parse.urlencode(
+            {"receive_id_type": self.receive_id_type}
+        )
+        result = request_json(
+            url,
+            {
+                "receive_id": self.receive_id,
+                "msg_type": "text",
+                "content": json.dumps(
+                    {"text": notification_text(self.prefix, subject, body)},
+                    ensure_ascii=False,
+                ),
+            },
+            {"Authorization": f"Bearer {token}"},
+        )
+        if int(result.get("code") or 0) != 0:
+            raise RuntimeError(f"Feishu application failed: {result.get('msg') or result.get('code')}")
+
+
+class FeishuWebhookNotifier:
+    name = "feishu_webhook"
+
+    def __init__(self, webhook_url: str, secret: str = "", prefix: str = "[New API监控]"):
+        self.webhook_url = webhook_url
+        self.secret = secret
+        self.prefix = prefix
+
+    def send(self, subject: str, body: str) -> None:
+        payload: dict[str, Any] = {
+            "msg_type": "text",
+            "content": {"text": notification_text(self.prefix, subject, body)},
+        }
+        if self.secret:
+            timestamp = str(int(time.time()))
+            string_to_sign = f"{timestamp}\n{self.secret}".encode("utf-8")
+            payload["timestamp"] = timestamp
+            payload["sign"] = base64.b64encode(
+                hmac.new(string_to_sign, digestmod=hashlib.sha256).digest()
+            ).decode("ascii")
+        result = request_json(self.webhook_url, payload)
+        if int(result.get("code") or result.get("StatusCode") or 0) != 0:
+            raise RuntimeError(
+                f"Feishu webhook failed: {result.get('msg') or result.get('StatusMessage') or result.get('code')}"
+            )
+
+
+class NotificationDispatcher:
+    def __init__(self, config: Config, test_channel: str | None = None):
+        self.senders: list[Any] = []
+        if config.email_enabled or test_channel == "email":
+            self.senders.append(Mailer(config))
+        if config.wecom_app_enabled or test_channel == "wecom_app":
+            self.senders.append(
+                WeComAppNotifier(
+                    config.wecom_corp_id,
+                    config.wecom_agent_id,
+                    config.wecom_app_secret,
+                    config.wecom_to_user,
+                    config.wecom_to_party,
+                    config.wecom_to_tag,
+                    config.subject_prefix,
+                )
+            )
+        if config.wecom_webhook_enabled or test_channel == "wecom_webhook":
+            self.senders.append(WeComWebhookNotifier(config.wecom_webhook_url, config.subject_prefix))
+        if config.feishu_app_enabled or test_channel == "feishu_app":
+            self.senders.append(
+                FeishuAppNotifier(
+                    config.feishu_app_id,
+                    config.feishu_app_secret,
+                    config.feishu_receive_id_type,
+                    config.feishu_receive_id,
+                    config.subject_prefix,
+                )
+            )
+        if config.feishu_webhook_enabled or test_channel == "feishu_webhook":
+            self.senders.append(
+                FeishuWebhookNotifier(
+                    config.feishu_webhook_url,
+                    config.feishu_webhook_secret,
+                    config.subject_prefix,
+                )
+            )
+
+    def send(self, subject: str, body: str, channel: str = "all") -> dict[str, list[str]]:
+        selected = [sender for sender in self.senders if channel == "all" or sender.name == channel]
+        if channel != "all" and not selected:
+            raise ValueError(f"notification channel is not enabled: {channel}")
+        succeeded: list[str] = []
+        failed: list[str] = []
+        errors: list[str] = []
+        for sender in selected:
+            try:
+                sender.send(subject, body)
+                succeeded.append(sender.name)
+            except Exception as error:
+                failed.append(sender.name)
+                errors.append(f"{sender.name}: {error}")
+                LOGGER.exception("notification delivery failed: %s", sender.name)
+        if selected and not succeeded:
+            raise RuntimeError("; ".join(errors))
+        return {"succeeded": succeeded, "failed": failed}
 
 
 class ChannelSyncWorker:
@@ -1437,7 +1754,7 @@ class MonitorApp:
         self.client = NewAPIClient(config)
         self.relay_probe_client = RelayProbeClient(config) if config.real_probe_rules else None
         self.store = StateStore(config.state_db)
-        self.mailer = Mailer(config)
+        self.notifier = NotificationDispatcher(config)
         self.resource_collector = ResourceCollector(config.disk_path, config.docker_container_names)
         self.service_tracker = ServiceStateTracker(str(self.store.get_json("service_state", "unknown")))
         self.channel_tracker = ChannelStateTracker(self.store.get_json("channel_states", {}))
@@ -1488,8 +1805,13 @@ class MonitorApp:
         self.store.record_alert_events(events)
         subject = "；".join(event.title for event in events)
         body = "\n\n".join(f"[{event.title}]\n{event.body}" for event in events)
-        self.mailer.send(subject, body)
-        LOGGER.info("sent %d alert events", len(events))
+        result = self.notifier.send(subject, body)
+        LOGGER.info(
+            "sent %d alert events through %s; failed=%s",
+            len(events),
+            ",".join(result["succeeded"]) or "none",
+            ",".join(result["failed"]) or "none",
+        )
 
     def _record_collector_result(self, name: str, success: bool, error: str = "") -> None:
         self.store.record_collector_result(
@@ -1773,13 +2095,13 @@ class MonitorApp:
             lines.append(f"- container_status: {self.latest_resource_details.get('container_status', '-')}")
             lines.append(f"- container_restarts: {self.latest_resource_details.get('container_restarts', '-')}")
 
-        self.mailer.send("周期报告", "\n".join(lines))
+        self.notifier.send("周期报告", "\n".join(lines))
         LOGGER.info("periodic report sent")
 
     def run_forever(self, stop_event: Any | None = None) -> None:
         if self.config.send_startup_email:
             try:
-                self.mailer.send("监控程序启动", f"监控目标：{self.config.base_url}")
+                self.notifier.send("监控程序启动", f"监控目标：{self.config.base_url}")
             except Exception:
                 LOGGER.exception("startup email failed")
 

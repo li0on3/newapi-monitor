@@ -19,11 +19,14 @@ import {
   Fingerprint,
   KeyRound,
   LogOut,
+  Mail,
   MemoryStick,
+  MessageSquare,
   Network,
   RefreshCw,
   Save,
   Search,
+  Send,
   Server,
   Settings,
   ShieldCheck,
@@ -37,9 +40,11 @@ import {
 import { FormEvent, PointerEvent as ReactPointerEvent, ReactNode, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { api, ApiError } from './api';
+import { readRoute, routePath } from './routes';
+import type { AppRoute, AppTab, SettingsPage } from './routes';
 import type { AuthUser, Channel, ChannelMonitorConfig, ContainerMetric, Incident, IncidentPayload, IncidentSummary, KeyUsageCall, KeyUsageResult, LogItem, ResourceSample, Summary, SystemHealth } from './types';
 
-type Tab = 'overview' | 'keyUsage' | 'logs' | 'resources' | 'incidents' | 'channels' | 'settings';
+type Tab = AppTab;
 
 const REFRESH_SECONDS = 5;
 const SLOW_SECONDS = 60;
@@ -229,8 +234,10 @@ function ChannelSettingsView() {
 }
 
 type SettingField = { key: string; label: string; type?: 'number' | 'text' | 'password' | 'boolean' | 'select'; options?: Array<[string, string]>; hint?: string };
-type SettingSectionId = 'connection' | 'keyUsage' | 'collection' | 'thresholds' | 'mail' | 'advanced';
-type SettingsPageId = SettingSectionId | 'status' | 'overview' | 'access' | 'audit';
+type SettingSectionId = 'connection' | 'keyUsage' | 'collection' | 'thresholds' | 'advanced';
+type SettingsPageId = SettingsPage;
+type NotificationChannelId = 'email' | 'wecom_app' | 'wecom_webhook' | 'feishu_app' | 'feishu_webhook';
+const SECRET_SETTING_KEYS = ['new_api_access_token', 'relay_api_token', 'smtp_password', 'wecom_app_secret', 'wecom_webhook_url', 'feishu_app_secret', 'feishu_webhook_url', 'feishu_webhook_secret'];
 const SETTING_SECTIONS: Array<{ id: SettingSectionId; title: string; short: string; description: string; icon: ReactNode; fields: SettingField[] }> = [
   { id: 'connection', title: 'New API 连接', short: '连接与凭据', icon: <Network size={18} />, description: '管理接口只读同步与真实探测凭据。敏感字段不会回显。', fields: [
     { key: 'new_api_base_url', label: 'New API 地址' }, { key: 'new_api_user_id', label: '管理用户 ID', type: 'number' }, { key: 'new_api_access_token', label: '管理访问令牌', type: 'password', hint: '留空保持原值' }, { key: 'relay_api_token', label: '真实探测令牌', type: 'password', hint: '留空保持原值' },
@@ -248,15 +255,12 @@ const SETTING_SECTIONS: Array<{ id: SettingSectionId; title: string; short: stri
   { id: 'thresholds', title: '耗时与资源阈值', short: '告警策略', icon: <CircleGauge size={18} />, description: '总耗时或首字超过慢请求阈值，并满足 3/5 或 5/10 时告警。', fields: [
     { key: 'slow_request_seconds', label: '慢请求阈值（秒）', type: 'number' }, { key: 'latency_hard_limit_seconds', label: '单次严重阈值（秒）', type: 'number' }, { key: 'latency_reminder_seconds', label: '重复提醒间隔（秒）', type: 'number' }, { key: 'channel_slow_seconds', label: '渠道慢探测（秒）', type: 'number' }, { key: 'resource_sustain_seconds', label: '资源持续时间（秒）', type: 'number' }, { key: 'system_cpu_threshold', label: 'CPU 阈值（%）', type: 'number' }, { key: 'system_memory_threshold', label: '内存阈值（%）', type: 'number' }, { key: 'system_disk_threshold', label: '磁盘阈值（%）', type: 'number' },
   ] },
-  { id: 'mail', title: '邮件通知', short: 'SMTP 与通知', icon: <ShieldCheck size={18} />, description: 'SMTP 密码只写存储，配置后可由监控工作线程直接使用。', fields: [
-    { key: 'smtp_host', label: 'SMTP 地址' }, { key: 'smtp_port', label: 'SMTP 端口', type: 'number' }, { key: 'smtp_user', label: 'SMTP 用户' }, { key: 'smtp_password', label: 'SMTP 密码', type: 'password', hint: '留空保持原值' }, { key: 'smtp_from', label: '发件人' }, { key: 'smtp_to', label: '收件人（逗号分隔）' }, { key: 'smtp_starttls', label: 'STARTTLS', type: 'boolean' }, { key: 'smtp_ssl', label: 'SSL', type: 'boolean' }, { key: 'send_startup_email', label: '启动通知', type: 'boolean' }, { key: 'subject_prefix', label: '邮件标题前缀' },
-  ] },
   { id: 'advanced', title: '高级采集', short: '范围与排除', icon: <SlidersHorizontal size={18} />, description: '日志重叠窗口、容器范围及排除项。', fields: [
     { key: 'log_overlap_seconds', label: '日志重叠窗口（秒）', type: 'number' }, { key: 'log_initial_lookback_seconds', label: '首次回溯（秒）', type: 'number' }, { key: 'docker_container_names', label: '容器名称（逗号分隔）' }, { key: 'disk_path', label: '磁盘采集路径' }, { key: 'excluded_token_names', label: '排除令牌名（逗号分隔）' }, { key: 'container_cpu_threshold', label: '容器 CPU 阈值（%）', type: 'number' }, { key: 'container_memory_threshold', label: '容器内存阈值（%）', type: 'number' },
   ] },
 ];
 
-function SettingsView() {
+function SettingsView({ activePage, onActivePageChange }: { activePage: SettingsPageId; onActivePageChange: (page: SettingsPageId) => void }) {
   const [values, setValues] = useState<Record<string, unknown>>({});
   const [baseline, setBaseline] = useState<Record<string, unknown>>({});
   const [audit, setAudit] = useState<Array<Record<string, unknown>>>([]);
@@ -264,10 +268,12 @@ function SettingsView() {
   const [systemStatus, setSystemStatus] = useState<SystemHealth | null>(null);
   const [overviewChannels, setOverviewChannels] = useState<Channel[]>([]);
   const [overviewBaseline, setOverviewBaseline] = useState('[]');
-  const [activePage, setActivePage] = useState<SettingsPageId>('status');
   const [newUser, setNewUser] = useState('');
   const [newRole, setNewRole] = useState('viewer');
   const [saving, setSaving] = useState(false);
+  const [testingChannel, setTestingChannel] = useState<NotificationChannelId | null>(null);
+  const [notificationTestResults, setNotificationTestResults] = useState<Partial<Record<NotificationChannelId, { success: boolean; text: string }>>>({});
+  const [expandedNotifications, setExpandedNotifications] = useState<Set<NotificationChannelId>>(new Set(['wecom_app']));
   const [message, setMessage] = useState('');
   const load = useCallback(async () => {
     const [settingsPayload, auditPayload, usersPayload, statusPayload, channelPayload] = await Promise.all([api<{ values: Record<string, unknown> }>('settings'), api<{ items: Array<Record<string, unknown>> }>('config-audit?limit=30'), api<{ items: Array<{ username: string; role: string }> }>('access/users'), api<SystemHealth>('system/status'), api<{ items: Channel[] }>('channel-settings')]);
@@ -288,11 +294,32 @@ function SettingsView() {
   const save = async () => {
     setSaving(true); setMessage('');
     const payload = { ...values };
-    for (const key of ['new_api_access_token', 'relay_api_token', 'smtp_password']) if (payload[key] === '********') payload[key] = '';
+    for (const key of SECRET_SETTING_KEYS) if (payload[key] === '********') payload[key] = '';
     try { await api('settings', { method: 'PUT', body: JSON.stringify(payload) }); setMessage('配置已保存，采集器正在热加载'); await load(); }
     catch (error) { setMessage(error instanceof Error ? error.message : '保存失败'); }
     finally { setSaving(false); }
   };
+  const testNotification = async (channel: NotificationChannelId) => {
+    if (dirty) { setMessage('请先保存当前通知配置，再发送测试消息'); return; }
+    setTestingChannel(channel); setMessage('');
+    setNotificationTestResults((current) => {
+      const next = { ...current };
+      delete next[channel];
+      return next;
+    });
+    try {
+      await api('notifications/test', { method: 'POST', body: JSON.stringify({ channel }) });
+      setNotificationTestResults((current) => ({ ...current, [channel]: { success: true, text: `测试告警发送成功 · ${new Date().toLocaleTimeString('zh-CN', { hour12: false })}` } }));
+    } catch (error) {
+      setNotificationTestResults((current) => ({ ...current, [channel]: { success: false, text: error instanceof Error ? error.message : '测试告警发送失败' } }));
+    }
+    finally { setTestingChannel(null); }
+  };
+  const toggleNotificationPanel = (channel: NotificationChannelId) => setExpandedNotifications((current) => {
+    const next = new Set(current);
+    if (next.has(channel)) next.delete(channel); else next.add(channel);
+    return next;
+  });
   const addUser = async () => { if (!newUser.trim()) return; await api(`access/users/${encodeURIComponent(newUser.trim())}`, { method: 'PUT', body: JSON.stringify({ role: newRole }) }); setNewUser(''); await load(); };
   const setOverviewVisibility = (channelId: number, audience: 'admin' | 'viewer', visible: boolean) => setOverviewChannels((current) => current.map((channel) => channel.channel_id === channelId ? { ...channel, [audience === 'admin' ? 'overview_admin_visible' : 'overview_viewer_visible']: visible } : channel));
   const setAllOverviewVisibility = (audience: 'admin' | 'viewer', visible: boolean) => setOverviewChannels((current) => current.map((channel) => ({ ...channel, [audience === 'admin' ? 'overview_admin_visible' : 'overview_viewer_visible']: visible })));
@@ -311,6 +338,7 @@ function SettingsView() {
   const pages: Array<{ id: SettingsPageId; title: string; description: string; icon: ReactNode; count?: number }> = [
     { id: 'status', title: '运行状态', description: '采集链路自检', icon: <ShieldCheck size={18} />, count: systemStatus ? Object.keys(systemStatus.collectors).length : 0 },
     { id: 'overview', title: '总览展示', description: '按角色控制渠道', icon: <Eye size={18} />, count: overviewChannels.filter((channel) => channel.enabled).length },
+    { id: 'notifications', title: '通知中心', description: '企微、飞书与邮件', icon: <BellRing size={18} />, count: ['email_enabled', 'wecom_app_enabled', 'wecom_webhook_enabled', 'feishu_app_enabled', 'feishu_webhook_enabled'].filter((key) => Boolean(values[key])).length },
     ...SETTING_SECTIONS.map((section) => ({ id: section.id, title: section.title, description: section.short, icon: section.icon, count: section.fields.length })),
     { id: 'access', title: '角色映射', description: '访问与权限', icon: <UserCog size={18} />, count: users.length },
     { id: 'audit', title: '配置审计', description: '最近变更记录', icon: <Clock3 size={18} />, count: audit.length },
@@ -319,7 +347,7 @@ function SettingsView() {
     <div className="section-heading settings-heading"><div><span className="eyebrow">RUNTIME CONTROL CENTER</span><h2>系统配置</h2><p>按任务分区管理，只展示当前配置组；配置保存在监控数据库中，不写入 New API。</p></div><div className={classNames('settings-dirty-state', (dirty || overviewDirty) && 'settings-dirty')}><i />{dirty || overviewDirty ? '有未保存更改' : '配置已同步'}</div></div>
     {message && <div className="config-message">{message}</div>}
     <div className="settings-workspace">
-      <aside className="settings-nav" aria-label="系统配置分类">{pages.map((page) => <button type="button" className={classNames(activePage === page.id && 'active')} key={page.id} onClick={() => setActivePage(page.id)}><span className="settings-nav-icon">{page.icon}</span><span><strong>{page.title}</strong><small>{page.description}</small></span>{page.count != null && <b>{page.count}</b>}<ChevronRight size={15} /></button>)}</aside>
+      <aside className="settings-nav" aria-label="系统配置分类">{pages.map((page) => <button type="button" className={classNames(activePage === page.id && 'active')} key={page.id} onClick={() => onActivePageChange(page.id)}><span className="settings-nav-icon">{page.icon}</span><span><strong>{page.title}</strong><small>{page.description}</small></span>{page.count != null && <b>{page.count}</b>}<ChevronRight size={15} /></button>)}</aside>
       <div className="settings-stage">
         {activePage === 'status' && <article className="settings-card settings-focus-card"><div className="settings-card-head settings-focus-head"><div className="settings-section-mark"><ShieldCheck size={18} /></div><div><span className="eyebrow">SELF MONITORING</span><h3>采集链路状态</h3><p>监控程序同时检查自身是否仍在持续产生新数据，避免“页面正常但采集已经停止”。</p></div><StatusPill tone={systemStatus?.status === 'ok' ? 'ok' : 'bad'}>{systemStatus?.status === 'ok' ? '全部正常' : '存在降级'}</StatusPill></div><div className="collector-health-grid"><div className="collector-health-card"><span>数据库</span><strong>{systemStatus?.database === 'ok' ? '正常' : '异常'}</strong><small>{systemStatus?.database_error || 'SQLite 可读写'}</small></div><div className="collector-health-card"><span>监控进程</span><strong>{systemStatus?.monitor_worker === 'running' ? '运行中' : systemStatus?.monitor_worker || '未知'}</strong><small>{systemStatus?.monitor_error || '工作线程持续运行'}</small></div>{Object.entries(systemStatus?.collectors || {}).map(([name, collector]) => { const labels: Record<string, string> = { channel_sync: '渠道同步', channel_probe: '渠道探测', logs: '使用日志', resources: '机器资源' }; return <div className={classNames('collector-health-card', collector.status === 'stale' && 'collector-health-stale')} key={name}><span>{labels[name] || name}</span><strong>{collector.status === 'ok' ? '正常' : collector.status === 'starting' ? '启动中' : '数据过期'}</strong><small>最后成功 {collector.age_seconds}s 前 · 阈值 {collector.stale_after_seconds}s</small>{collector.consecutive_failures > 0 && <em>连续失败 {collector.consecutive_failures} 次</em>}{collector.last_error && <code title={collector.last_error}>{collector.last_error}</code>}</div>; })}</div><div className="settings-action-bar"><div><strong>最后检查 {systemStatus ? formatFullTime(systemStatus.timestamp) : '—'}</strong><small>数据超过动态失效阈值后，健康检查变为 503，并生成异常与恢复事件。</small></div><button className="secondary-button" onClick={() => void load()}><RefreshCw size={16} />立即刷新</button></div></article>}
         {activePage === 'overview' && <article className="settings-card settings-focus-card overview-settings-card">
@@ -335,6 +363,20 @@ function SettingsView() {
             {overviewChannels.map((channel) => <div className={classNames('overview-visibility-row', !channel.enabled && 'disabled')} key={channel.channel_id}><div><span className="provider-mark compact">{channel.name.slice(0, 2).toUpperCase()}</span><span><strong>{channel.name}</strong><small>#{channel.channel_id} · {channel.group || 'default'}</small></span></div><StatusPill tone={channel.enabled ? 'ok' : 'muted'}>{channel.enabled ? '已启用' : '已禁用'}</StatusPill><Toggle checked={channel.overview_admin_visible ?? true} onChange={(visible) => setOverviewVisibility(channel.channel_id, 'admin', visible)} label="管理端" /><Toggle checked={channel.overview_viewer_visible ?? true} onChange={(visible) => setOverviewVisibility(channel.channel_id, 'viewer', visible)} label="普通用户" /></div>)}
           </div>
           <div className="settings-action-bar"><div><strong>{overviewDirty ? '展示范围尚未应用' : '角色展示范围已生效'}</strong><small>保存后无需重启，管理员和普通用户刷新总览即可看到各自渠道。</small></div><button className="secondary-button" disabled={!overviewDirty || saving} onClick={() => void load()}>撤销更改</button><button className="primary-button settings-save" disabled={!overviewDirty || saving || !overviewChannels.length} onClick={() => void saveOverviewVisibility()}>{saving ? <RefreshCw className="spin" size={16} /> : <Save size={16} />}保存展示范围</button></div>
+        </article>}
+        {activePage === 'notifications' && <article className="settings-card settings-focus-card notification-center-card">
+          <div className="settings-card-head settings-focus-head"><div className="settings-section-mark"><BellRing size={18} /></div><div><span className="eyebrow">MULTI-CHANNEL DELIVERY</span><h3>告警通知中心</h3><p>同一告警可同时发送到多个渠道；单个渠道失败不会阻断其他渠道。敏感凭据加密保存且不会回显。</p></div><span className="settings-field-count">{['email_enabled', 'wecom_app_enabled', 'wecom_webhook_enabled', 'feishu_app_enabled', 'feishu_webhook_enabled'].filter((key) => Boolean(values[key])).length} 个已启用</span></div>
+          <div className="notification-global-bar"><label><span>通知标题前缀</span><input value={String(values.subject_prefix ?? '')} onChange={(event) => setValue('subject_prefix', event.target.value)} /></label><Toggle checked={Boolean(values.send_startup_email)} onChange={(value) => setValue('send_startup_email', value)} label="监控启动时发送通知" /><div><ShieldCheck size={15} /><span>应用 Secret、Webhook 地址与签名密钥均按秘密字段加密存储。</span></div></div>
+          <div className="notification-channel-grid">
+            {([
+              { id: 'wecom_app' as const, title: '企业微信自建应用', description: '适合直接通知应用可见范围内的成员', icon: <MessageSquare size={18} />, enabled: Boolean(values.wecom_app_enabled), configured: Boolean(values.wecom_corp_id && values.wecom_agent_id && values.wecom_app_secret && (values.wecom_to_user || values.wecom_to_party || values.wecom_to_tag)), fields: <><label><span>企业 ID</span><input value={String(values.wecom_corp_id ?? '')} onChange={(event) => setValue('wecom_corp_id', event.target.value)} /></label><label><span>AgentId</span><input type="number" value={String(values.wecom_agent_id ?? '')} onChange={(event) => setValue('wecom_agent_id', Number(event.target.value))} /></label><label className="notification-wide"><span>应用 Secret</span><input type="password" value={String(values.wecom_app_secret ?? '')} placeholder="留空保持原值" onChange={(event) => setValue('wecom_app_secret', event.target.value)} /></label><label><span>成员</span><input value={String(values.wecom_to_user ?? '')} placeholder="@all 或 user1|user2" onChange={(event) => setValue('wecom_to_user', event.target.value)} /></label><label><span>部门</span><input value={String(values.wecom_to_party ?? '')} placeholder="可选，1|2" onChange={(event) => setValue('wecom_to_party', event.target.value)} /></label><label><span>标签</span><input value={String(values.wecom_to_tag ?? '')} placeholder="可选，1|2" onChange={(event) => setValue('wecom_to_tag', event.target.value)} /></label></> },
+              { id: 'wecom_webhook' as const, title: '企业微信群机器人', description: '通过群机器人 Webhook 推送到指定群聊', icon: <Send size={18} />, enabled: Boolean(values.wecom_webhook_enabled), configured: Boolean(values.wecom_webhook_url), fields: <label className="notification-wide"><span>Webhook 地址</span><input type="password" value={String(values.wecom_webhook_url ?? '')} placeholder="https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=..." onChange={(event) => setValue('wecom_webhook_url', event.target.value)} /></label> },
+              { id: 'feishu_app' as const, title: '飞书自建应用', description: '使用应用身份向用户或群聊发送消息', icon: <MessageSquare size={18} />, enabled: Boolean(values.feishu_app_enabled), configured: Boolean(values.feishu_app_id && values.feishu_app_secret && values.feishu_receive_id), fields: <><label><span>App ID</span><input value={String(values.feishu_app_id ?? '')} onChange={(event) => setValue('feishu_app_id', event.target.value)} /></label><label><span>App Secret</span><input type="password" value={String(values.feishu_app_secret ?? '')} placeholder="留空保持原值" onChange={(event) => setValue('feishu_app_secret', event.target.value)} /></label><label><span>接收者类型</span><select value={String(values.feishu_receive_id_type ?? 'chat_id')} onChange={(event) => setValue('feishu_receive_id_type', event.target.value)}><option value="chat_id">群聊 chat_id</option><option value="open_id">用户 open_id</option><option value="user_id">用户 user_id</option><option value="union_id">用户 union_id</option><option value="email">用户邮箱</option></select></label><label><span>接收者 ID</span><input value={String(values.feishu_receive_id ?? '')} placeholder="还需要提供此项" onChange={(event) => setValue('feishu_receive_id', event.target.value)} /></label></> },
+              { id: 'feishu_webhook' as const, title: '飞书群机器人', description: '支持普通 Webhook 与签名校验机器人', icon: <Send size={18} />, enabled: Boolean(values.feishu_webhook_enabled), configured: Boolean(values.feishu_webhook_url), fields: <><label className="notification-wide"><span>Webhook 地址</span><input type="password" value={String(values.feishu_webhook_url ?? '')} placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/..." onChange={(event) => setValue('feishu_webhook_url', event.target.value)} /></label><label className="notification-wide"><span>签名密钥</span><input type="password" value={String(values.feishu_webhook_secret ?? '')} placeholder="机器人未启用签名时可留空" onChange={(event) => setValue('feishu_webhook_secret', event.target.value)} /></label></> },
+              { id: 'email' as const, title: '电子邮件', description: '保留 SMTP 作为独立通道或故障兜底', icon: <Mail size={18} />, enabled: Boolean(values.email_enabled), configured: Boolean(values.smtp_host && values.smtp_to), fields: <><label><span>SMTP 地址</span><input value={String(values.smtp_host ?? '')} onChange={(event) => setValue('smtp_host', event.target.value)} /></label><label><span>端口</span><input type="number" value={String(values.smtp_port ?? '')} onChange={(event) => setValue('smtp_port', Number(event.target.value))} /></label><label><span>SMTP 用户</span><input value={String(values.smtp_user ?? '')} onChange={(event) => setValue('smtp_user', event.target.value)} /></label><label><span>SMTP 密码</span><input type="password" value={String(values.smtp_password ?? '')} placeholder="留空保持原值" onChange={(event) => setValue('smtp_password', event.target.value)} /></label><label><span>发件人</span><input value={String(values.smtp_from ?? '')} onChange={(event) => setValue('smtp_from', event.target.value)} /></label><label><span>收件人</span><input value={String(values.smtp_to ?? '')} placeholder="多个地址用逗号分隔" onChange={(event) => setValue('smtp_to', event.target.value)} /></label><Toggle checked={Boolean(values.smtp_ssl)} onChange={(value) => { setValue('smtp_ssl', value); if (value) setValue('smtp_starttls', false); }} label="SSL" /><Toggle checked={Boolean(values.smtp_starttls)} onChange={(value) => { setValue('smtp_starttls', value); if (value) setValue('smtp_ssl', false); }} label="STARTTLS" /></> },
+            ]).map((channel) => <section className={classNames('notification-channel', channel.enabled && 'enabled', expandedNotifications.has(channel.id) && 'expanded')} key={channel.id}><button type="button" className="notification-channel-head" onClick={() => toggleNotificationPanel(channel.id)}><span className="notification-channel-icon">{channel.icon}</span><span><strong>{channel.title}</strong><small>{channel.description}</small></span><i className={classNames('notification-state-dot', channel.enabled && channel.configured && 'ready', channel.enabled && !channel.configured && 'incomplete')} /><b>{channel.enabled ? channel.configured ? '已启用' : '待补全' : channel.configured ? '可测试' : '未配置'}</b><ChevronRight size={16} /></button>{expandedNotifications.has(channel.id) && <div className="notification-channel-body"><div className="notification-enable-row"><Toggle checked={channel.enabled} onChange={(enabled) => setValue(`${channel.id}_enabled`, enabled)} label="启用此通知渠道" /><button type="button" className="secondary-button notification-test" disabled={!channel.configured || dirty || testingChannel !== null} onClick={() => void testNotification(channel.id)}>{testingChannel === channel.id ? <RefreshCw className="spin" size={14} /> : <Send size={14} />}{testingChannel === channel.id ? '正在发送' : '触发测试告警'}</button></div>{notificationTestResults[channel.id] && <div className={classNames('notification-test-result', notificationTestResults[channel.id]?.success ? 'success' : 'failed')}>{notificationTestResults[channel.id]?.success ? <CheckCircle2 size={15} /> : <XCircle size={15} />}<span>{notificationTestResults[channel.id]?.text}</span></div>}<div className="notification-fields">{channel.fields}</div>{channel.id === 'feishu_app' && <p className="notification-requirement"><AlertTriangle size={14} />App ID 与 Secret 已足够换取令牌，但发送消息仍必须填写用户或群聊的接收者 ID。</p>}</div>}</section>)}
+          </div>
+          <div className="settings-action-bar"><div><strong>{dirty ? '通知配置尚未应用' : '通知路由已生效'}</strong><small>{dirty ? '保存后工作线程会热加载；测试按钮将在保存后可用。' : '可以展开任一渠道发送真实测试通知。'}</small></div><button className="secondary-button" disabled={!dirty || saving} onClick={() => { setValues(baseline); setMessage('已撤销本次未保存更改'); }}>撤销更改</button><button className="primary-button settings-save" disabled={!dirty || saving} onClick={() => void save()}>{saving ? <RefreshCw className="spin" size={16} /> : <Save size={16} />}保存通知配置</button></div>
         </article>}
         {activeSection && <article className="settings-card settings-focus-card"><div className="settings-card-head settings-focus-head"><div className="settings-section-mark">{activeSection.icon}</div><div><span className="eyebrow">CONFIGURATION GROUP</span><h3>{activeSection.title}</h3><p>{activeSection.description}</p></div><span className="settings-field-count">{activeSection.fields.length} 项</span></div><div className="settings-fields">{activeSection.fields.map((field) => field.type === 'boolean' ? <Toggle key={field.key} label={field.label} checked={Boolean(values[field.key])} onChange={(value) => setValue(field.key, value)} /> : <label key={field.key}><span>{field.label}</span>{field.type === 'select' ? <select value={String(values[field.key] ?? '')} onChange={(event) => setValue(field.key, event.target.value)}>{field.options?.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select> : <input type={field.type === 'password' ? 'password' : field.type === 'number' ? 'number' : 'text'} value={String(values[field.key] ?? '')} placeholder={field.hint} onChange={(event) => setValue(field.key, field.type === 'number' ? Number(event.target.value) : event.target.value)} />}<small>{field.hint}</small></label>)}</div><div className="settings-action-bar"><div><strong>{dirty ? '更改尚未应用' : '当前配置已生效'}</strong><small>{dirty ? '保存后采集器将在数秒内热加载，无需重启。' : '你可以切换左侧分类继续检查其他配置。'}</small></div><button className="secondary-button" disabled={!dirty || saving} onClick={() => { setValues(baseline); setMessage('已撤销本次未保存更改'); }}>撤销更改</button><button className="primary-button settings-save" disabled={!dirty || saving} onClick={() => void save()}>{saving ? <RefreshCw className="spin" size={16} /> : <Save size={16} />}保存并应用</button></div></article>}
         {activePage === 'access' && <article className="settings-card settings-focus-card"><div className="settings-card-head settings-focus-head"><div className="settings-section-mark"><UserCog size={18} /></div><div><span className="eyebrow">ACCESS CONTROL</span><h3>角色映射</h3><p>普通 New API 用户默认只能查看总览，Admin 自动为运维员，Root 自动为管理员；这里可以对指定用户覆盖。</p></div></div><div className="user-add user-add-wide"><input placeholder="New API 用户名" value={newUser} onChange={(event) => setNewUser(event.target.value)} /><select value={newRole} onChange={(event) => setNewRole(event.target.value)}><option value="viewer">只读总览</option><option value="operator">运维</option><option value="admin">管理员</option></select><button onClick={() => void addUser()}><UserCog size={15} />添加映射</button></div><div className="role-list">{users.map((user) => <div key={user.username}><strong>{user.username}</strong><span>{user.role}</span><button onClick={async () => { await api(`access/users/${encodeURIComponent(user.username)}`, { method: 'PUT', body: JSON.stringify({ role: null }) }); await load(); }}><X size={14} /></button></div>)}{!users.length && <p>暂无用户覆盖规则</p>}</div></article>}
@@ -922,7 +964,7 @@ function IncidentsView() {
 export default function App() {
   const [authState, setAuthState] = useState<'loading' | 'guest' | 'ready'>('loading');
   const [user, setUser] = useState<AuthUser | null>(null);
-  const [tab, setTab] = useState<Tab>('overview');
+  const [route, setRoute] = useState<AppRoute>(() => readRoute());
   const [summary, setSummary] = useState<Summary | null>(null);
   const [channels, setChannels] = useState<Channel[]>([]);
   const [selectedChannel, setSelectedChannel] = useState<Channel | null>(null);
@@ -930,8 +972,22 @@ export default function App() {
   const [refreshing, setRefreshing] = useState(false);
   const [countdown, setCountdown] = useState(REFRESH_SECONDS);
   const refreshSeconds = Math.max(2, user?.dashboard_refresh_seconds || REFRESH_SECONDS);
+  const tab: Tab = route.tab;
+
+  const navigate = useCallback((nextRoute: AppRoute, replace = false) => {
+    const path = routePath(nextRoute);
+    if (replace) window.history.replaceState(null, '', path);
+    else window.history.pushState(null, '', path);
+    setRoute(nextRoute);
+    window.scrollTo({ top: 0, behavior: 'auto' });
+  }, []);
 
   useEffect(() => { api<AuthUser>('auth/me').then((result) => { setUser(result); setCountdown(result.dashboard_refresh_seconds || REFRESH_SECONDS); setAuthState('ready'); }).catch(() => setAuthState('guest')); }, []);
+  useEffect(() => {
+    const onPopState = () => setRoute(readRoute());
+    window.addEventListener('popstate', onPopState);
+    return () => window.removeEventListener('popstate', onPopState);
+  }, []);
 
   const loadCore = useCallback(async () => {
     setRefreshing(true);
@@ -953,6 +1009,15 @@ export default function App() {
 
   useEffect(() => { if (authState !== 'ready') return; void loadCore(); const timer = window.setInterval(() => void loadCore(), refreshSeconds * 1000); return () => window.clearInterval(timer); }, [authState, loadCore, refreshSeconds]);
   useEffect(() => { if (authState !== 'ready') return; const timer = window.setInterval(() => setCountdown((value) => value <= 1 ? refreshSeconds : value - 1), 1000); return () => window.clearInterval(timer); }, [authState, refreshSeconds]);
+  useEffect(() => {
+    if (!user) return;
+    const elevated = user.role === 'operator' || user.role === 'admin';
+    const allowed = tab === 'overview'
+      || (tab === 'keyUsage' && user.key_usage_available)
+      || (elevated && ['logs', 'resources', 'incidents', 'channels'].includes(tab))
+      || (tab === 'settings' && user.role === 'admin');
+    if (!allowed) navigate({ tab: 'overview', settingsPage: 'status' }, true);
+  }, [navigate, tab, user]);
 
   const overall = useMemo(() => {
     if (!summary) return { tone: 'muted' as const, label: '正在同步' };
@@ -980,10 +1045,10 @@ export default function App() {
 
   return (
     <div className="app-shell">
-      <header className="topbar"><div className="brand"><div className="brand-mark"><Activity size={21} /></div><div><span>NEW API</span><strong>MONITOR</strong></div></div><nav>{navItems.map(([key, label, Icon]) => <button key={key} className={tab === key ? 'active' : ''} onClick={() => setTab(key)}><Icon size={16} />{label}</button>)}</nav><div className="top-actions"><div className="refresh-state"><RefreshCw className={refreshing ? 'spin' : ''} size={14} /><span>{countdown}s</span></div><span className="user-chip">{user?.display_name || user?.username}<small>{user?.role}</small></span><button className="icon-button" onClick={() => void logout()} title="退出登录"><LogOut size={17} /></button></div></header>
+      <header className="topbar"><div className="brand"><div className="brand-mark"><Activity size={21} /></div><div><span>NEW API</span><strong>MONITOR</strong></div></div><nav>{navItems.map(([key, label, Icon]) => <button key={key} className={tab === key ? 'active' : ''} onClick={() => navigate({ tab: key, settingsPage: key === 'settings' ? route.settingsPage : 'status' })}><Icon size={16} />{label}</button>)}</nav><div className="top-actions"><div className="refresh-state"><RefreshCw className={refreshing ? 'spin' : ''} size={14} /><span>{countdown}s</span></div><span className="user-chip">{user?.display_name || user?.username}<small>{user?.role}</small></span><button className="icon-button" onClick={() => void logout()} title="退出登录"><LogOut size={17} /></button></div></header>
       <main className="content"><section className="hero"><div><div className="eyebrow">OPERATIONS / REAL-TIME</div><h1>服务运行态势</h1><p>真实渠道探测、真实消费日志、主机与容器资源。</p></div><div className={`overall-status overall-${overall.tone}`}><span className="status-beacon" /><div><small>OVERALL STATUS</small><strong>{overall.label}</strong></div><span>{summary ? formatTime(summary.generated_at) : '同步中'}</span></div></section>
         {error && <div className="inline-error"><AlertTriangle size={16} />{error}<button onClick={() => void loadCore()}>重试</button></div>}
-        {summary ? <>{tab === 'overview' && <Overview summary={summary} channels={channels} onChannel={setSelectedChannel} />}{tab === 'keyUsage' && user?.key_usage_available && <KeyUsageView />}{tab === 'logs' && elevated && <LogsView channels={channels} />}{tab === 'resources' && elevated && <ResourcesView />}{tab === 'incidents' && elevated && <IncidentsView />}{tab === 'channels' && elevated && <ChannelSettingsView />}{tab === 'settings' && user?.role === 'admin' && <SettingsView />}</> : <div className="loading-panel"><RefreshCw className="spin" /><span>正在读取第一批监控数据</span></div>}
+        {summary ? <>{tab === 'overview' && <Overview summary={summary} channels={channels} onChannel={setSelectedChannel} />}{tab === 'keyUsage' && user?.key_usage_available && <KeyUsageView />}{tab === 'logs' && elevated && <LogsView channels={channels} />}{tab === 'resources' && elevated && <ResourcesView />}{tab === 'incidents' && elevated && <IncidentsView />}{tab === 'channels' && elevated && <ChannelSettingsView />}{tab === 'settings' && user?.role === 'admin' && <SettingsView activePage={route.settingsPage} onActivePageChange={(settingsPage) => navigate({ tab: 'settings', settingsPage })} />}</> : <div className="loading-panel"><RefreshCw className="spin" /><span>正在读取第一批监控数据</span></div>}
       </main>
       <footer><span>数据源：New API 管理接口 / 真实 Relay 请求 / Linux & Docker</span><span>告警阈值：总耗时或首字 &gt; 60s，3/5 或 5/10 触发</span></footer>
       {selectedChannel && <DetailDrawer channel={selectedChannel} onClose={() => setSelectedChannel(null)} />}
