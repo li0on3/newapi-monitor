@@ -4,6 +4,15 @@
 
 `main` is the protected production baseline. Direct pushes, force pushes, and deletion are blocked. Normal changes must use a pull request.
 
+Current protection policy:
+
+- Administrators must follow the rule and cannot bypass it with a direct push.
+- Every change requires a pull request and all four required checks.
+- Branches must be up to date with `main`, and conversations must be resolved.
+- Only linear history and squash merging are enabled.
+- Force pushes and deletion of `main` are blocked.
+- Published `v*` tags cannot be deleted or overwritten.
+
 ## Daily Changes
 
 ```bash
