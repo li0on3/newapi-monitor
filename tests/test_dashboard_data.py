@@ -124,6 +124,55 @@ class DashboardRepositoryTests(unittest.TestCase):
         self.assertEqual(1, summary["incidents"]["open"])
         self.assertEqual(31, summary["resources"]["system_cpu"])
 
+    def test_summary_scope_excludes_hidden_channel_health_logs_and_incidents(self):
+        store = StateStore(self.db_path)
+        store.ingest_logs(
+            [
+                {
+                    "request_id": "request-hidden",
+                    "created_at": 1_220,
+                    "channel": 2,
+                    "channel_name": "failed-channel",
+                    "model_name": "gpt-c",
+                    "use_time": 80,
+                    "other": '{"frt": 70000}',
+                }
+            ]
+        )
+        store.record_alert_events(
+            [
+                AlertEvent(
+                    "latency_high",
+                    "hidden latency",
+                    "slow",
+                    key="latency:2:gpt-c",
+                    severity="critical",
+                ),
+                AlertEvent(
+                    "resource_high",
+                    "memory high",
+                    "high",
+                    key="resource:system_memory",
+                    severity="warning",
+                ),
+            ],
+            now=1_250,
+        )
+        store.connection.close()
+
+        summary = self.repository.summary(
+            now=1_300,
+            request_window_seconds=600,
+            channel_ids={1},
+        )
+
+        self.assertEqual(1, summary["channels"]["total"])
+        self.assertEqual(1, summary["channels"]["healthy"])
+        self.assertEqual(2, summary["requests"]["total"])
+        self.assertEqual(1, summary["requests"]["slow"])
+        self.assertEqual(1, summary["incidents"]["open"])
+        self.assertEqual(0, summary["incidents"]["critical"])
+
     def test_summary_marks_stale_channel_observations_unknown(self):
         repository = DashboardRepository(
             self.db_path,

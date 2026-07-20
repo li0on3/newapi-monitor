@@ -38,7 +38,12 @@ class DashboardRepository:
         rank = max(1, math.ceil(len(ordered) * 0.95))
         return round(ordered[rank - 1], 3)
 
-    def summary(self, now: int | None = None, request_window_seconds: int = 86400) -> dict[str, Any]:
+    def summary(
+        self,
+        now: int | None = None,
+        request_window_seconds: int = 86400,
+        channel_ids: set[int] | None = None,
+    ) -> dict[str, Any]:
         current_time = int(time.time()) if now is None else now
         since = current_time - request_window_seconds
         with self._connect() as connection:
@@ -56,7 +61,7 @@ class DashboardRepository:
             ).fetchall()
             request_rows = connection.execute(
                 """
-                SELECT use_time, frt_ms, created_at
+                SELECT channel_id, use_time, frt_ms, created_at
                 FROM latency_samples
                 WHERE created_at >= ?
                 """,
@@ -70,15 +75,23 @@ class DashboardRepository:
                 ORDER BY created_at DESC, id DESC LIMIT 1
                 """
             ).fetchone()
-            incident_row = connection.execute(
+            incident_rows = connection.execute(
                 """
-                SELECT COUNT(*) AS total,
-                       SUM(CASE WHEN severity = 'critical' THEN 1 ELSE 0 END) AS critical
+                SELECT incident_key, severity
                 FROM incidents WHERE status = 'open'
                 """
-            ).fetchone()
+            ).fetchall()
 
         enabled = [row for row in channel_rows if int(row["status"] or 0) == 1]
+        if channel_ids is not None:
+            enabled = [row for row in enabled if int(row["channel_id"]) in channel_ids]
+            request_rows = [row for row in request_rows if int(row["channel_id"] or 0) in channel_ids]
+            incident_rows = [
+                row
+                for row in incident_rows
+                if (incident_channel_id := self._incident_channel_id(str(row["incident_key"]))) is None
+                or incident_channel_id in channel_ids
+            ]
         recent = [
             row
             for row in enabled
@@ -131,10 +144,20 @@ class DashboardRepository:
             },
             "resources": resources,
             "incidents": {
-                "open": int(incident_row["total"] or 0) if incident_row else 0,
-                "critical": int(incident_row["critical"] or 0) if incident_row else 0,
+                "open": len(incident_rows),
+                "critical": sum(1 for row in incident_rows if str(row["severity"]) == "critical"),
             },
         }
+
+    @staticmethod
+    def _incident_channel_id(incident_key: str) -> int | None:
+        parts = incident_key.split(":", 2)
+        if len(parts) < 2 or parts[0] not in {"channel", "latency"}:
+            return None
+        try:
+            return int(parts[1])
+        except ValueError:
+            return None
 
     def channels(
         self,

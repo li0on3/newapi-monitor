@@ -79,7 +79,7 @@ Docker Scout 报告 `sqlite 3.51.2-r0` 的 CVE-2026-11824 与 CVE-2026-11822，�
 
 ## Verification evidence
 
-- Python unit tests: 46 passed.
+- Python unit tests: 49 passed.
 - TypeScript and Vite production build: passed.
 - `pip-audit`: no known vulnerabilities after upgrading `cryptography` to 48.0.1.
 - `bun audit`: no known vulnerabilities.

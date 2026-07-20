@@ -1126,6 +1126,13 @@ class StateStore:
                 )
         self.connection.commit()
 
+    def has_open_incident(self, incident_key: str) -> bool:
+        row = self.connection.execute(
+            "SELECT 1 FROM incidents WHERE incident_key = ? AND status = 'open' LIMIT 1",
+            (incident_key,),
+        ).fetchone()
+        return row is not None
+
     def ingest_logs(
         self,
         logs: Iterable[dict[str, Any]],
@@ -1650,28 +1657,28 @@ class MonitorApp:
             previous_state = str(self.container_states.get(container_name) or "unknown")
             previous_restarts = int(self.container_restarts.get(container_name) or 0)
             new_restarts = int(container.get("restarts") or 0)
-            if new_container_state != previous_state:
-                if new_container_state == "running" and previous_state != "unknown":
-                    events.append(
-                        AlertEvent(
-                            "container_recovered",
-                            f"容器恢复：{container_name}",
-                            f"容器状态：{new_container_state}",
-                            key=f"container:{container_name}",
-                            severity="info",
-                            recovery=True,
-                        )
+            incident_key = f"container:{container_name}"
+            if new_container_state == "running" and self.store.has_open_incident(incident_key):
+                events.append(
+                    AlertEvent(
+                        "container_recovered",
+                        f"容器恢复：{container_name}",
+                        f"容器状态：{new_container_state}",
+                        key=incident_key,
+                        severity="info",
+                        recovery=True,
                     )
-                elif new_container_state != "running":
-                    events.append(
-                        AlertEvent(
-                            "container_failed",
-                            f"容器异常：{container_name}",
-                            f"容器状态：{new_container_state}\n{container.get('error', '')}",
-                            key=f"container:{container_name}",
-                            severity="critical",
-                        )
+                )
+            elif new_container_state != previous_state and new_container_state != "running":
+                events.append(
+                    AlertEvent(
+                        "container_failed",
+                        f"容器异常：{container_name}",
+                        f"容器状态：{new_container_state}\n{container.get('error', '')}",
+                        key=incident_key,
+                        severity="critical",
                     )
+                )
             if new_restarts > previous_restarts and previous_restarts > 0:
                 events.append(
                     AlertEvent(

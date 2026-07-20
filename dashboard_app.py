@@ -465,7 +465,7 @@ def system_health_snapshot() -> dict[str, Any]:
 
 
 @app.get("/api/system/status")
-def system_status(_: AuthenticatedUser) -> dict[str, Any]:
+def system_status(_: AdminUser) -> dict[str, Any]:
     return system_health_snapshot()
 
 
@@ -529,22 +529,11 @@ def me(user: AuthenticatedUser) -> dict[str, Any]:
 
 @app.get("/api/dashboard/summary")
 def dashboard_summary(_: AuthenticatedUser) -> dict[str, Any]:
-    summary = repository().summary()
     if runtime.settings is None:
-        return summary
+        return repository().summary()
     visible = runtime.settings.decorate_channels(repository().channels(), include_hidden=False)
-    now = time.time()
-    healthy = failed = unknown = 0
-    for item in visible:
-        latest = item.get("latest")
-        if not latest or now - int(latest.get("observed_at") or 0) > 900:
-            unknown += 1
-        elif latest.get("success"):
-            healthy += 1
-        else:
-            failed += 1
-    summary["channels"].update(total=len(visible), healthy=healthy, failed=failed, unknown=unknown)
-    return summary
+    visible_channel_ids = {int(item["channel_id"]) for item in visible}
+    return repository().summary(channel_ids=visible_channel_ids)
 
 
 @app.get("/api/channels")
@@ -560,12 +549,14 @@ def channel(channel_id: int, _: AuthenticatedUser) -> dict[str, Any]:
     item = repository().channel(channel_id)
     if item is None:
         raise HTTPException(status_code=404, detail="channel not found")
+    if runtime.settings is not None and not runtime.settings.decorate_channels([item], include_hidden=False):
+        raise HTTPException(status_code=404, detail="channel not found")
     return item
 
 
 @app.get("/api/logs")
 def logs(
-    _: AuthenticatedUser,
+    _: OperatorUser,
     limit: int = Query(100, ge=1, le=200),
     offset: int = Query(0, ge=0),
     channel_id: int | None = Query(None, ge=1),
@@ -585,7 +576,7 @@ def logs(
 
 @app.get("/api/resources")
 def resources(
-    _: AuthenticatedUser,
+    _: OperatorUser,
     hours: int = Query(24, ge=1, le=168),
 ) -> dict[str, Any]:
     return repository().resources(hours=hours)
@@ -593,7 +584,7 @@ def resources(
 
 @app.get("/api/incidents")
 def incidents(
-    _: AuthenticatedUser,
+    _: OperatorUser,
     status: str = Query("all", pattern="^(all|open|resolved)$"),
     limit: int = Query(100, ge=1, le=500),
 ) -> dict[str, Any]:

@@ -68,7 +68,7 @@ class SettingsStoreTests(unittest.TestCase):
     def test_role_mapping_and_user_override(self):
         self.assertEqual("admin", self.store.resolve_role("alice", 100))
         self.assertEqual("operator", self.store.resolve_role("alice", 10))
-        self.assertIsNone(self.store.resolve_role("alice", 1))
+        self.assertEqual("viewer", self.store.resolve_role("alice", 1))
 
         self.store.set_user_role("alice", "viewer", actor="root")
 

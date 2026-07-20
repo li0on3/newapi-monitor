@@ -6,6 +6,7 @@ from unittest import mock
 
 import newapi_monitor
 from newapi_monitor import (
+    AlertEvent,
     ChannelObservation,
     ChannelStateTracker,
     CollectorFreshnessTracker,
@@ -44,6 +45,32 @@ class CollectorFreshnessTests(unittest.TestCase):
 
             stale = store.collector_health(now=221)["logs"]
             self.assertEqual("stale", stale["status"])
+            store.connection.close()
+
+    def test_recovery_event_reconciles_stale_open_incident(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = StateStore(str(Path(temp_dir) / "monitor.db"))
+            store.record_alert_events(
+                [AlertEvent("container_failed", "failed", "down", key="container:new-api", severity="critical")],
+                now=100,
+            )
+
+            self.assertTrue(store.has_open_incident("container:new-api"))
+            store.record_alert_events(
+                [
+                    AlertEvent(
+                        "container_recovered",
+                        "recovered",
+                        "running",
+                        key="container:new-api",
+                        severity="info",
+                        recovery=True,
+                    )
+                ],
+                now=120,
+            )
+
+            self.assertFalse(store.has_open_incident("container:new-api"))
             store.connection.close()
 
     def test_freshness_tracker_alerts_once_and_recovers(self):

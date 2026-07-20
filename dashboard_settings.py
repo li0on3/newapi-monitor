@@ -285,7 +285,7 @@ class SettingsStore:
             return "admin"
         if source_role >= 10:
             return "operator"
-        return None
+        return "viewer"
 
     def users(self) -> list[dict[str, Any]]:
         with self._connect() as connection:
