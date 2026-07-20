@@ -5,6 +5,7 @@ from pydantic import ValidationError
 
 from dashboard_app import (
     ChannelSettingsPayload,
+    KeyUsageQueryPayload,
     SettingsUpdatePayload,
     require_admin,
     require_operator,
@@ -23,6 +24,22 @@ class DashboardApiModelTests(unittest.TestCase):
             ChannelSettingsPayload.model_validate({"probe_path": "https://evil.example/v1/responses"})
         with self.assertRaises(ValidationError):
             ChannelSettingsPayload.model_validate({"probe_prompt": "x" * 257})
+
+    def test_key_usage_configuration_and_query_are_bounded(self):
+        settings = SettingsUpdatePayload.model_validate({
+            "key_usage_enabled": True,
+            "key_usage_min_role": "operator",
+            "key_usage_log_limit": 250,
+            "key_usage_attempts_per_minute": 12,
+        })
+        self.assertEqual("operator", settings.key_usage_min_role)
+
+        with self.assertRaises(ValidationError):
+            SettingsUpdatePayload.model_validate({"key_usage_min_role": "public"})
+        with self.assertRaises(ValidationError):
+            KeyUsageQueryPayload.model_validate({"api_key": "bad key"})
+        with self.assertRaises(ValidationError):
+            KeyUsageQueryPayload.model_validate({"api_key": "sk-" + "x" * 600})
 
     def test_viewer_cannot_use_privileged_dependencies(self):
         viewer = {"username": "viewer", "role": "viewer"}

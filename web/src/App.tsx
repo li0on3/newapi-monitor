@@ -6,14 +6,17 @@ import {
   CheckCircle2,
   ChevronRight,
   CircleGauge,
+  CircleDollarSign,
   CircleDot,
   Clock3,
+  Copy,
   Cpu,
   Database,
   Eye,
   EyeOff,
   HardDrive,
   Inbox,
+  Fingerprint,
   KeyRound,
   LogOut,
   MemoryStick,
@@ -34,9 +37,9 @@ import {
 import { FormEvent, PointerEvent as ReactPointerEvent, ReactNode, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { api, ApiError } from './api';
-import type { AuthUser, Channel, ChannelMonitorConfig, ContainerMetric, Incident, IncidentPayload, IncidentSummary, LogItem, ResourceSample, Summary, SystemHealth } from './types';
+import type { AuthUser, Channel, ChannelMonitorConfig, ContainerMetric, Incident, IncidentPayload, IncidentSummary, KeyUsageCall, KeyUsageResult, LogItem, ResourceSample, Summary, SystemHealth } from './types';
 
-type Tab = 'overview' | 'logs' | 'resources' | 'incidents' | 'channels' | 'settings';
+type Tab = 'overview' | 'keyUsage' | 'logs' | 'resources' | 'incidents' | 'channels' | 'settings';
 
 const REFRESH_SECONDS = 5;
 const SLOW_SECONDS = 60;
@@ -83,6 +86,14 @@ function formatElapsed(seconds: number | null | undefined): string {
 
 function formatPercent(value: number | null | undefined): string {
   return value == null ? '—' : `${value.toFixed(1)}%`;
+}
+
+function formatCompactNumber(value: number): string {
+  return new Intl.NumberFormat('zh-CN', { notation: value >= 10_000 ? 'compact' : 'standard', maximumFractionDigits: 2 }).format(value);
+}
+
+function formatQuota(value: number): string {
+  return `$${new Intl.NumberFormat('zh-CN', { minimumFractionDigits: value > 0 && value < 0.01 ? 4 : 2, maximumFractionDigits: 6 }).format(value)}`;
 }
 
 function classNames(...names: Array<string | false | null | undefined>): string {
@@ -218,11 +229,18 @@ function ChannelSettingsView() {
 }
 
 type SettingField = { key: string; label: string; type?: 'number' | 'text' | 'password' | 'boolean' | 'select'; options?: Array<[string, string]>; hint?: string };
-type SettingSectionId = 'connection' | 'collection' | 'thresholds' | 'mail' | 'advanced';
+type SettingSectionId = 'connection' | 'keyUsage' | 'collection' | 'thresholds' | 'mail' | 'advanced';
 type SettingsPageId = SettingSectionId | 'status' | 'overview' | 'access' | 'audit';
 const SETTING_SECTIONS: Array<{ id: SettingSectionId; title: string; short: string; description: string; icon: ReactNode; fields: SettingField[] }> = [
   { id: 'connection', title: 'New API 连接', short: '连接与凭据', icon: <Network size={18} />, description: '管理接口只读同步与真实探测凭据。敏感字段不会回显。', fields: [
     { key: 'new_api_base_url', label: 'New API 地址' }, { key: 'new_api_user_id', label: '管理用户 ID', type: 'number' }, { key: 'new_api_access_token', label: '管理访问令牌', type: 'password', hint: '留空保持原值' }, { key: 'relay_api_token', label: '真实探测令牌', type: 'password', hint: '留空保持原值' },
+  ] },
+  { id: 'keyUsage', title: 'Key 用量查询', short: '权限与查询策略', icon: <KeyRound size={18} />, description: '按 Key 即时读取其额度与最近调用。Key 仅在当前请求中转发给 New API，不写入监控数据库、审计日志或浏览器地址。', fields: [
+    { key: 'key_usage_enabled', label: '启用 Key 用量查询', type: 'boolean', hint: '关闭后入口和接口同时停用' },
+    { key: 'key_usage_min_role', label: '最低可用角色', type: 'select', options: [['admin', '仅管理员'], ['operator', '运维员及管理员'], ['viewer', '所有已登录用户']], hint: '建议保持仅管理员，降低 Key 信息泄露风险' },
+    { key: 'key_usage_log_limit', label: '单次返回调用数', type: 'number', hint: '10–500，New API 最多提供最近 1000 条' },
+    { key: 'key_usage_attempts_per_minute', label: '每用户每分钟查询次数', type: 'number', hint: '防止撞库、滥用与上游压力' },
+    { key: 'key_usage_quota_per_unit', label: '额度换算单位', type: 'number', hint: '默认 500000，即 500000 额度显示为 $1' },
   ] },
   { id: 'collection', title: '采集频率', short: '同步与采样', icon: <RefreshCw size={18} />, description: '保存后监控工作线程将在数秒内热加载。', fields: [
     { key: 'dashboard_refresh_seconds', label: '页面刷新（秒）', type: 'number' }, { key: 'channel_sync_interval_seconds', label: '渠道同步（秒）', type: 'number' }, { key: 'channel_interval_seconds', label: '渠道探测（秒）', type: 'number' }, { key: 'log_interval_seconds', label: '日志同步（秒）', type: 'number' }, { key: 'resource_interval_seconds', label: '资源采样（秒）', type: 'number' }, { key: 'report_interval_seconds', label: '周期报告（秒）', type: 'number' }, { key: 'retention_days', label: '数据保留（天）', type: 'number' },
@@ -318,7 +336,7 @@ function SettingsView() {
           </div>
           <div className="settings-action-bar"><div><strong>{overviewDirty ? '展示范围尚未应用' : '角色展示范围已生效'}</strong><small>保存后无需重启，管理员和普通用户刷新总览即可看到各自渠道。</small></div><button className="secondary-button" disabled={!overviewDirty || saving} onClick={() => void load()}>撤销更改</button><button className="primary-button settings-save" disabled={!overviewDirty || saving || !overviewChannels.length} onClick={() => void saveOverviewVisibility()}>{saving ? <RefreshCw className="spin" size={16} /> : <Save size={16} />}保存展示范围</button></div>
         </article>}
-        {activeSection && <article className="settings-card settings-focus-card"><div className="settings-card-head settings-focus-head"><div className="settings-section-mark">{activeSection.icon}</div><div><span className="eyebrow">CONFIGURATION GROUP</span><h3>{activeSection.title}</h3><p>{activeSection.description}</p></div><span className="settings-field-count">{activeSection.fields.length} 项</span></div><div className="settings-fields">{activeSection.fields.map((field) => field.type === 'boolean' ? <Toggle key={field.key} label={field.label} checked={Boolean(values[field.key])} onChange={(value) => setValue(field.key, value)} /> : <label key={field.key}><span>{field.label}</span><input type={field.type === 'password' ? 'password' : field.type === 'number' ? 'number' : 'text'} value={String(values[field.key] ?? '')} placeholder={field.hint} onChange={(event) => setValue(field.key, field.type === 'number' ? Number(event.target.value) : event.target.value)} /><small>{field.hint}</small></label>)}</div><div className="settings-action-bar"><div><strong>{dirty ? '更改尚未应用' : '当前配置已生效'}</strong><small>{dirty ? '保存后采集器将在数秒内热加载，无需重启。' : '你可以切换左侧分类继续检查其他配置。'}</small></div><button className="secondary-button" disabled={!dirty || saving} onClick={() => { setValues(baseline); setMessage('已撤销本次未保存更改'); }}>撤销更改</button><button className="primary-button settings-save" disabled={!dirty || saving} onClick={() => void save()}>{saving ? <RefreshCw className="spin" size={16} /> : <Save size={16} />}保存并应用</button></div></article>}
+        {activeSection && <article className="settings-card settings-focus-card"><div className="settings-card-head settings-focus-head"><div className="settings-section-mark">{activeSection.icon}</div><div><span className="eyebrow">CONFIGURATION GROUP</span><h3>{activeSection.title}</h3><p>{activeSection.description}</p></div><span className="settings-field-count">{activeSection.fields.length} 项</span></div><div className="settings-fields">{activeSection.fields.map((field) => field.type === 'boolean' ? <Toggle key={field.key} label={field.label} checked={Boolean(values[field.key])} onChange={(value) => setValue(field.key, value)} /> : <label key={field.key}><span>{field.label}</span>{field.type === 'select' ? <select value={String(values[field.key] ?? '')} onChange={(event) => setValue(field.key, event.target.value)}>{field.options?.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select> : <input type={field.type === 'password' ? 'password' : field.type === 'number' ? 'number' : 'text'} value={String(values[field.key] ?? '')} placeholder={field.hint} onChange={(event) => setValue(field.key, field.type === 'number' ? Number(event.target.value) : event.target.value)} />}<small>{field.hint}</small></label>)}</div><div className="settings-action-bar"><div><strong>{dirty ? '更改尚未应用' : '当前配置已生效'}</strong><small>{dirty ? '保存后采集器将在数秒内热加载，无需重启。' : '你可以切换左侧分类继续检查其他配置。'}</small></div><button className="secondary-button" disabled={!dirty || saving} onClick={() => { setValues(baseline); setMessage('已撤销本次未保存更改'); }}>撤销更改</button><button className="primary-button settings-save" disabled={!dirty || saving} onClick={() => void save()}>{saving ? <RefreshCw className="spin" size={16} /> : <Save size={16} />}保存并应用</button></div></article>}
         {activePage === 'access' && <article className="settings-card settings-focus-card"><div className="settings-card-head settings-focus-head"><div className="settings-section-mark"><UserCog size={18} /></div><div><span className="eyebrow">ACCESS CONTROL</span><h3>角色映射</h3><p>普通 New API 用户默认只能查看总览，Admin 自动为运维员，Root 自动为管理员；这里可以对指定用户覆盖。</p></div></div><div className="user-add user-add-wide"><input placeholder="New API 用户名" value={newUser} onChange={(event) => setNewUser(event.target.value)} /><select value={newRole} onChange={(event) => setNewRole(event.target.value)}><option value="viewer">只读总览</option><option value="operator">运维</option><option value="admin">管理员</option></select><button onClick={() => void addUser()}><UserCog size={15} />添加映射</button></div><div className="role-list">{users.map((user) => <div key={user.username}><strong>{user.username}</strong><span>{user.role}</span><button onClick={async () => { await api(`access/users/${encodeURIComponent(user.username)}`, { method: 'PUT', body: JSON.stringify({ role: null }) }); await load(); }}><X size={14} /></button></div>)}{!users.length && <p>暂无用户覆盖规则</p>}</div></article>}
         {activePage === 'audit' && <article className="settings-card settings-focus-card"><div className="settings-card-head settings-focus-head"><div className="settings-section-mark"><Clock3 size={18} /></div><div><span className="eyebrow">CHANGE HISTORY</span><h3>配置审计</h3><p>最近30次系统、渠道和权限变更，便于快速定位误操作。</p></div><span className="settings-field-count">{audit.length} 条</span></div><div className="audit-list audit-list-wide">{audit.map((entry) => <div key={String(entry.id)}><span>{formatFullTime(Number(entry.created_at))}</span><strong>{String(entry.actor)}</strong><small>{String(entry.action)} · {String(entry.target)}</small></div>)}</div></article>}
       </div>
@@ -575,6 +593,72 @@ function LogsView({ channels }: { channels: Channel[] }) {
       </div>
     </section>
   );
+}
+
+function KeyUsageView() {
+  const [apiKey, setApiKey] = useState('');
+  const [revealed, setRevealed] = useState(false);
+  const [result, setResult] = useState<KeyUsageResult | null>(null);
+  const [selected, setSelected] = useState<KeyUsageCall | null>(null);
+  const [filter, setFilter] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+
+  const query = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!apiKey) return;
+    setLoading(true); setError(''); setSelected(null);
+    try {
+      const payload = await api<KeyUsageResult>('key-usage/query', { method: 'POST', body: JSON.stringify({ api_key: apiKey }) });
+      setResult(payload);
+    } catch (requestError) {
+      setResult(null);
+      setError(requestError instanceof Error ? requestError.message : 'Key 查询失败');
+    } finally { setLoading(false); }
+  };
+  const clear = () => { setApiKey(''); setResult(null); setSelected(null); setFilter(''); setError(''); setRevealed(false); };
+  const copyText = (value: string) => { if (value) void navigator.clipboard.writeText(value); };
+  const calls = useMemo(() => {
+    const keyword = filter.trim().toLowerCase();
+    if (!result || !keyword) return result?.calls || [];
+    return result.calls.filter((item) => [item.model_name, item.channel_name, item.request_id, item.upstream_request_id, item.group].some((value) => value.toLowerCase().includes(keyword)));
+  }, [filter, result]);
+  const usagePercentage = result?.usage.used_percentage ?? 0;
+  const expiryTone = !result?.usage.expires_at || result.usage.expires_at > Date.now() / 1000 ? 'ok' : 'bad';
+
+  return <section className="key-usage-page">
+    <div className="section-heading key-usage-heading"><div><span className="eyebrow">TOKEN INTELLIGENCE / ON DEMAND</span><h2>Key 用量与调用详情</h2><p>直接读取该 Key 在 New API 中的真实额度与最近调用，不依赖监控采集延迟。</p></div><span className="source-note"><ShieldCheck size={14} />只读查询 · 不保存 Key</span></div>
+    <form className="key-query-console" onSubmit={(event) => void query(event)}>
+      <div className="key-query-mark"><Fingerprint size={24} /></div>
+      <div className="key-query-copy"><strong>输入需要核验的 API Key</strong><span>Key 只通过服务端内存转发到已配置的 New API；不会进入 URL、数据库、审计记录或前端缓存。</span></div>
+      <label className="key-query-input"><KeyRound size={18} /><input type={revealed ? 'text' : 'password'} value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder="sk-••••••••••••••••" autoComplete="off" spellCheck={false} aria-label="API Key" /><button type="button" onClick={() => setRevealed((value) => !value)} title={revealed ? '隐藏 Key' : '显示 Key'}>{revealed ? <EyeOff size={17} /> : <Eye size={17} />}</button>{apiKey && <button type="button" onClick={clear} title="清空"><X size={17} /></button>}</label>
+      <button className="primary-button key-query-submit" type="submit" disabled={loading || apiKey.length < 4}>{loading ? <RefreshCw className="spin" size={17} /> : <Search size={17} />}{loading ? '正在安全查询' : '查询用量'}</button>
+    </form>
+    {error && <div className="inline-error key-query-error"><AlertTriangle size={16} />{error}</div>}
+    {!result && !loading && <div className="key-usage-empty"><div><KeyRound size={28} /></div><strong>一次查询，确认额度与调用轨迹</strong><p>适合快速核验用户反馈、定位 Key 是否仍有额度、确认最近模型与请求耗时。</p><ul><li><CheckCircle2 size={14} />实时额度</li><li><CheckCircle2 size={14} />最近调用</li><li><CheckCircle2 size={14} />Token 与耗时</li></ul></div>}
+    {result && <>
+      <div className="key-result-identity">
+        <div className="key-usage-ring" style={{ '--usage-progress': `${Math.min(100, usagePercentage) * 3.6}deg` } as React.CSSProperties}><span><b>{result.usage.unlimited_quota ? '∞' : formatPercent(result.usage.used_percentage)}</b><small>已使用</small></span></div>
+        <div className="key-result-title"><span className="eyebrow">VERIFIED TOKEN</span><h3>{result.usage.name}</h3><div><StatusPill tone={expiryTone}>{result.usage.expires_at ? (expiryTone === 'ok' ? `有效至 ${formatTime(result.usage.expires_at, true)}` : '已过期') : '长期有效'}</StatusPill><span>查询于 {formatTime(result.queried_at, true)}</span></div></div>
+        <div className="key-model-scope"><span>模型权限</span><strong>{result.usage.model_limits_enabled ? `${Object.keys(result.usage.model_limits).length} 个模型` : '未限制'}</strong><small>{result.usage.model_limits_enabled ? Object.keys(result.usage.model_limits).slice(0, 3).join(' · ') : '跟随账号与分组策略'}</small></div>
+      </div>
+      <div className="key-usage-metrics">
+        <article><span><CircleDollarSign size={16} />已使用额度</span><strong>{formatQuota(result.usage.total_used_display)}</strong><small>原始额度 {formatCompactNumber(result.usage.total_used)}</small></article>
+        <article><span><CircleGauge size={16} />可用额度</span><strong>{result.usage.unlimited_quota ? '不限额' : formatQuota(result.usage.total_available_display)}</strong><small>{result.usage.unlimited_quota ? '此 Key 未设置额度上限' : `总授予 ${formatQuota(result.usage.total_granted_display)}`}</small></article>
+        <article><span><Activity size={16} />最近调用</span><strong>{formatCompactNumber(result.summary.calls)}</strong><small>{formatCompactNumber(result.summary.total_tokens)} Tokens · {result.summary.models.length} 个模型</small></article>
+        <article><span><TimerReset size={16} />P95 总耗时</span><strong>{result.summary.p95_seconds.toFixed(2)}s</strong><small>平均 {result.summary.average_seconds.toFixed(2)}s</small></article>
+      </div>
+      <div className="key-call-workspace">
+        <div className="key-call-list">
+          <div className="key-call-toolbar"><div><strong>最近调用详情</strong><span>New API 返回 {result.calls.length} 条 · 当前显示 {calls.length} 条</span></div><label><Search size={15} /><input value={filter} onChange={(event) => setFilter(event.target.value)} placeholder="模型、渠道、请求 ID" />{filter && <button onClick={() => setFilter('')}><X size={14} /></button>}</label></div>
+          <div className="key-call-table-scroll"><table className="key-call-table"><thead><tr><th>时间</th><th>模型 / 渠道</th><th>Tokens</th><th>额度</th><th>耗时</th><th>模式</th><th /></tr></thead><tbody>{calls.map((item) => <tr key={`${item.id}-${item.request_id}`} className={selected?.id === item.id ? 'active' : ''} onClick={() => setSelected(item)}><td className="mono">{formatTime(item.created_at, true)}</td><td><strong>{item.model_name || '未知模型'}</strong><span>{item.channel_name || `渠道 #${item.channel_id}`} · {item.group || 'default'}</span></td><td><b>{formatCompactNumber(item.prompt_tokens + item.completion_tokens)}</b><span>{item.prompt_tokens} + {item.completion_tokens}</span></td><td><b>{formatQuota(item.quota_display)}</b></td><td><b className={item.use_time > SLOW_SECONDS ? 'text-bad' : ''}>{item.use_time.toFixed(2)}s</b><span>首字 {formatDuration(item.frt_ms)}</span></td><td>{item.is_stream ? '流式' : '非流式'}</td><td><ChevronRight size={15} /></td></tr>)}{!calls.length && <tr><td colSpan={7}><div className="empty-row">没有匹配的调用记录</div></td></tr>}</tbody></table></div>
+        </div>
+        <aside className="key-call-detail">
+          {selected ? <><div className="key-detail-head"><span className="key-detail-icon"><TerminalSquare size={19} /></span><div><span>REQUEST INSPECTOR</span><h3>{selected.model_name || '调用详情'}</h3></div><button onClick={() => setSelected(null)}><X size={16} /></button></div><dl><div><dt>请求时间</dt><dd>{formatFullTime(selected.created_at)}</dd></div><div><dt>渠道</dt><dd>{selected.channel_name || `#${selected.channel_id}`}</dd></div><div><dt>总耗时 / 首字</dt><dd>{selected.use_time.toFixed(3)}s / {formatDuration(selected.frt_ms)}</dd></div><div><dt>Token</dt><dd>{selected.prompt_tokens} 输入 + {selected.completion_tokens} 输出</dd></div><div><dt>计费额度</dt><dd>{formatQuota(selected.quota_display)} <small>({formatCompactNumber(selected.quota)})</small></dd></div><div><dt>请求模式</dt><dd>{selected.is_stream ? '流式' : '非流式'} · {selected.group || 'default'}</dd></div></dl><div className="key-request-id"><span>REQUEST ID</span><code>{selected.request_id || '—'}</code><button onClick={() => copyText(selected.request_id)} disabled={!selected.request_id}><Copy size={14} />复制</button></div>{selected.upstream_request_id && <div className="key-request-id"><span>UPSTREAM REQUEST ID</span><code>{selected.upstream_request_id}</code><button onClick={() => copyText(selected.upstream_request_id)}><Copy size={14} />复制</button></div>}{selected.content && <div className="key-call-content"><span>New API 记录</span><p>{selected.content}</p></div>}</> : <div className="key-detail-empty"><TerminalSquare size={26} /><strong>选择一条调用记录</strong><span>查看请求 ID、Token 拆分、计费额度与精确耗时。</span></div>}
+        </aside>
+      </div>
+    </>}
+  </section>;
 }
 
 type ResourceField = 'system_cpu' | 'system_memory' | 'system_disk';
@@ -879,11 +963,12 @@ export default function App() {
 
   async function logout() { await api('auth/logout', { method: 'POST' }).catch(() => undefined); setAuthState('guest'); setUser(null); setSummary(null); }
   if (authState === 'loading') return <div className="boot-screen"><Activity className="spin" /><span>正在建立安全会话</span></div>;
-  if (authState === 'guest') return <Login onSuccess={(name) => { setUser({ authenticated: true, username: name, role: 'admin', source: 'emergency' }); setAuthState('ready'); }} />;
+  if (authState === 'guest') return <Login onSuccess={(name) => { api<AuthUser>('auth/me').then((authenticatedUser) => setUser(authenticatedUser)).catch(() => setUser({ authenticated: true, username: name, role: 'admin', source: 'emergency', key_usage_available: true })); setAuthState('ready'); }} />;
 
   const elevated = user?.role === 'operator' || user?.role === 'admin';
   const navItems = [
     ['overview', '总览', BarChart3],
+    ...(user?.key_usage_available ? [['keyUsage', 'Key 查询', KeyRound] as const] : []),
     ...(elevated ? [
       ['logs', '使用日志', Clock3] as const,
       ['resources', '机器资源', Cpu] as const,
@@ -898,7 +983,7 @@ export default function App() {
       <header className="topbar"><div className="brand"><div className="brand-mark"><Activity size={21} /></div><div><span>NEW API</span><strong>MONITOR</strong></div></div><nav>{navItems.map(([key, label, Icon]) => <button key={key} className={tab === key ? 'active' : ''} onClick={() => setTab(key)}><Icon size={16} />{label}</button>)}</nav><div className="top-actions"><div className="refresh-state"><RefreshCw className={refreshing ? 'spin' : ''} size={14} /><span>{countdown}s</span></div><span className="user-chip">{user?.display_name || user?.username}<small>{user?.role}</small></span><button className="icon-button" onClick={() => void logout()} title="退出登录"><LogOut size={17} /></button></div></header>
       <main className="content"><section className="hero"><div><div className="eyebrow">OPERATIONS / REAL-TIME</div><h1>服务运行态势</h1><p>真实渠道探测、真实消费日志、主机与容器资源。</p></div><div className={`overall-status overall-${overall.tone}`}><span className="status-beacon" /><div><small>OVERALL STATUS</small><strong>{overall.label}</strong></div><span>{summary ? formatTime(summary.generated_at) : '同步中'}</span></div></section>
         {error && <div className="inline-error"><AlertTriangle size={16} />{error}<button onClick={() => void loadCore()}>重试</button></div>}
-        {summary ? <>{tab === 'overview' && <Overview summary={summary} channels={channels} onChannel={setSelectedChannel} />}{tab === 'logs' && elevated && <LogsView channels={channels} />}{tab === 'resources' && elevated && <ResourcesView />}{tab === 'incidents' && elevated && <IncidentsView />}{tab === 'channels' && elevated && <ChannelSettingsView />}{tab === 'settings' && user?.role === 'admin' && <SettingsView />}</> : <div className="loading-panel"><RefreshCw className="spin" /><span>正在读取第一批监控数据</span></div>}
+        {summary ? <>{tab === 'overview' && <Overview summary={summary} channels={channels} onChannel={setSelectedChannel} />}{tab === 'keyUsage' && user?.key_usage_available && <KeyUsageView />}{tab === 'logs' && elevated && <LogsView channels={channels} />}{tab === 'resources' && elevated && <ResourcesView />}{tab === 'incidents' && elevated && <IncidentsView />}{tab === 'channels' && elevated && <ChannelSettingsView />}{tab === 'settings' && user?.role === 'admin' && <SettingsView />}</> : <div className="loading-panel"><RefreshCw className="spin" /><span>正在读取第一批监控数据</span></div>}
       </main>
       <footer><span>数据源：New API 管理接口 / 真实 Relay 请求 / Linux & Docker</span><span>告警阈值：总耗时或首字 &gt; 60s，3/5 或 5/10 触发</span></footer>
       {selectedChannel && <DetailDrawer channel={selectedChannel} onClose={() => setSelectedChannel(null)} />}

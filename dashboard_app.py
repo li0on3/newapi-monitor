@@ -20,6 +20,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from dashboard_auth import AuthStore
 from dashboard_data import DashboardRepository
+from dashboard_key_usage import KeyUsageClient, KeyUsageError, SlidingWindowRateLimiter, role_allows_key_lookup
 from dashboard_settings import SettingsStore
 from dashboard_sso import NewAPISessionVerifier
 from newapi_monitor import Config, MonitorApp, StateStore, env_bool, env_int
@@ -79,6 +80,11 @@ class SettingsUpdatePayload(BaseModel):
     smtp_ssl: bool | None = None
     send_startup_email: bool | None = None
     subject_prefix: str | None = Field(None, max_length=256)
+    key_usage_enabled: bool | None = None
+    key_usage_min_role: str | None = Field(None, pattern="^(viewer|operator|admin)$")
+    key_usage_log_limit: int | None = Field(None, ge=10, le=500)
+    key_usage_attempts_per_minute: int | None = Field(None, ge=1, le=120)
+    key_usage_quota_per_unit: float | None = Field(None, gt=0, le=1_000_000_000)
 
     @field_validator("new_api_base_url")
     @classmethod
@@ -91,6 +97,20 @@ class SettingsUpdatePayload(BaseModel):
         if parsed.username or parsed.password or parsed.query or parsed.fragment:
             raise ValueError("new_api_base_url must not contain credentials, query or fragment")
         return value.strip().rstrip("/")
+
+
+class KeyUsageQueryPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    api_key: str = Field(min_length=4, max_length=512)
+
+    @field_validator("api_key")
+    @classmethod
+    def validate_api_key(cls, value: str) -> str:
+        normalized = value.strip()
+        if normalized != value or any(character.isspace() or ord(character) < 32 for character in value):
+            raise ValueError("api_key must not contain whitespace or control characters")
+        return normalized
 
 
 class ChannelSettingsPayload(BaseModel):
@@ -312,6 +332,11 @@ class Runtime:
             "smtp_ssl": env_bool("SMTP_SSL", False),
             "send_startup_email": env_bool("SEND_STARTUP_EMAIL", True),
             "subject_prefix": os.getenv("SUBJECT_PREFIX", "[New API监控]"),
+            "key_usage_enabled": env_bool("KEY_USAGE_ENABLED", True),
+            "key_usage_min_role": os.getenv("KEY_USAGE_MIN_ROLE", "admin"),
+            "key_usage_log_limit": env_int("KEY_USAGE_LOG_LIMIT", 100),
+            "key_usage_attempts_per_minute": env_int("KEY_USAGE_ATTEMPTS_PER_MINUTE", 10),
+            "key_usage_quota_per_unit": float(os.getenv("KEY_USAGE_QUOTA_PER_UNIT", "500000")),
         }
 
     def monitor_config(self) -> Config:
@@ -341,6 +366,7 @@ class Runtime:
 
 runtime = Runtime()
 login_limiter = LoginRateLimiter()
+key_usage_limiter = SlidingWindowRateLimiter()
 
 
 @asynccontextmanager
@@ -540,7 +566,43 @@ def me(user: AuthenticatedUser) -> dict[str, Any]:
     refresh_seconds = 5
     if runtime.settings is not None:
         refresh_seconds = max(2, int(runtime.settings.runtime_values().get("dashboard_refresh_seconds", 5)))
-    return {"authenticated": True, **user, "dashboard_refresh_seconds": refresh_seconds}
+    key_usage_available = False
+    if runtime.settings is not None:
+        values = runtime.settings.runtime_values()
+        key_usage_available = bool(values.get("key_usage_enabled", True)) and role_allows_key_lookup(
+            str(user["role"]), str(values.get("key_usage_min_role", "admin"))
+        )
+    return {"authenticated": True, **user, "dashboard_refresh_seconds": refresh_seconds, "key_usage_available": key_usage_available}
+
+
+@app.post("/api/key-usage/query")
+def query_key_usage(payload: KeyUsageQueryPayload, request: Request, user: AuthenticatedUser) -> dict[str, Any]:
+    if runtime.settings is None:
+        raise HTTPException(status_code=503, detail="settings are unavailable")
+    values = runtime.settings.runtime_values()
+    if not bool(values.get("key_usage_enabled", True)):
+        raise HTTPException(status_code=404, detail="Key 用量查询未启用")
+    if not role_allows_key_lookup(str(user["role"]), str(values.get("key_usage_min_role", "admin"))):
+        raise HTTPException(status_code=403, detail="当前账号无权查询 Key 用量")
+    limiter_key = f"{user['username']}:{runtime.remote_addr(request)}"
+    retry_after = key_usage_limiter.consume(
+        limiter_key,
+        max(1, int(values.get("key_usage_attempts_per_minute", 10))),
+    )
+    if retry_after:
+        raise HTTPException(status_code=429, detail=f"查询过于频繁，请 {retry_after} 秒后重试")
+    try:
+        result = KeyUsageClient(str(values["new_api_base_url"])).query(
+            payload.api_key,
+            max(10, min(int(values.get("key_usage_log_limit", 100)), 500)),
+            float(values.get("key_usage_quota_per_unit", 500_000)),
+        )
+    except KeyUsageError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    channel_names = {int(item["channel_id"]): str(item["name"]) for item in repository().channels()}
+    for item in result["calls"]:
+        item["channel_name"] = channel_names.get(int(item["channel_id"]), "")
+    return result
 
 
 @app.get("/api/dashboard/summary")

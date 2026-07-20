@@ -62,6 +62,58 @@ export type AuthUser = {
   source: 'newapi' | 'emergency';
   source_role?: number;
   dashboard_refresh_seconds?: number;
+  key_usage_available?: boolean;
+};
+
+export type KeyUsageCall = {
+  id: number;
+  created_at: number;
+  type: number;
+  model_name: string;
+  quota: number;
+  quota_display: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  use_time: number;
+  frt_ms: number | null;
+  is_stream: boolean;
+  channel_id: number;
+  channel_name: string;
+  request_id: string;
+  upstream_request_id: string;
+  group: string;
+  content: string;
+};
+
+export type KeyUsageResult = {
+  queried_at: number;
+  quota_per_unit: number;
+  usage: {
+    name: string;
+    total_granted: number;
+    total_used: number;
+    total_available: number;
+    total_granted_display: number;
+    total_used_display: number;
+    total_available_display: number;
+    used_percentage: number | null;
+    unlimited_quota: boolean;
+    expires_at: number;
+    model_limits_enabled: boolean;
+    model_limits: Record<string, boolean>;
+  };
+  summary: {
+    calls: number;
+    prompt_tokens: number;
+    completion_tokens: number;
+    total_tokens: number;
+    quota: number;
+    quota_display: number;
+    average_seconds: number;
+    p95_seconds: number;
+    models: Array<{ name: string; calls: number }>;
+  };
+  calls: KeyUsageCall[];
 };
 
 export type Summary = {
