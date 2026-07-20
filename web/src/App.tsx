@@ -2,15 +2,18 @@ import {
   Activity,
   AlertTriangle,
   BarChart3,
+  BellRing,
   CheckCircle2,
   ChevronRight,
   CircleGauge,
+  CircleDot,
   Clock3,
   Cpu,
   Database,
   Eye,
   EyeOff,
   HardDrive,
+  Inbox,
   KeyRound,
   LogOut,
   MemoryStick,
@@ -22,6 +25,7 @@ import {
   Settings,
   ShieldCheck,
   SlidersHorizontal,
+  TimerReset,
   TerminalSquare,
   UserCog,
   X,
@@ -30,7 +34,7 @@ import {
 import { FormEvent, PointerEvent as ReactPointerEvent, ReactNode, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { api, ApiError } from './api';
-import type { AuthUser, Channel, ChannelMonitorConfig, ContainerMetric, Incident, LogItem, ResourceSample, Summary, SystemHealth } from './types';
+import type { AuthUser, Channel, ChannelMonitorConfig, ContainerMetric, Incident, IncidentPayload, IncidentSummary, LogItem, ResourceSample, Summary, SystemHealth } from './types';
 
 type Tab = 'overview' | 'logs' | 'resources' | 'incidents' | 'channels' | 'settings';
 
@@ -67,6 +71,14 @@ function formatDuration(ms: number | null | undefined): string {
   if (ms >= 60_000) return `${(ms / 1000).toFixed(1)} s`;
   if (ms >= 1000) return `${(ms / 1000).toFixed(2)} s`;
   return `${Math.round(ms)} ms`;
+}
+
+function formatElapsed(seconds: number | null | undefined): string {
+  if (seconds == null) return '—';
+  if (seconds < 60) return `${seconds}s`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+  if (seconds < 86_400) return `${Math.floor(seconds / 3600)}h ${Math.floor(seconds % 3600 / 60)}m`;
+  return `${Math.floor(seconds / 86_400)}d ${Math.floor(seconds % 86_400 / 3600)}h`;
 }
 
 function formatPercent(value: number | null | undefined): string {
@@ -633,13 +645,153 @@ function ContainerCard({ name, metric }: { name: string; metric: ContainerMetric
   return <article className="container-card"><div className="container-head"><div><Server size={18} /><strong>{name}</strong></div><StatusPill tone={healthy ? 'ok' : 'bad'}>{healthy ? '运行中' : metric.status}</StatusPill></div><div className="container-stats"><span>CPU <b>{metric.cpu.toFixed(1)}%</b></span><span>MEM <b>{metric.memory_mb.toFixed(0)} MB</b></span><span>重启 <b>{metric.restarts}</b></span></div>{metric.error && <p>{metric.error}</p>}</article>;
 }
 
+const INCIDENT_CATEGORIES: Record<string, string> = {
+  all: '全部类型',
+  channel: '渠道健康',
+  latency: '请求耗时',
+  resource: '机器资源',
+  container: '容器状态',
+  service: '服务可用性',
+  collector: '采集器',
+  other: '其他',
+};
+
+const EMPTY_INCIDENT_SUMMARY: IncidentSummary = {
+  open: 0,
+  critical_open: 0,
+  warning_open: 0,
+  resolved: 0,
+  resolved_24h: 0,
+  average_resolution_seconds: 0,
+};
+
 function IncidentsView() {
   const [items, setItems] = useState<Incident[]>([]);
-  const [status, setStatus] = useState('all');
+  const [summary, setSummary] = useState<IncidentSummary>(EMPTY_INCIDENT_SUMMARY);
+  const [total, setTotal] = useState(0);
+  const [status, setStatus] = useState<'all' | 'open' | 'resolved'>('all');
+  const [severity, setSeverity] = useState('all');
+  const [category, setCategory] = useState('all');
+  const [windowHours, setWindowHours] = useState(168);
+  const [search, setSearch] = useState('');
+  const [query, setQuery] = useState('');
+  const [page, setPage] = useState(0);
+  const [selectedId, setSelectedId] = useState<number | null>(null);
+  const [generatedAt, setGeneratedAt] = useState(0);
+  const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
-  const load = useCallback(async () => { try { const payload = await api<{ items: Incident[] }>(`incidents?status=${status}`); setItems(payload.items); setError(''); } catch (requestError) { setError(requestError instanceof Error ? requestError.message : '事件加载失败'); } }, [status]);
-  useEffect(() => { void load(); }, [load]);
-  return <section><div className="section-heading"><div><span className="eyebrow">ALERT TIMELINE</span><h2>告警与恢复事件</h2></div><div className="segmented"><button className={status === 'all' ? 'active' : ''} onClick={() => setStatus('all')}>全部</button><button className={status === 'open' ? 'active' : ''} onClick={() => setStatus('open')}>未恢复</button><button className={status === 'resolved' ? 'active' : ''} onClick={() => setStatus('resolved')}>已恢复</button></div></div>{error && <div className="inline-error"><AlertTriangle size={16} />{error}</div>}<div className="incident-list">{items.map((item) => <article className={`incident-card incident-${item.severity}`} key={item.id}><div className="incident-icon">{item.status === 'resolved' ? <CheckCircle2 /> : item.severity === 'critical' ? <XCircle /> : <AlertTriangle />}</div><div className="incident-main"><div className="incident-title"><h3>{item.title}</h3><StatusPill tone={item.status === 'resolved' ? 'ok' : item.severity === 'critical' ? 'bad' : 'warn'}>{item.status === 'resolved' ? '已恢复' : '处理中'}</StatusPill></div><pre>{item.body}</pre><div className="incident-time"><span>开始 {formatTime(item.started_at, true)}</span><span>更新 {formatTime(item.updated_at, true)}</span>{item.resolved_at && <span>恢复 {formatTime(item.resolved_at, true)}</span>}</div></div></article>)}{!items.length && <div className="empty-state"><CheckCircle2 size={28} /><strong>没有匹配的事件</strong><span>渠道、耗时和资源告警将在这里形成完整时间线。</span></div>}</div></section>;
+  const pageSize = 50;
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => setQuery(search.trim()), 250);
+    return () => window.clearTimeout(timer);
+  }, [search]);
+  useEffect(() => { setPage(0); }, [status, severity, category, windowHours, query]);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    const parameters = new URLSearchParams({
+      status,
+      severity,
+      category,
+      window_hours: String(windowHours),
+      limit: String(pageSize),
+      offset: String(page * pageSize),
+    });
+    if (query) parameters.set('q', query);
+    try {
+      const payload = await api<IncidentPayload>(`incidents?${parameters.toString()}`);
+      setItems(payload.items);
+      setSummary(payload.summary);
+      setTotal(payload.total);
+      setGeneratedAt(payload.generated_at);
+      setSelectedId((current) => payload.items.some((item) => item.id === current) ? current : payload.items[0]?.id ?? null);
+      setError('');
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : '事件加载失败');
+    } finally { setLoading(false); }
+  }, [category, page, query, severity, status, windowHours]);
+
+  useEffect(() => {
+    void load();
+    const timer = window.setInterval(() => void load(), 30_000);
+    return () => window.clearInterval(timer);
+  }, [load]);
+
+  const selected = items.find((item) => item.id === selectedId) || null;
+  const clearFilters = () => {
+    setStatus('all');
+    setSeverity('all');
+    setCategory('all');
+    setWindowHours(168);
+    setSearch('');
+    setQuery('');
+  };
+
+  return (
+    <section className="incidents-view">
+      <div className="section-heading incident-heading">
+        <div><span className="eyebrow">INCIDENT OPERATIONS</span><h2>事件调查中心</h2><p>从告警信号定位触发原因，并完整追踪恢复过程。</p></div>
+        <div className="incident-sync"><span><i className={loading ? 'source-pulse source-pulse-loading' : 'source-pulse'} />30 秒自动刷新</span><small>数据时间 {formatFullTime(generatedAt)}</small><button className="secondary-button" onClick={() => void load()} disabled={loading}><RefreshCw size={14} className={loading ? 'spin' : ''} />立即刷新</button></div>
+      </div>
+      {error && <div className="inline-error"><AlertTriangle size={16} />{error}<button onClick={() => void load()}>重试</button></div>}
+
+      <div className="incident-kpis">
+        <button className="incident-kpi incident-kpi-danger" onClick={() => { setStatus('open'); setSeverity('critical'); }}><span><BellRing size={17} />未恢复严重事件</span><strong>{summary.critical_open}</strong><small>需要优先处置</small></button>
+        <button className="incident-kpi incident-kpi-warning" onClick={() => { setStatus('open'); setSeverity('warning'); }}><span><AlertTriangle size={17} />未恢复警告</span><strong>{summary.warning_open}</strong><small>共 {summary.open} 个活跃事件</small></button>
+        <button className="incident-kpi incident-kpi-ok" onClick={() => { setStatus('resolved'); setSeverity('all'); }}><span><CheckCircle2 size={17} />24H 已恢复</span><strong>{summary.resolved_24h}</strong><small>筛选范围内共 {summary.resolved}</small></button>
+        <div className="incident-kpi"><span><TimerReset size={17} />平均恢复时间</span><strong>{formatElapsed(summary.average_resolution_seconds)}</strong><small>基于已恢复事件</small></div>
+      </div>
+
+      <div className="incident-command-bar">
+        <label className="incident-search"><Search size={16} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索标题、原因、恢复信息或事件标识" aria-label="搜索事件" />{search && <button onClick={() => setSearch('')} title="清空搜索"><X size={14} /></button>}</label>
+        <div className="segmented incident-status-filter" aria-label="事件状态">{([['all', '全部'], ['open', '未恢复'], ['resolved', '已恢复']] as const).map(([value, label]) => <button key={value} className={status === value ? 'active' : ''} onClick={() => setStatus(value)}>{label}</button>)}</div>
+        <label><span>级别</span><select value={severity} onChange={(event) => setSeverity(event.target.value)}><option value="all">全部级别</option><option value="critical">严重</option><option value="warning">警告</option><option value="info">信息</option></select></label>
+        <label><span>类型</span><select value={category} onChange={(event) => setCategory(event.target.value)}>{Object.entries(INCIDENT_CATEGORIES).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
+        <label><span>时间范围</span><select value={windowHours} onChange={(event) => setWindowHours(Number(event.target.value))}><option value={24}>最近 24 小时</option><option value={168}>最近 7 天</option><option value={720}>最近 30 天</option><option value={0}>全部历史</option></select></label>
+        <button className="incident-clear" onClick={clearFilters}><X size={14} />重置</button>
+      </div>
+
+      <div className="incident-workspace">
+        <div className="incident-list-panel">
+          <div className="incident-panel-head"><div><span>事件队列</span><strong>{total} 个匹配结果</strong></div>{loading && <RefreshCw size={14} className="spin" />}</div>
+          <div className="incident-queue">
+            {items.map((item) => (
+              <button className={classNames('incident-row', `incident-row-${item.severity}`, selectedId === item.id && 'active')} key={item.id} onClick={() => setSelectedId(item.id)}>
+                <span className="incident-row-icon">{item.status === 'resolved' ? <CheckCircle2 size={17} /> : item.severity === 'critical' ? <XCircle size={17} /> : <AlertTriangle size={17} />}</span>
+                <span className="incident-row-main"><span className="incident-row-top"><b>{item.title}</b><em>{item.status === 'resolved' ? '已恢复' : '未恢复'}</em></span><small>{INCIDENT_CATEGORIES[item.category] || '其他'} · {formatTime(item.started_at, true)}</small><span className="incident-row-snippet">{item.body || (item.legacy_cause_missing ? '历史事件未保留原始触发原因' : item.resolution_body || '暂无诊断详情')}</span></span>
+                <ChevronRight size={15} className="incident-row-arrow" />
+              </button>
+            ))}
+            {!items.length && <div className="incident-empty"><Inbox size={28} /><strong>没有匹配的事件</strong><span>尝试放宽时间范围或重置筛选条件。</span><button onClick={clearFilters}>重置筛选</button></div>}
+          </div>
+          {total > pageSize && <div className="incident-pagination"><button disabled={page === 0} onClick={() => setPage((value) => Math.max(0, value - 1))}>上一页</button><span>{page + 1} / {Math.ceil(total / pageSize)}</span><button disabled={(page + 1) * pageSize >= total} onClick={() => setPage((value) => value + 1)}>下一页</button></div>}
+        </div>
+
+        <div className="incident-detail-panel">
+          {selected ? <>
+            <div className="incident-detail-head">
+              <div className={`incident-detail-mark incident-detail-${selected.severity}`}>{selected.status === 'resolved' ? <CheckCircle2 /> : selected.severity === 'critical' ? <XCircle /> : <AlertTriangle />}</div>
+              <div><div className="incident-detail-tags"><span>{INCIDENT_CATEGORIES[selected.category] || '其他'}</span><span className={`severity-${selected.severity}`}>{selected.severity === 'critical' ? '严重' : selected.severity === 'warning' ? '警告' : '信息'}</span><span className={selected.status === 'resolved' ? 'resolved' : 'open'}>{selected.status === 'resolved' ? '已恢复' : '处理中'}</span></div><h3>{selected.title}</h3><p>{selected.status === 'resolved' ? `事件持续 ${formatElapsed(selected.duration_seconds)}，当前已恢复。` : `事件已持续 ${formatElapsed(selected.duration_seconds)}，等待指标恢复到安全范围。`}</p></div>
+            </div>
+
+            <div className="incident-timeline" aria-label="事件时间线">
+              <div className="complete"><span><CircleDot size={15} /></span><div><strong>事件触发</strong><small>{formatFullTime(selected.started_at)}</small></div></div>
+              <div className="complete"><span><BellRing size={15} /></span><div><strong>最后一次告警通知</strong><small>{formatFullTime(selected.last_notified_at)}</small></div></div>
+              <div className={selected.status === 'resolved' ? 'complete' : ''}><span><CheckCircle2 size={15} /></span><div><strong>{selected.status === 'resolved' ? '指标恢复' : '等待恢复'}</strong><small>{selected.resolved_at ? formatFullTime(selected.resolved_at) : `最后更新 ${formatFullTime(selected.updated_at)}`}</small></div></div>
+            </div>
+
+            <div className="incident-explanation-grid">
+              <article className="incident-explanation cause"><div><AlertTriangle size={17} /><span>为什么发生</span></div>{selected.legacy_cause_missing ? <p className="incident-legacy-note">该事件由旧版本记录，恢复时曾覆盖原始告警内容，因此无法可靠还原触发原因。新事件已完整保留告警与恢复上下文。</p> : <pre>{selected.body || '事件源未提供额外诊断内容，请结合事件标识和对应监控指标排查。'}</pre>}</article>
+              <article className="incident-explanation recovery"><div><CheckCircle2 size={17} /><span>为什么恢复</span></div>{selected.status === 'resolved' ? <pre>{selected.resolution_body || '监控指标已重新满足健康条件，但事件源未提供详细恢复说明。'}</pre> : <p>尚未恢复。系统会持续采样；当指标回到恢复阈值并通过状态判定后，会在这里记录恢复依据和时间。</p>}</article>
+            </div>
+
+            <div className="incident-technical"><div className="incident-technical-head"><span>技术上下文</span><small>用于日志检索与二次排查</small></div><dl><div><dt>事件标识</dt><dd>{selected.incident_key}</dd></div><div><dt>事件类型</dt><dd>{selected.kind}</dd></div><div><dt>事件编号</dt><dd>#{selected.id}</dd></div><div><dt>最后更新</dt><dd>{formatFullTime(selected.updated_at)}</dd></div></dl></div>
+          </> : <div className="incident-detail-empty"><CircleDot size={32} /><strong>选择一个事件开始调查</strong><span>右侧将展示触发原因、恢复依据与完整时间线。</span></div>}
+        </div>
+      </div>
+    </section>
+  );
 }
 
 export default function App() {

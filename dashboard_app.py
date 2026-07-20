@@ -586,9 +586,25 @@ def resources(
 def incidents(
     _: OperatorUser,
     status: str = Query("all", pattern="^(all|open|resolved)$"),
-    limit: int = Query(100, ge=1, le=500),
+    severity: str = Query("all", pattern="^(all|info|warning|critical)$"),
+    category: str = Query(
+        "all",
+        pattern="^(all|channel|latency|resource|container|service|collector|other)$",
+    ),
+    query: str = Query("", alias="q", max_length=200),
+    window_hours: int = Query(0, ge=0, le=8760),
+    limit: int = Query(50, ge=1, le=100),
+    offset: int = Query(0, ge=0),
 ) -> dict[str, Any]:
-    return {"items": repository().incidents(status=status, limit=limit)}
+    return repository().incidents(
+        status=status,
+        severity=severity,
+        category=category,
+        query=query,
+        window_hours=window_hours,
+        limit=limit,
+        offset=offset,
+    )
 
 
 @app.get("/api/settings")

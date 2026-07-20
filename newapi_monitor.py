@@ -884,6 +884,8 @@ class StateStore:
                 severity TEXT NOT NULL,
                 title TEXT NOT NULL,
                 body TEXT NOT NULL,
+                resolution_body TEXT NOT NULL DEFAULT '',
+                legacy_cause_missing INTEGER NOT NULL DEFAULT 0,
                 status TEXT NOT NULL,
                 started_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL,
@@ -894,6 +896,36 @@ class StateStore:
             CREATE INDEX IF NOT EXISTS idx_incident_key ON incidents(incident_key, id);
             """
         )
+        incident_columns = {
+            str(row["name"])
+            for row in self.connection.execute("PRAGMA table_info(incidents)").fetchall()
+        }
+        added_resolution_body = "resolution_body" not in incident_columns
+        if "resolution_body" not in incident_columns:
+            self.connection.execute(
+                "ALTER TABLE incidents ADD COLUMN resolution_body TEXT NOT NULL DEFAULT ''"
+            )
+        added_legacy_marker = "legacy_cause_missing" not in incident_columns
+        if added_legacy_marker:
+            self.connection.execute(
+                "ALTER TABLE incidents ADD COLUMN legacy_cause_missing INTEGER NOT NULL DEFAULT 0"
+            )
+        if added_resolution_body:
+            self.connection.execute(
+                """
+                UPDATE incidents
+                SET resolution_body = body, legacy_cause_missing = 1
+                WHERE status = 'resolved'
+                """
+            )
+        elif added_legacy_marker:
+            self.connection.execute(
+                """
+                UPDATE incidents
+                SET legacy_cause_missing = 1
+                WHERE status = 'resolved' AND resolution_body = body AND body != ''
+                """
+            )
         self.connection.commit()
 
     def get_json(self, key: str, default: Any) -> Any:
@@ -1081,7 +1113,7 @@ class StateStore:
                     self.connection.execute(
                         """
                         UPDATE incidents
-                        SET status = 'resolved', updated_at = ?, resolved_at = ?, body = ?
+                        SET status = 'resolved', updated_at = ?, resolved_at = ?, resolution_body = ?
                         WHERE id = ?
                         """,
                         (timestamp, timestamp, event.body, int(open_row["id"])),

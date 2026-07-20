@@ -1,4 +1,5 @@
 import time
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -27,6 +28,49 @@ from newapi_monitor import (
 
 
 class CollectorFreshnessTests(unittest.TestCase):
+    def test_state_store_migrates_legacy_incident_without_inventing_a_cause(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database_path = str(Path(temp_dir) / "monitor.db")
+            connection = sqlite3.connect(database_path)
+            connection.execute(
+                """
+                CREATE TABLE incidents (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    incident_key TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    severity TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    body TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    started_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL,
+                    resolved_at INTEGER,
+                    last_notified_at INTEGER NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
+                INSERT INTO incidents(
+                    incident_key, kind, severity, title, body, status,
+                    started_at, updated_at, resolved_at, last_notified_at
+                ) VALUES ('resource:memory', 'resource_recovered', 'warning', '内存恢复',
+                          '当前值 62%', 'resolved', 100, 120, 120, 100)
+                """
+            )
+            connection.commit()
+            connection.close()
+
+            store = StateStore(database_path)
+            row = store.connection.execute(
+                "SELECT body, resolution_body, legacy_cause_missing FROM incidents"
+            ).fetchone()
+
+            self.assertEqual("当前值 62%", row["body"])
+            self.assertEqual("当前值 62%", row["resolution_body"])
+            self.assertEqual(1, row["legacy_cause_missing"])
+            store.connection.close()
+
     def test_state_store_records_success_failure_and_freshness(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             store = StateStore(str(Path(temp_dir) / "monitor.db"))
@@ -71,6 +115,12 @@ class CollectorFreshnessTests(unittest.TestCase):
             )
 
             self.assertFalse(store.has_open_incident("container:new-api"))
+            row = store.connection.execute(
+                "SELECT body, resolution_body FROM incidents WHERE incident_key = ? ORDER BY id DESC LIMIT 1",
+                ("container:new-api",),
+            ).fetchone()
+            self.assertEqual("down", row["body"])
+            self.assertEqual("running", row["resolution_body"])
             store.connection.close()
 
     def test_freshness_tracker_alerts_once_and_recovers(self):

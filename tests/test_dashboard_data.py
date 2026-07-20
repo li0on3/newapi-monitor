@@ -243,6 +243,52 @@ class DashboardRepositoryTests(unittest.TestCase):
         self.assertEqual(1, payload["total"])
         self.assertEqual("request-2", payload["items"][0]["request_id"])
 
+    def test_incident_query_supports_search_facets_and_resolution_context(self):
+        store = StateStore(self.db_path)
+        store.record_alert_events(
+            [
+                AlertEvent(
+                    "resource_high",
+                    "内存告警",
+                    "当前值：92%\n阈值：85%",
+                    key="resource:system_memory",
+                    severity="warning",
+                )
+            ],
+            now=1_240,
+        )
+        store.record_alert_events(
+            [
+                AlertEvent(
+                    "resource_recovered",
+                    "内存恢复",
+                    "当前值：62%\n恢复阈值：68%",
+                    key="resource:system_memory",
+                    severity="info",
+                    recovery=True,
+                )
+            ],
+            now=1_300,
+        )
+        store.connection.close()
+
+        payload = self.repository.incidents(
+            status="resolved",
+            category="resource",
+            query="内存",
+            now=1_320,
+            limit=20,
+        )
+
+        self.assertEqual(1, payload["total"])
+        self.assertEqual(1, payload["summary"]["resolved"])
+        self.assertEqual(60, payload["summary"]["average_resolution_seconds"])
+        item = payload["items"][0]
+        self.assertEqual("resource", item["category"])
+        self.assertEqual("当前值：92%\n阈值：85%", item["body"])
+        self.assertEqual("当前值：62%\n恢复阈值：68%", item["resolution_body"])
+        self.assertEqual(60, item["duration_seconds"])
+
 
 if __name__ == "__main__":
     unittest.main()

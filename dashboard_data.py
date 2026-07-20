@@ -360,26 +360,107 @@ class DashboardRepository:
             samples.append(item)
         return {"generated_at": current_time, "hours": hours, "samples": samples}
 
-    def incidents(self, status: str = "all", limit: int = 100) -> list[dict[str, Any]]:
-        page_limit = max(1, min(limit, 500))
-        parameters: list[Any] = []
-        where = ""
-        if status in {"open", "resolved"}:
-            where = " WHERE status = ?"
-            parameters.append(status)
+    def incidents(
+        self,
+        status: str = "all",
+        severity: str = "all",
+        category: str = "all",
+        query: str = "",
+        window_hours: int = 0,
+        limit: int = 50,
+        offset: int = 0,
+        now: int | None = None,
+    ) -> dict[str, Any]:
+        current_time = int(time.time()) if now is None else now
+        page_limit = max(1, min(limit, 100))
+        page_offset = max(0, offset)
         with self._connect() as connection:
             rows = connection.execute(
-                f"""
-                SELECT id, incident_key, kind, severity, title, body, status,
+                """
+                SELECT id, incident_key, kind, severity, title, body, resolution_body,
+                       legacy_cause_missing, status,
                        started_at, updated_at, resolved_at, last_notified_at
-                FROM incidents{where}
+                FROM incidents
                 ORDER BY CASE status WHEN 'open' THEN 0 ELSE 1 END,
                          updated_at DESC, id DESC
-                LIMIT ?
                 """,
-                [*parameters, page_limit],
             ).fetchall()
-        return [dict(row) for row in rows]
+
+        normalized_query = query.strip().casefold()
+        minimum_started_at = current_time - max(0, window_hours) * 3600 if window_hours else 0
+        prepared: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            item_category = self._incident_category(str(item["incident_key"]), str(item["kind"]))
+            if severity in {"info", "warning", "critical"} and item["severity"] != severity:
+                continue
+            if category != "all" and item_category != category:
+                continue
+            if minimum_started_at and int(item["started_at"]) < minimum_started_at:
+                continue
+            if normalized_query:
+                searchable = "\n".join(
+                    str(item.get(field) or "")
+                    for field in ("title", "body", "resolution_body", "incident_key", "kind")
+                ).casefold()
+                if normalized_query not in searchable:
+                    continue
+
+            resolved_at = int(item["resolved_at"]) if item["resolved_at"] is not None else None
+            resolution_body = str(item.get("resolution_body") or "")
+            cause_body = str(item.get("body") or "")
+            legacy_cause_missing = bool(item.get("legacy_cause_missing"))
+            item["category"] = item_category
+            item["legacy_cause_missing"] = legacy_cause_missing
+            item["body"] = "" if legacy_cause_missing else cause_body
+            item["resolution_body"] = resolution_body
+            item["duration_seconds"] = max(
+                0,
+                (resolved_at or current_time) - int(item["started_at"]),
+            )
+            prepared.append(item)
+
+        resolved = [item for item in prepared if item["status"] == "resolved"]
+        open_items = [item for item in prepared if item["status"] == "open"]
+        average_resolution_seconds = (
+            round(sum(int(item["duration_seconds"]) for item in resolved) / len(resolved))
+            if resolved
+            else 0
+        )
+        summary = {
+            "open": len(open_items),
+            "critical_open": sum(item["severity"] == "critical" for item in open_items),
+            "warning_open": sum(item["severity"] == "warning" for item in open_items),
+            "resolved": len(resolved),
+            "resolved_24h": sum(
+                item["resolved_at"] is not None
+                and int(item["resolved_at"]) >= current_time - 86_400
+                for item in resolved
+            ),
+            "average_resolution_seconds": average_resolution_seconds,
+        }
+        filtered = prepared
+        if status in {"open", "resolved"}:
+            filtered = [item for item in prepared if item["status"] == status]
+        return {
+            "generated_at": current_time,
+            "total": len(filtered),
+            "limit": page_limit,
+            "offset": page_offset,
+            "summary": summary,
+            "items": filtered[page_offset:page_offset + page_limit],
+        }
+
+    @staticmethod
+    def _incident_category(incident_key: str, kind: str) -> str:
+        prefix = incident_key.partition(":")[0].strip().lower()
+        if prefix in {"channel", "latency", "resource", "container", "service", "collector"}:
+            return prefix
+        lowered_kind = kind.lower()
+        for candidate in ("channel", "latency", "resource", "container", "service", "collector"):
+            if candidate in lowered_kind:
+                return candidate
+        return "other"
 
     @staticmethod
     def _observation_dict(row: sqlite3.Row) -> dict[str, Any]:

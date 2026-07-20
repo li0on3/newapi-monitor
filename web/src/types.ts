@@ -126,11 +126,33 @@ export type Incident = {
   severity: 'info' | 'warning' | 'critical' | string;
   title: string;
   body: string;
+  resolution_body: string;
   status: 'open' | 'resolved';
+  category: 'channel' | 'latency' | 'resource' | 'container' | 'service' | 'collector' | 'other' | string;
+  duration_seconds: number;
+  legacy_cause_missing: boolean;
   started_at: number;
   updated_at: number;
   resolved_at: number | null;
   last_notified_at: number;
+};
+
+export type IncidentSummary = {
+  open: number;
+  critical_open: number;
+  warning_open: number;
+  resolved: number;
+  resolved_24h: number;
+  average_resolution_seconds: number;
+};
+
+export type IncidentPayload = {
+  generated_at: number;
+  total: number;
+  limit: number;
+  offset: number;
+  summary: IncidentSummary;
+  items: Incident[];
 };
 
 export type CollectorHealth = {
