@@ -155,7 +155,7 @@ curl -fsS http://127.0.0.1:18081/api/health
 - Key 查询只调用 New API 的只读 `/api/usage/token/` 与 `/api/log/token` 接口，不持久化原始 Key，也不会修改 New API 数据。
 - 配置变更和角色变更写入审计表，秘密字段始终脱敏。
 
-详细安全边界见 [SECURITY.md](SECURITY.md)，后续计划见 [ROADMAP.md](ROADMAP.md)。
+详细安全边界见 [SECURITY.md](SECURITY.md)，后续计划见 [ROADMAP.md](ROADMAP.md)，GitHub 维护流程见 [GITHUB_GUIDE.md](GITHUB_GUIDE.md)。
 
 ## 备份
 

@@ -130,7 +130,7 @@ HTTP 503 is returned when SQLite is unavailable, the monitoring worker has stopp
 - API key usage lookup is admin-only by default, rate-limited, and only calls New API read-only endpoints.
 - Configuration and role changes are audited, with secrets always masked.
 
-See [SECURITY_EN.md](SECURITY_EN.md) for the security boundary and [ROADMAP_EN.md](ROADMAP_EN.md) for planned work.
+See [SECURITY_EN.md](SECURITY_EN.md) for the security boundary, [ROADMAP_EN.md](ROADMAP_EN.md) for planned work, and [GITHUB_GUIDE_EN.md](GITHUB_GUIDE_EN.md) for the protected-branch workflow.
 
 ## Backup
 
