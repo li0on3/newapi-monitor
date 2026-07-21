@@ -50,6 +50,9 @@ class SettingsUpdatePayload(BaseModel):
     dashboard_refresh_seconds: int | None = Field(None, ge=2, le=3600)
     channel_sync_interval_seconds: int | None = Field(None, ge=2, le=3600)
     channel_interval_seconds: int | None = Field(None, ge=5, le=86400)
+    channel_probe_concurrency: int | None = Field(None, ge=1, le=16)
+    channel_failure_threshold: int | None = Field(None, ge=1, le=10)
+    channel_recovery_threshold: int | None = Field(None, ge=1, le=10)
     log_interval_seconds: int | None = Field(None, ge=5, le=3600)
     resource_interval_seconds: int | None = Field(None, ge=5, le=3600)
     report_interval_seconds: int | None = Field(None, ge=60, le=604800)
@@ -358,6 +361,9 @@ class Runtime:
             "dashboard_refresh_seconds": env_int("DASHBOARD_REFRESH_SECONDS", 5),
             "channel_sync_interval_seconds": env_int("CHANNEL_SYNC_INTERVAL_SECONDS", 5),
             "channel_interval_seconds": env_int("CHANNEL_INTERVAL_SECONDS", 300),
+            "channel_probe_concurrency": env_int("CHANNEL_PROBE_CONCURRENCY", 3),
+            "channel_failure_threshold": env_int("CHANNEL_FAILURE_THRESHOLD", 2),
+            "channel_recovery_threshold": env_int("CHANNEL_RECOVERY_THRESHOLD", 2),
             "log_interval_seconds": env_int("LOG_INTERVAL_SECONDS", 300),
             "resource_interval_seconds": env_int("RESOURCE_INTERVAL_SECONDS", 60),
             "report_interval_seconds": env_int("REPORT_INTERVAL_SECONDS", 86400),

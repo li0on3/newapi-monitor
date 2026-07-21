@@ -1,6 +1,7 @@
 import time
 import sqlite3
 import tempfile
+import threading
 import unittest
 import base64
 import hashlib
@@ -165,29 +166,62 @@ class ServiceStateTrackerTests(unittest.TestCase):
 
 
 class ChannelStateTrackerTests(unittest.TestCase):
-    def test_initial_failure_alerts_immediately(self):
-        tracker = ChannelStateTracker()
+    def test_requires_two_failures_before_alerting(self):
+        tracker = ChannelStateTracker(failure_threshold=2, recovery_threshold=2)
         failed = ChannelObservation(1, "mock", False, 0.4, "upstream 500")
 
+        self.assertEqual([], tracker.evaluate([failed]))
         alerts = tracker.evaluate([failed])
 
         self.assertEqual(1, len(alerts))
         self.assertEqual("channel_failed", alerts[0].kind)
+        self.assertEqual("warning", alerts[0].severity)
 
-    def test_alerts_only_on_failure_and_recovery_transitions(self):
-        tracker = ChannelStateTracker()
+    def test_requires_two_successes_before_recovery(self):
+        tracker = ChannelStateTracker(failure_threshold=2, recovery_threshold=2)
         healthy = ChannelObservation(1, "mock", True, 0.2, "")
         failed = ChannelObservation(1, "mock", False, 0.4, "upstream 500")
 
         self.assertEqual([], tracker.evaluate([healthy]))
+        self.assertEqual([], tracker.evaluate([failed]))
         alerts = tracker.evaluate([failed])
         self.assertEqual(1, len(alerts))
         self.assertEqual("channel_failed", alerts[0].kind)
 
         self.assertEqual([], tracker.evaluate([failed]))
+        self.assertEqual([], tracker.evaluate([healthy]))
         alerts = tracker.evaluate([healthy])
         self.assertEqual(1, len(alerts))
         self.assertEqual("channel_recovered", alerts[0].kind)
+
+    def test_persistent_failure_is_critical(self):
+        tracker = ChannelStateTracker(failure_threshold=2, recovery_threshold=2)
+        failed = ChannelObservation(1, "mock", False, 0.4, "invalid model configuration")
+
+        tracker.evaluate([failed])
+        alerts = tracker.evaluate([failed])
+
+        self.assertEqual("critical", alerts[0].severity)
+
+    def test_common_auth_failure_is_one_probe_incident(self):
+        tracker_class = getattr(newapi_monitor, "ProbeCredentialStateTracker", None)
+        self.assertIsNotNone(tracker_class)
+        tracker = tracker_class(recovery_threshold=2)
+        failures = [
+            ChannelObservation(1, "one", False, 0.1, "HTTP 403: 无权访问 default 分组"),
+            ChannelObservation(2, "two", False, 0.1, "HTTP 403: 无权访问 default 分组"),
+            ChannelObservation(3, "three", True, 0.1, ""),
+        ]
+
+        alerts, suppressed = tracker.evaluate(failures)
+
+        self.assertEqual(1, len(alerts))
+        self.assertEqual("probe_auth_failed", alerts[0].kind)
+        self.assertEqual({1, 2}, suppressed)
+        self.assertEqual(([], set()), tracker.evaluate([ChannelObservation(1, "one", True, 0.1, "")]))
+        alerts, suppressed = tracker.evaluate([ChannelObservation(1, "one", True, 0.1, "")])
+        self.assertEqual("probe_auth_recovered", alerts[0].kind)
+        self.assertEqual(set(), suppressed)
 
 
 class LogSummaryTests(unittest.TestCase):
@@ -454,6 +488,19 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(90, config.channel_interval_seconds)
         self.assertEqual("gpt-5.4", config.real_probe_rules[7].model)
 
+    def test_channel_alert_noise_controls_are_dynamic(self):
+        config = Config.from_values(
+            {
+                "channel_probe_concurrency": 4,
+                "channel_failure_threshold": 3,
+                "channel_recovery_threshold": 2,
+            }
+        )
+
+        self.assertEqual(4, config.channel_probe_concurrency)
+        self.assertEqual(3, config.channel_failure_threshold)
+        self.assertEqual(2, config.channel_recovery_threshold)
+
     def test_dynamic_resource_thresholds_are_loaded(self):
         config = Config.from_values({"system_cpu_threshold": 72, "system_memory_threshold": 74})
 
@@ -689,12 +736,134 @@ class ChannelSyncWorkerTests(unittest.TestCase):
                 self.waits += 1
                 return self.waits >= 2
 
-        worker = worker_class(client, store, lambda _channels: None, lambda success, error: results.append((success, error)))
+        worker = worker_class(
+            client,
+            store,
+            lambda _channels: None,
+            lambda success, error: results.append((success, error)),
+            stale_after_seconds=60,
+        )
         worker.run(TwoIterations(), 1)
 
         self.assertEqual([(True, ""), (True, "")], results)
         self.assertEqual(2, client.get_channels.call_count)
+        self.assertEqual(2, store.record_collector_result.call_count)
+        store.record_collector_result.assert_called_with(
+            "channel_sync", True, "", stale_after_seconds=60
+        )
         store.connection.close.assert_called_once_with()
+
+    def test_freshness_write_failure_does_not_stop_channel_sync(self):
+        worker_class = getattr(newapi_monitor, "ChannelSyncWorker", None)
+        client = mock.Mock()
+        client.get_channels.return_value = [{"id": 1, "name": "enabled", "status": 1}]
+        store = mock.Mock()
+        store.record_collector_result.side_effect = [sqlite3.OperationalError("database is locked"), None]
+
+        class TwoIterations:
+            def __init__(self):
+                self.waits = 0
+
+            def is_set(self):
+                return False
+
+            def wait(self, _seconds):
+                self.waits += 1
+                return self.waits >= 2
+
+        worker = worker_class(client, store, lambda _channels: None, stale_after_seconds=60)
+        worker.run(TwoIterations(), 1)
+
+        self.assertEqual(2, client.get_channels.call_count)
+        self.assertEqual(2, store.record_collector_result.call_count)
+
+
+class ChannelProbeWorkerTests(unittest.TestCase):
+    def test_empty_enabled_channel_set_is_a_successful_probe_cycle(self):
+        worker_class = getattr(newapi_monitor, "ChannelProbeWorker", None)
+        store = mock.Mock()
+        store.get_json.side_effect = lambda key, default=None: default
+        config = mock.Mock(
+            real_probe_rules={},
+            channel_settings={},
+            channel_slow_seconds=60,
+            channel_failure_threshold=2,
+            channel_recovery_threshold=2,
+            channel_probe_concurrency=3,
+        )
+        published = []
+        worker = worker_class(
+            config,
+            mock.Mock(),
+            None,
+            store,
+            mock.Mock(),
+            lambda: [{"id": 1, "name": "disabled", "status": 2}],
+            published.append,
+            stale_after_seconds=900,
+        )
+
+        self.assertEqual([], worker.check_once())
+
+        self.assertEqual([[]], published)
+        store.record_collector_result.assert_called_once_with(
+            "channel_probe", True, "", stale_after_seconds=900
+        )
+
+    def test_checks_channels_concurrently_and_records_freshness(self):
+        worker_class = getattr(newapi_monitor, "ChannelProbeWorker", None)
+        self.assertIsNotNone(worker_class)
+        active = 0
+        max_active = 0
+        lock = threading.Lock()
+
+        class ProbeClient:
+            def probe(self, _rule):
+                nonlocal active, max_active
+                with lock:
+                    active += 1
+                    max_active = max(max_active, active)
+                time.sleep(0.03)
+                with lock:
+                    active -= 1
+                return newapi_monitor.RealProbeResult(True, 0.03, 10.0, "ok")
+
+        store = mock.Mock()
+        store.get_json.side_effect = lambda key, default=None: default
+        config = mock.Mock(
+            real_probe_rules={
+                1: newapi_monitor.RealProbeRule("gpt", "/v1/responses", "responses", "1", 1),
+                2: newapi_monitor.RealProbeRule("gpt", "/v1/responses", "responses", "1", 1),
+                3: newapi_monitor.RealProbeRule("gpt", "/v1/responses", "responses", "1", 1),
+            },
+            channel_settings={},
+            channel_slow_seconds=60,
+            channel_failure_threshold=2,
+            channel_recovery_threshold=2,
+            channel_probe_concurrency=3,
+        )
+        worker = worker_class(
+            config,
+            mock.Mock(),
+            ProbeClient(),
+            store,
+            mock.Mock(),
+            lambda: [
+                {"id": 1, "name": "one", "status": 1},
+                {"id": 2, "name": "two", "status": 1},
+                {"id": 3, "name": "three", "status": 1},
+            ],
+            lambda _items: None,
+            stale_after_seconds=900,
+        )
+
+        observations = worker.check_once()
+
+        self.assertEqual(3, len(observations))
+        self.assertGreaterEqual(max_active, 2)
+        store.record_collector_result.assert_called_once_with(
+            "channel_probe", True, "", stale_after_seconds=900
+        )
 
 
 if __name__ == "__main__":
