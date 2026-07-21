@@ -38,7 +38,7 @@ docker compose build monitor
 docker compose up -d --remove-orphans
 
 healthy=0
-for _attempt in $(seq 1 30); do
+for _attempt in $(seq 1 90); do
   if curl --fail --silent http://127.0.0.1:18081/api/health >/dev/null; then
     healthy=1
     break
