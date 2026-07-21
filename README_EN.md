@@ -8,6 +8,22 @@
 
 An independently deployed monitoring and alerting platform for New API. It does not modify New API source code. Data is collected through read-only management APIs, real relay probes, real usage logs, and a restricted Docker Socket Proxy. The project is designed for single-host and small-scale New API installations.
 
+## Screenshots
+
+Every screenshot below is generated from the built-in synthetic demo dataset. It contains no real channels, users, API keys, domains, IP addresses, tokens, or request records.
+
+### Channel overview
+
+![Channel overview generated from synthetic data](docs/screenshots/overview-demo-zh.png)
+
+### Host and container resources
+
+![English resource dashboard generated from synthetic data](docs/screenshots/resources-demo-en.png)
+
+### Incident investigation
+
+![Incident investigation page generated from synthetic data](docs/screenshots/incidents-demo-zh.png)
+
 ## Features
 
 - Automatically synchronizes enabled New API channels and hides disabled channels.
@@ -18,7 +34,9 @@ An independently deployed monitoring and alerting platform for New API. It does 
 - Monitors host CPU, memory, disk, and Docker container status, resource use, restarts, and OOM events.
 - Detects stale collectors so a live dashboard cannot silently hide a stopped collection pipeline.
 - Supports email, WeCom applications, WeCom group bots, Feishu applications, and Feishu group bots with independent delivery and real test alerts.
+- Uses the same conclusion-first, risk-prioritized, human-readable report across every notification channel; email also includes responsive HTML cards with a plain-text fallback.
 - Reuses New API sessions for SSO, with role mapping, an emergency administrator, login throttling, and configuration auditing.
+- Automatically follows the browser language for Chinese or English, with a persistent manual switch in the page header.
 - Stores runtime configuration in the monitor database and never writes configuration back to New API.
 - Maintains separate channel visibility lists for administrators/operators and regular viewers.
 

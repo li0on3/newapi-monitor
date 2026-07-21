@@ -485,6 +485,89 @@ class ConfigTests(unittest.TestCase):
 
 
 class NotificationTests(unittest.TestCase):
+    def test_notification_html_turns_report_sections_into_scannable_cards(self):
+        html = newapi_monitor.notification_html(
+            "周期报告 · 需要关注",
+            "🟠 New API 监控周期报告\n结论：渠道正常，但延迟升高。\n\n【请求性能】\n🔴 Demo <unsafe>\n   P95 2分01秒",
+        )
+
+        self.assertIn("<h1>周期报告 · 需要关注</h1>", html)
+        self.assertIn("<h2>请求性能</h2>", html)
+        self.assertIn("Demo &lt;unsafe&gt;", html)
+        self.assertNotIn("Demo <unsafe>", html)
+
+    def test_periodic_report_prioritizes_risk_and_uses_human_readable_units(self):
+        channels = [
+            ChannelObservation(1, "Primary", True, 2.118, "ok"),
+            ChannelObservation(2, "Backup", True, 33.743, "ok"),
+        ]
+        latency = [
+            newapi_monitor.LatencySummary(1, "Primary", "gpt-demo", 19, 62.526, 307.0, 3990.5, 7),
+            newapi_monitor.LatencySummary(1, "Primary", "gpt-fast", 42, 16.095, 34.0, 6253.3, 1),
+        ]
+
+        subject, body = newapi_monitor.build_periodic_report(
+            channels,
+            latency,
+            {
+                "system_cpu": 12.5,
+                "system_memory": 42.4,
+                "system_disk": 28.9,
+                "system_available_mb": 1133.4,
+                "container_cpu": 0.2,
+                "container_memory": 5.7,
+                "system_swap": 6.9,
+            },
+            {"container_status": "running", "container_restarts": 0},
+            slow_seconds=60,
+            period_seconds=86400,
+            generated_at=1_750_000_000,
+        )
+
+        self.assertEqual("周期报告 · 需要关注", subject)
+        self.assertIn("结论：渠道全部可用，但发现 1 个高延迟模型", body)
+        self.assertIn("P95 5分07秒", body)
+        self.assertIn("慢请求 7/19（36.8%）", body)
+        self.assertIn("可用内存 1.1 GB", body)
+        self.assertNotIn("system_available_mb: 1133.4%", body)
+        self.assertLess(body.index("gpt-demo"), body.index("gpt-fast"))
+
+    def test_periodic_report_surfaces_failed_channels_before_healthy_channels(self):
+        channels = [
+            ChannelObservation(1, "Healthy", True, 1.2, "ok"),
+            ChannelObservation(2, "Broken", False, 0.5, "upstream 502"),
+        ]
+
+        subject, body = newapi_monitor.build_periodic_report(
+            channels,
+            [],
+            {},
+            {},
+            slow_seconds=60,
+            period_seconds=3600,
+            generated_at=1_750_000_000,
+        )
+
+        self.assertEqual("周期报告 · 存在异常", subject)
+        self.assertIn("异常渠道 1 个", body)
+        self.assertLess(body.index("Broken"), body.index("Healthy"))
+
+    def test_periodic_report_uses_runtime_resource_thresholds(self):
+        subject, body = newapi_monitor.build_periodic_report(
+            [],
+            [],
+            {"system_memory": 75.0},
+            {},
+            slow_seconds=60,
+            period_seconds=3600,
+            resource_thresholds={"system_memory": 70.0},
+            generated_at=1_750_000_000,
+        )
+
+        self.assertEqual("周期报告 · 存在异常", subject)
+        self.assertIn("1 项资源超过阈值", body)
+        self.assertIn("🔴 内存 75.0%", body)
+
     def test_wecom_application_fetches_token_and_sends_text_message(self):
         notifier = WeComAppNotifier("ww-test", 1000004, "app-secret", "@all", "", "")
 

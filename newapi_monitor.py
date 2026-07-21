@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import html
 import json
 import logging
 import math
@@ -1459,6 +1460,7 @@ class Mailer:
         message["From"] = self.config.smtp_from
         message["To"] = ", ".join(self.config.smtp_to)
         message.set_content(body)
+        message.add_alternative(notification_html(subject, body), subtype="html")
 
         if self.config.smtp_ssl:
             client: smtplib.SMTP = smtplib.SMTP_SSL(
@@ -1482,6 +1484,198 @@ def notification_text(prefix: str, subject: str, body: str, limit: int = 3800) -
     if len(content) <= limit:
         return content
     return content[: limit - 12] + "\n…内容已截断"
+
+
+def notification_html(subject: str, body: str) -> str:
+    blocks: list[str] = []
+    for raw_line in body.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        escaped = html.escape(line)
+        if line.startswith("【") and line.endswith("】"):
+            blocks.append(f"<h2>{html.escape(line[1:-1])}</h2>")
+        elif line.startswith("结论："):
+            blocks.append(f'<div class="summary">{escaped}</div>')
+        elif line.startswith(("🔴", "🟠", "🟢", "✅", "❌", "⚪", "ℹ️")):
+            blocks.append(f'<div class="item">{escaped}</div>')
+        elif raw_line.startswith("   "):
+            blocks.append(f'<div class="detail">{escaped}</div>')
+        else:
+            blocks.append(f"<p>{escaped}</p>")
+    return "".join(
+        [
+            "<!doctype html><html><head><meta charset=\"utf-8\"><style>",
+            "body{margin:0;background:#f4f7fb;color:#172033;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif}",
+            ".wrap{max-width:680px;margin:0 auto;padding:28px 18px}.panel{background:#fff;border:1px solid #e6ebf2;border-radius:16px;padding:26px;box-shadow:0 10px 30px rgba(31,42,68,.08)}",
+            "h1{margin:0 0 18px;font-size:24px}h2{margin:24px 0 10px;padding-top:18px;border-top:1px solid #edf0f5;font-size:17px}",
+            "p{margin:8px 0;color:#5a6475;font-size:14px}.summary{padding:14px 16px;background:#f0f7ff;border-left:4px solid #3578e5;border-radius:8px;font-weight:700;line-height:1.6}",
+            ".item{margin:8px 0;padding:10px 12px;background:#f8fafc;border-radius:8px;line-height:1.5}.detail{margin:-5px 0 8px 34px;color:#657084;font-size:13px}",
+            ".foot{margin-top:22px;color:#8a94a6;font-size:12px;text-align:center}</style></head><body><div class=\"wrap\"><div class=\"panel\">",
+            f"<h1>{html.escape(subject)}</h1>",
+            *blocks,
+            '<div class="foot">New API Monitor · Automated notification</div></div></div></body></html>',
+        ]
+    )
+
+
+def _human_duration(seconds: float) -> str:
+    seconds = max(0.0, float(seconds))
+    if seconds < 1:
+        return f"{seconds * 1000:.0f}毫秒"
+    if seconds < 60:
+        return f"{seconds:.1f}秒"
+    total_seconds = int(round(seconds))
+    minutes, remainder = divmod(total_seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours}小时{minutes:02d}分{remainder:02d}秒"
+    return f"{minutes}分{remainder:02d}秒"
+
+
+def build_periodic_report(
+    channels: Iterable[ChannelObservation],
+    latency: Iterable[LatencySummary],
+    resources: dict[str, float],
+    resource_details: dict[str, Any],
+    *,
+    slow_seconds: float,
+    period_seconds: int,
+    channel_slow_seconds: float = 30.0,
+    resource_thresholds: dict[str, float] | None = None,
+    generated_at: int | None = None,
+) -> tuple[str, str]:
+    generated_at = int(time.time()) if generated_at is None else generated_at
+    channel_items = sorted(list(channels), key=lambda item: (item.success, -item.elapsed_seconds, item.name))
+    failed_channels = [item for item in channel_items if not item.success]
+    slow_channels = [
+        item for item in channel_items
+        if item.success and item.elapsed_seconds >= channel_slow_seconds
+    ]
+    latency_items = sorted(
+        list(latency),
+        key=lambda item: (
+            not (item.p95_seconds >= slow_seconds or item.average_seconds >= slow_seconds),
+            -item.p95_seconds,
+            -item.slow_count,
+            -item.count,
+        ),
+    )
+    risky_latency = [
+        item
+        for item in latency_items
+        if item.p95_seconds >= slow_seconds or item.average_seconds >= slow_seconds
+    ]
+
+    effective_resource_thresholds = {
+        "system_cpu": 85.0,
+        "system_memory": 85.0,
+        "system_disk": 80.0,
+        "system_swap": 80.0,
+        "container_cpu": 85.0,
+        "container_memory": 85.0,
+    }
+    effective_resource_thresholds.update(resource_thresholds or {})
+    risky_resources = [
+        key
+        for key, threshold in effective_resource_thresholds.items()
+        if key in resources and float(resources[key]) >= threshold
+    ]
+    container_status = str(resource_details.get("container_status") or "unknown")
+    container_restarts = int(resource_details.get("container_restarts") or 0)
+    container_abnormal = container_status not in {"running", "healthy"} or container_restarts > 0
+
+    if failed_channels or risky_resources or container_abnormal:
+        status = "存在异常"
+    elif risky_latency or slow_channels:
+        status = "需要关注"
+    else:
+        status = "运行正常"
+
+    findings: list[str] = []
+    if failed_channels:
+        findings.append(f"异常渠道 {len(failed_channels)} 个")
+    elif channel_items:
+        findings.append("渠道全部可用")
+    else:
+        findings.append("暂无渠道探测数据")
+    if risky_latency:
+        findings.append(f"发现 {len(risky_latency)} 个高延迟模型")
+    if risky_resources:
+        findings.append(f"{len(risky_resources)} 项资源超过阈值")
+    if container_abnormal:
+        findings.append("容器状态需要检查")
+
+    period_label = (
+        f"最近 {period_seconds // 86400} 天"
+        if period_seconds >= 86400 and period_seconds % 86400 == 0
+        else f"最近 {max(1, period_seconds // 3600)} 小时"
+    )
+    conclusion = findings[0]
+    if len(findings) > 1:
+        conclusion += "，但" + "，并".join(findings[1:])
+    lines = [
+        f"{'🔴' if status == '存在异常' else '🟠' if status == '需要关注' else '🟢'} New API 监控周期报告",
+        f"结论：{conclusion}。",
+        f"报告周期：{period_label} · 生成时间：{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(generated_at))}",
+        "",
+        "【渠道健康】",
+    ]
+    if not channel_items:
+        lines.append("⚪ 暂无探测数据")
+    for item in channel_items:
+        if item.success:
+            icon = "🟠" if item.elapsed_seconds >= channel_slow_seconds else "✅"
+            note = " · 探测偏慢" if item.elapsed_seconds >= channel_slow_seconds else ""
+            lines.append(f"{icon} {item.name} · {_human_duration(item.elapsed_seconds)}{note}")
+        else:
+            message = item.message.strip().replace("\n", " ") or "探测失败"
+            lines.append(f"❌ {item.name} · {message[:160]}")
+
+    lines.extend(["", "【请求性能】"])
+    if not latency_items:
+        lines.append("⚪ 当前周期暂无消费日志")
+    for item in latency_items:
+        slow_ratio = item.slow_count / item.count * 100 if item.count else 0.0
+        risky = item.p95_seconds >= slow_seconds or item.average_seconds >= slow_seconds
+        icon = "🔴" if risky else "✅"
+        first_response = "暂无" if item.average_frt_ms is None else _human_duration(item.average_frt_ms / 1000)
+        lines.append(f"{icon} {item.channel_name} / {item.model_name}")
+        lines.append(
+            f"   P95 {_human_duration(item.p95_seconds)} · 平均 {_human_duration(item.average_seconds)} · "
+            f"首字 {first_response}"
+        )
+        lines.append(f"   慢请求 {item.slow_count}/{item.count}（{slow_ratio:.1f}%） · 总请求 {item.count}")
+
+    lines.extend(["", "【主机与容器】"])
+    resource_labels = [
+        ("system_cpu", "CPU"),
+        ("system_memory", "内存"),
+        ("system_disk", "磁盘"),
+        ("system_swap", "Swap"),
+        ("container_cpu", "容器 CPU"),
+        ("container_memory", "容器内存"),
+    ]
+    if not resources and not resource_details:
+        lines.append("⚪ 暂无资源数据")
+    else:
+        metric_parts = []
+        for key, label in resource_labels:
+            if key not in resources:
+                continue
+            icon = "🔴" if float(resources[key]) >= effective_resource_thresholds[key] else "✅"
+            metric_parts.append(f"{icon} {label} {float(resources[key]):.1f}%")
+        lines.extend(metric_parts)
+        if "system_available_mb" in resources:
+            available_mb = float(resources["system_available_mb"])
+            available_text = f"{available_mb / 1024:.1f} GB" if available_mb >= 1024 else f"{available_mb:.0f} MB"
+            lines.append(f"ℹ️ 可用内存 {available_text}")
+        if resource_details:
+            status_icon = "✅" if not container_abnormal else "🔴"
+            lines.append(f"{status_icon} 容器 {container_status} · 重启 {container_restarts} 次")
+
+    lines.extend(["", "提示：🔴 需立即处理 · 🟠 建议关注 · ✅ 正常"])
+    return f"周期报告 · {status}", "\n".join(lines)
 
 
 class WeComAppNotifier:
@@ -2065,37 +2259,24 @@ class MonitorApp:
     def send_report(self) -> None:
         now = int(time.time())
         summary = self.store.latency_summary(now - self.config.report_interval_seconds, self.config.slow_request_seconds)
-        lines = ["New API监控周期报告", ""]
-        if self.latest_channels:
-            healthy = sum(item.success for item in self.latest_channels)
-            lines.append(f"渠道：{healthy}/{len(self.latest_channels)} 正常")
-            for item in self.latest_channels:
-                state = "正常" if item.success else "异常"
-                lines.append(f"- {item.name}：{state}，探测耗时 {item.elapsed_seconds:.3f}s")
-        else:
-            lines.append("渠道：暂无探测数据")
-
-        lines.extend(["", "使用日志耗时："])
-        if not summary:
-            lines.append("- 当前周期暂无消费日志")
-        for row in summary:
-            frt = "-" if row.average_frt_ms is None else f"{row.average_frt_ms:.1f}ms"
-            lines.append(
-                f"- {row.channel_name}/{row.model_name}: 请求 {row.count}，"
-                f"平均 {row.average_seconds:.3f}s，P95 {row.p95_seconds:.3f}s，"
-                f"平均首字 {frt}，慢请求 {row.slow_count}"
-            )
-
-        lines.extend(["", "资源："])
-        if not self.latest_resources:
-            lines.append("- 暂无资源数据")
-        for name, value in sorted(self.latest_resources.items()):
-            lines.append(f"- {name}: {value:.1f}%")
-        if self.latest_resource_details:
-            lines.append(f"- container_status: {self.latest_resource_details.get('container_status', '-')}")
-            lines.append(f"- container_restarts: {self.latest_resource_details.get('container_restarts', '-')}")
-
-        self.notifier.send("周期报告", "\n".join(lines))
+        subject, body = build_periodic_report(
+            self.latest_channels,
+            summary,
+            self.latest_resources,
+            self.latest_resource_details,
+            slow_seconds=self.config.slow_request_seconds,
+            period_seconds=self.config.report_interval_seconds,
+            channel_slow_seconds=self.config.channel_slow_seconds,
+            resource_thresholds={
+                "system_cpu": self.config.system_cpu_threshold,
+                "system_memory": self.config.system_memory_threshold,
+                "system_disk": self.config.system_disk_threshold,
+                "container_cpu": self.config.container_cpu_threshold,
+                "container_memory": self.config.container_memory_threshold,
+            },
+            generated_at=now,
+        )
+        self.notifier.send(subject, body)
         LOGGER.info("periodic report sent")
 
     def run_forever(self, stop_event: Any | None = None) -> None:
