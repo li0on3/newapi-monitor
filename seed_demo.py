@@ -22,12 +22,12 @@ def main() -> None:
     now = int(time.time())
     store = StateStore(str(database_path))
     channels = [
-        {"id": 1, "name": "OpenAI-Plus", "type": 1, "status": 1, "models": "gpt-5.4,gpt-5.5", "group": "default", "base_url": "https://api.example/openai/plus"},
-        {"id": 2, "name": "OpenAI-Pro", "type": 1, "status": 1, "models": "gpt-pro", "group": "default", "base_url": "https://api.example/openai/pro"},
-        {"id": 3, "name": "t_0.13", "type": 1, "status": 1, "models": "gpt-5.6-sol", "group": "default", "base_url": "https://api.example/v1/responses"},
-        {"id": 4, "name": "充值通道", "type": 1, "status": 1, "models": "gpt-5.4", "group": "default", "base_url": "https://api.example/recharge"},
-        {"id": 5, "name": "Claude-Sonnet", "type": 14, "status": 1, "models": "claude-sonnet-4-6", "group": "vip", "base_url": "https://api.example/claude"},
-        {"id": 6, "name": "备用渠道", "type": 1, "status": 2, "models": "gpt-4.1", "group": "backup", "base_url": "https://api.example/backup"},
+        {"id": 1, "name": "Primary OpenAI", "type": 1, "status": 1, "models": "gpt-main,gpt-fast", "group": "default", "base_url": "https://api.example/openai/primary"},
+        {"id": 2, "name": "OpenAI Backup", "type": 1, "status": 1, "models": "gpt-backup", "group": "default", "base_url": "https://api.example/openai/backup"},
+        {"id": 3, "name": "Responses Pool", "type": 1, "status": 1, "models": "gpt-reasoning", "group": "default", "base_url": "https://api.example/v1/responses"},
+        {"id": 4, "name": "Regional Gateway", "type": 1, "status": 1, "models": "gpt-regional", "group": "default", "base_url": "https://api.example/regional"},
+        {"id": 5, "name": "Claude Primary", "type": 14, "status": 1, "models": "claude-demo", "group": "premium", "base_url": "https://api.example/claude"},
+        {"id": 6, "name": "Disabled Example", "type": 1, "status": 2, "models": "gpt-disabled", "group": "backup", "base_url": "https://api.example/disabled"},
     ]
     store.upsert_channels(channels, now=now)
     for index in range(60):
@@ -84,8 +84,8 @@ def main() -> None:
                 "model_name": str(channel["models"]).split(",")[0],
                 "use_time": duration,
                 "other": {"frt": frt},
-                "username": ["alice", "bob", "carol"][index % 3],
-                "token_name": "production",
+                "username": ["demo-alice", "demo-bob", "demo-carol"][index % 3],
+                "token_name": "demo-token",
                 "token_id": 10 + index % 4,
                 "is_stream": index % 2 == 0,
                 "group": channel["group"],
@@ -114,11 +114,11 @@ def main() -> None:
             created_at=timestamp,
         )
     store.record_alert_events(
-        [AlertEvent("channel_failed", "渠道异常：充值通道", "连续真实探测失败，upstream timeout", key="channel:4", severity="critical")],
+        [AlertEvent("channel_failed", "渠道异常：Regional Gateway", "连续真实探测失败，upstream timeout", key="channel:4", severity="critical")],
         now=now - 2100,
     )
     store.record_alert_events(
-        [AlertEvent("latency_high", "耗时异常：OpenAI-Pro/gpt-pro", "近5次有3次超过 60s", key="latency:2:gpt-pro", severity="warning")],
+        [AlertEvent("latency_high", "耗时异常：OpenAI Backup/gpt-backup", "近5次有3次超过 60s", key="latency:2:gpt-backup", severity="warning")],
         now=now - 800,
     )
     store.connection.close()
