@@ -22,6 +22,10 @@
 
 ### Fixed
 
+- Moved channel probing to an independent worker with bounded concurrency so slow probes no longer block log, resource, or channel-sync collection.
+- Added consecutive failure/recovery confirmation and downgraded transient 5xx, 429, and timeout failures to reduce alert flapping.
+- Collapsed common multi-channel authentication or group-permission failures into one probe-credential incident.
+- Recorded channel-sync freshness directly in its worker to prevent false stale-collector alerts caused by delayed queue draining.
 - Corrected New API usage-log pagination to use the `p` parameter.
 - Prevented channel-card timestamps from overlapping navigation controls.
 - Scoped overview health, request statistics, and incidents to channels visible to the current audience.

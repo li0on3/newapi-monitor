@@ -17,6 +17,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from email.message import EmailMessage
 from pathlib import Path
@@ -361,47 +362,152 @@ class LatencyStateTracker:
 
 
 class ChannelStateTracker:
-    def __init__(self, states: dict[str, str] | None = None):
+    def __init__(
+        self,
+        states: dict[str, Any] | None = None,
+        failure_threshold: int = 2,
+        recovery_threshold: int = 2,
+    ):
         self.states = dict(states or {})
+        self.failure_threshold = max(1, failure_threshold)
+        self.recovery_threshold = max(1, recovery_threshold)
+
+    @staticmethod
+    def failure_class(message: str) -> str:
+        normalized = message.lower()
+        if any(marker in normalized for marker in (
+            "http 401", "http 403", "unauthorized", "forbidden", "无权访问", "权限",
+        )):
+            return "auth"
+        if any(marker in normalized for marker in (
+            "http 429", "http 500", "http 502", "http 503", "http 504",
+            "upstream 429", "upstream 500", "upstream 502", "upstream 503", "upstream 504",
+            "timeout", "timed out", "temporarily unavailable", "connection reset",
+            "connection refused", "临时不可用", "超时",
+        )):
+            return "transient"
+        return "persistent"
+
+    @staticmethod
+    def _normalize_state(raw: Any) -> dict[str, Any]:
+        if isinstance(raw, dict):
+            return {
+                "status": str(raw.get("status") or "unknown"),
+                "failures": max(0, int(raw.get("failures") or 0)),
+                "successes": max(0, int(raw.get("successes") or 0)),
+                "failure_class": str(raw.get("failure_class") or ""),
+            }
+        if raw in {"ok", "failed"}:
+            return {"status": raw, "failures": 0, "successes": 0, "failure_class": ""}
+        return {"status": "unknown", "failures": 0, "successes": 0, "failure_class": ""}
 
     def evaluate(self, observations: Iterable[ChannelObservation]) -> list[AlertEvent]:
         events: list[AlertEvent] = []
         for observation in observations:
             key = str(observation.channel_id)
-            new_state = "ok" if observation.success else "failed"
-            old_state = self.states.get(key)
-            self.states[key] = new_state
-            if old_state == new_state:
+            state = self._normalize_state(self.states.get(key))
+            if observation.success:
+                state["failures"] = 0
+                state["failure_class"] = ""
+                if state["status"] == "failed":
+                    state["successes"] += 1
+                    if state["successes"] >= self.recovery_threshold:
+                        state = {"status": "ok", "failures": 0, "successes": 0, "failure_class": ""}
+                        events.append(
+                            AlertEvent(
+                                kind="channel_recovered",
+                                title=f"渠道恢复：{observation.name}",
+                                body=(
+                                    f"渠道ID：{observation.channel_id}\n"
+                                    f"已连续成功 {self.recovery_threshold} 次\n"
+                                    f"探测耗时：{observation.elapsed_seconds:.3f}s"
+                                ),
+                                key=f"channel:{observation.channel_id}",
+                                severity="info",
+                                recovery=True,
+                            )
+                        )
+                else:
+                    state = {"status": "ok", "failures": 0, "successes": 0, "failure_class": ""}
+                self.states[key] = state
                 continue
-            if new_state == "failed":
+
+            state["successes"] = 0
+            state["failures"] += 1
+            state["failure_class"] = self.failure_class(observation.message)
+            if state["status"] != "failed" and state["failures"] >= self.failure_threshold:
+                state["status"] = "failed"
                 events.append(
                     AlertEvent(
                         kind="channel_failed",
                         title=f"渠道异常：{observation.name}",
                         body=(
                             f"渠道ID：{observation.channel_id}\n"
+                            f"已连续失败 {state['failures']} 次\n"
                             f"探测耗时：{observation.elapsed_seconds:.3f}s\n"
                             f"错误：{observation.message or '未知错误'}"
                         ),
                         key=f"channel:{observation.channel_id}",
+                        severity="warning" if state["failure_class"] == "transient" else "critical",
+                    )
+                )
+            self.states[key] = state
+        return events
+
+
+class ProbeCredentialStateTracker:
+    def __init__(self, state: dict[str, Any] | None = None, recovery_threshold: int = 2):
+        self.state = dict(state or {})
+        self.recovery_threshold = max(1, recovery_threshold)
+
+    def evaluate(self, observations: Iterable[ChannelObservation]) -> tuple[list[AlertEvent], set[int]]:
+        items = list(observations)
+        auth_failures = [
+            item for item in items
+            if not item.success and ChannelStateTracker.failure_class(item.message) == "auth"
+        ]
+        enabled_count = len(items)
+        common_failure = enabled_count >= 2 and len(auth_failures) >= max(2, math.ceil(enabled_count / 2))
+        active = bool(self.state.get("active", False))
+        events: list[AlertEvent] = []
+        suppressed: set[int] = set()
+        if common_failure:
+            suppressed = {item.channel_id for item in auth_failures}
+            self.state = {"active": True, "successes": 0}
+            if not active:
+                sample = auth_failures[0].message or "New API拒绝了渠道探测请求"
+                events.append(
+                    AlertEvent(
+                        kind="probe_auth_failed",
+                        title="监控探测凭证或分组权限异常",
+                        body=(
+                            f"同一轮有 {len(auth_failures)}/{enabled_count} 个渠道返回相同类型的认证或分组错误。\n"
+                            "已抑制对应渠道故障，避免将监控凭证问题误报为多个上游故障。\n"
+                            f"示例错误：{sample}"
+                        ),
+                        key="probe:credential",
                         severity="critical",
                     )
                 )
-            elif old_state is not None:
+            return events, suppressed
+
+        if active:
+            successes = int(self.state.get("successes") or 0) + 1
+            if successes >= self.recovery_threshold:
+                self.state = {"active": False, "successes": 0}
                 events.append(
                     AlertEvent(
-                        kind="channel_recovered",
-                        title=f"渠道恢复：{observation.name}",
-                        body=(
-                            f"渠道ID：{observation.channel_id}\n"
-                            f"探测耗时：{observation.elapsed_seconds:.3f}s"
-                        ),
-                        key=f"channel:{observation.channel_id}",
+                        kind="probe_auth_recovered",
+                        title="监控探测凭证与分组权限恢复",
+                        body=f"连续 {self.recovery_threshold} 轮未再出现多渠道共同认证错误。",
+                        key="probe:credential",
                         severity="info",
                         recovery=True,
                     )
                 )
-        return events
+            else:
+                self.state = {"active": True, "successes": successes}
+        return events, suppressed
 
 
 class ServiceStateTracker:
@@ -546,6 +652,9 @@ class Config:
     poll_seconds: int
     channel_sync_interval_seconds: int
     channel_interval_seconds: int
+    channel_probe_concurrency: int
+    channel_failure_threshold: int
+    channel_recovery_threshold: int
     log_interval_seconds: int
     resource_interval_seconds: int
     report_interval_seconds: int
@@ -652,6 +761,9 @@ class Config:
             poll_seconds=int(value("poll_seconds", "POLL_SECONDS", 10)),
             channel_sync_interval_seconds=int(value("channel_sync_interval_seconds", "CHANNEL_SYNC_INTERVAL_SECONDS", 5)),
             channel_interval_seconds=int(value("channel_interval_seconds", "CHANNEL_INTERVAL_SECONDS", 300)),
+            channel_probe_concurrency=max(1, min(16, int(value("channel_probe_concurrency", "CHANNEL_PROBE_CONCURRENCY", 3)))),
+            channel_failure_threshold=max(1, min(10, int(value("channel_failure_threshold", "CHANNEL_FAILURE_THRESHOLD", 2)))),
+            channel_recovery_threshold=max(1, min(10, int(value("channel_recovery_threshold", "CHANNEL_RECOVERY_THRESHOLD", 2)))),
             log_interval_seconds=int(value("log_interval_seconds", "LOG_INTERVAL_SECONDS", 300)),
             resource_interval_seconds=int(value("resource_interval_seconds", "RESOURCE_INTERVAL_SECONDS", 60)),
             report_interval_seconds=int(value("report_interval_seconds", "REPORT_INTERVAL_SECONDS", 86400)),
@@ -1903,11 +2015,13 @@ class ChannelSyncWorker:
         store: StateStore,
         on_snapshot: Callable[[list[dict[str, Any]]], None],
         on_result: Callable[[bool, str], None] | None = None,
+        stale_after_seconds: int = 60,
     ):
         self.client = client
         self.store = store
         self.on_snapshot = on_snapshot
         self.on_result = on_result
+        self.stale_after_seconds = stale_after_seconds
 
     def sync_once(self) -> list[dict[str, Any]]:
         channels = self.client.get_channels()
@@ -1933,9 +2047,178 @@ class ChannelSyncWorker:
                     LOGGER.exception("channel sync failed")
                 # Every completed attempt refreshes collector freshness. Alert state
                 # transitions are deduplicated separately by ServiceStateTracker.
+                try:
+                    self.store.record_collector_result(
+                        "channel_sync",
+                        success,
+                        error_message,
+                        stale_after_seconds=self.stale_after_seconds,
+                    )
+                except Exception:
+                    LOGGER.exception("channel sync freshness update failed")
                 if self.on_result is not None:
                     self.on_result(success, error_message)
                 if stop_event.wait(max(1, interval_seconds)):
+                    break
+        finally:
+            self.store.connection.close()
+
+
+class ChannelProbeWorker:
+    def __init__(
+        self,
+        config: Config,
+        client: NewAPIClient,
+        relay_probe_client: RelayProbeClient | None,
+        store: StateStore,
+        notifier: NotificationDispatcher,
+        snapshot_provider: Callable[[], list[dict[str, Any]]],
+        on_observations: Callable[[list[ChannelObservation]], None],
+        stale_after_seconds: int,
+    ):
+        self.config = config
+        self.client = client
+        self.relay_probe_client = relay_probe_client
+        self.store = store
+        self.notifier = notifier
+        self.snapshot_provider = snapshot_provider
+        self.on_observations = on_observations
+        self.stale_after_seconds = stale_after_seconds
+        self.channel_tracker = ChannelStateTracker(
+            self.store.get_json("channel_states", {}),
+            failure_threshold=config.channel_failure_threshold,
+            recovery_threshold=config.channel_recovery_threshold,
+        )
+        self.credential_tracker = ProbeCredentialStateTracker(
+            self.store.get_json("probe_credential_state", {}),
+            recovery_threshold=config.channel_recovery_threshold,
+        )
+
+    def _probe_channel(self, channel: dict[str, Any]) -> ChannelObservation:
+        channel_id = int(channel.get("id") or 0)
+        name = str(channel.get("name") or f"channel-{channel_id}")
+        started = time.monotonic()
+        try:
+            probe_rule = self.config.real_probe_rules.get(channel_id)
+            if probe_rule is not None and self.relay_probe_client is not None:
+                probe = self.relay_probe_client.probe(probe_rule)
+                elapsed = probe.elapsed_seconds
+                first_response_ms = probe.first_response_ms
+                success = probe.success
+                message = probe.message
+                source = "real"
+                if success and (
+                    elapsed > self.config.channel_slow_seconds
+                    or (first_response_ms or 0) > self.config.channel_slow_seconds * 1000.0
+                ):
+                    success = False
+                    message = (
+                        f"真实请求耗时超过阈值 {self.config.channel_slow_seconds:.0f}s："
+                        f"总耗时 {elapsed:.3f}s，首字 {(first_response_ms or 0) / 1000.0:.3f}s"
+                    )
+            else:
+                result = self.client.test_channel(channel_id)
+                elapsed = float(result.get("time") or (time.monotonic() - started))
+                first_response_ms = None
+                success = bool(result.get("success"))
+                message = str(result.get("message") or "")
+                source = "builtin"
+                if success and elapsed > self.config.channel_slow_seconds:
+                    success = False
+                    message = f"探测耗时 {elapsed:.3f}s 超过阈值 {self.config.channel_slow_seconds:.3f}s"
+        except Exception as error:
+            elapsed = time.monotonic() - started
+            first_response_ms = None
+            success = False
+            message = str(error)
+            source = "real" if channel_id in self.config.real_probe_rules else "builtin"
+        return ChannelObservation(
+            channel_id,
+            name,
+            success,
+            elapsed,
+            message,
+            source,
+            first_response_ms,
+        )
+
+    def _send_events(self, events: list[AlertEvent]) -> None:
+        if not events:
+            return
+        self.store.record_alert_events(events)
+        subject = "；".join(event.title for event in events)
+        body = "\n\n".join(f"[{event.title}]\n{event.body}" for event in events)
+        result = self.notifier.send(subject, body)
+        LOGGER.info(
+            "sent %d channel alert events through %s; failed=%s",
+            len(events),
+            ",".join(result["succeeded"]) or "none",
+            ",".join(result["failed"]) or "none",
+        )
+
+    def check_once(self) -> list[ChannelObservation]:
+        channels = []
+        for channel in self.snapshot_provider():
+            channel_id = int(channel.get("id") or 0)
+            channel_config = self.config.channel_settings.get(channel_id, {})
+            if channel_id <= 0 or int(channel.get("status") or 0) != 1:
+                continue
+            if channel_config.get("maintenance_mode"):
+                continue
+            channels.append(channel)
+
+        if not channels:
+            self.on_observations([])
+            self.store.record_collector_result(
+                "channel_probe", True, "", stale_after_seconds=self.stale_after_seconds
+            )
+            return []
+        with ThreadPoolExecutor(
+            max_workers=min(self.config.channel_probe_concurrency, len(channels)),
+            thread_name_prefix="newapi-channel-probe-request",
+        ) as executor:
+            observations = list(executor.map(self._probe_channel, channels))
+
+        self.on_observations(observations)
+        self.store.insert_channel_observations(observations)
+        credential_events, suppressed = self.credential_tracker.evaluate(observations)
+        alert_observations = [
+            item for item in observations
+            if item.channel_id not in suppressed
+            and self.config.channel_settings.get(item.channel_id, {}).get("alert_enabled", True)
+        ]
+        events = credential_events + self.channel_tracker.evaluate(alert_observations)
+        self._send_events(events)
+        self.store.set_json("channel_states", self.channel_tracker.states)
+        self.store.set_json("probe_credential_state", self.credential_tracker.state)
+        self.store.record_collector_result(
+            "channel_probe", True, "", stale_after_seconds=self.stale_after_seconds
+        )
+        LOGGER.info(
+            "channel check complete: total=%d healthy=%d suppressed=%d",
+            len(observations),
+            sum(item.success for item in observations),
+            len(suppressed),
+        )
+        return observations
+
+    def run(self, stop_event: threading.Event, interval_seconds: int) -> None:
+        try:
+            while not stop_event.is_set():
+                started = time.monotonic()
+                if not self.snapshot_provider():
+                    if stop_event.wait(1):
+                        break
+                    continue
+                try:
+                    self.check_once()
+                except Exception as error:
+                    self.store.record_collector_result(
+                        "channel_probe", False, str(error), stale_after_seconds=self.stale_after_seconds
+                    )
+                    LOGGER.exception("channel check failed")
+                remaining = max(1.0, interval_seconds - (time.monotonic() - started))
+                if stop_event.wait(remaining):
                     break
         finally:
             self.store.connection.close()
@@ -1946,12 +2229,10 @@ class MonitorApp:
         config.validate()
         self.config = config
         self.client = NewAPIClient(config)
-        self.relay_probe_client = RelayProbeClient(config) if config.real_probe_rules else None
         self.store = StateStore(config.state_db)
         self.notifier = NotificationDispatcher(config)
         self.resource_collector = ResourceCollector(config.disk_path, config.docker_container_names)
         self.service_tracker = ServiceStateTracker(str(self.store.get_json("service_state", "unknown")))
-        self.channel_tracker = ChannelStateTracker(self.store.get_json("channel_states", {}))
         self.latency_tracker = LatencyStateTracker(
             self.store.get_json("latency_states", {}),
             slow_seconds=config.slow_request_seconds,
@@ -2035,21 +2316,6 @@ class MonitorApp:
             raise
         self.store.set_json("service_state", self.service_tracker.state)
 
-    def sync_channels(self) -> None:
-        try:
-            channels = self.client.get_channels()
-        except Exception as error:
-            self._record_service_availability(False, str(error))
-            raise
-        self._record_service_availability(True)
-        self.store.upsert_channels(channels)
-        self.channel_snapshot = channels
-        LOGGER.info(
-            "channel sync complete: total=%d enabled=%d",
-            len(channels),
-            sum(int(channel.get("status") or 0) == 1 for channel in channels),
-        )
-
     def _publish_channel_snapshot(self, channels: list[dict[str, Any]]) -> None:
         self.channel_snapshot = channels
 
@@ -2063,7 +2329,6 @@ class MonitorApp:
             except queue.Empty:
                 return
             try:
-                self._record_collector_result("channel_sync", success, message)
                 self._record_service_availability(success, message)
             except Exception:
                 LOGGER.exception("channel sync state notification failed")
@@ -2075,91 +2340,30 @@ class MonitorApp:
                 StateStore(self.config.state_db),
                 self._publish_channel_snapshot,
                 self._queue_channel_sync_result,
+                stale_after_seconds=self.collector_thresholds["channel_sync"],
             )
             worker.run(stop_event, self.config.channel_sync_interval_seconds)
         except Exception:
             LOGGER.exception("channel sync worker stopped unexpectedly")
 
-    def check_channels(self) -> None:
-        if self.channel_snapshot is None:
-            self.sync_channels()
-        observations: list[ChannelObservation] = []
-        for channel in list(self.channel_snapshot or []):
-            channel_id = int(channel.get("id") or 0)
-            name = str(channel.get("name") or f"channel-{channel_id}")
-            if channel_id <= 0 or int(channel.get("status") or 0) != 1:
-                continue
-            channel_config = self.config.channel_settings.get(channel_id, {})
-            if channel_config.get("maintenance_mode"):
-                continue
-            if not any(
-                int(current.get("id") or 0) == channel_id
-                and int(current.get("status") or 0) == 1
-                for current in self.channel_snapshot or []
-            ):
-                continue
-            started = time.monotonic()
-            try:
-                probe_rule = self.config.real_probe_rules.get(channel_id)
-                if probe_rule is not None and self.relay_probe_client is not None:
-                    probe = self.relay_probe_client.probe(probe_rule)
-                    elapsed = probe.elapsed_seconds
-                    first_response_ms = probe.first_response_ms
-                    success = probe.success
-                    message = probe.message
-                    source = "real"
-                    if success and (
-                        elapsed > self.config.channel_slow_seconds
-                        or (first_response_ms or 0) > self.config.channel_slow_seconds * 1000.0
-                    ):
-                        success = False
-                        message = (
-                            f"真实请求耗时超过阈值 {self.config.channel_slow_seconds:.0f}s："
-                            f"总耗时 {elapsed:.3f}s，首字 {(first_response_ms or 0) / 1000.0:.3f}s"
-                        )
-                else:
-                    result = self.client.test_channel(channel_id)
-                    elapsed = float(result.get("time") or (time.monotonic() - started))
-                    first_response_ms = None
-                    success = bool(result.get("success"))
-                    message = str(result.get("message") or "")
-                    source = "builtin"
-                    if success and elapsed > self.config.channel_slow_seconds:
-                        success = False
-                        message = f"探测耗时 {elapsed:.3f}s 超过阈值 {self.config.channel_slow_seconds:.3f}s"
-            except Exception as error:
-                elapsed = time.monotonic() - started
-                first_response_ms = None
-                success = False
-                message = str(error)
-                source = "real" if channel_id in self.config.real_probe_rules else "builtin"
-            observations.append(
-                ChannelObservation(
-                    channel_id,
-                    name,
-                    success,
-                    elapsed,
-                    message,
-                    source,
-                    first_response_ms,
-                )
-            )
-
+    def _publish_channel_observations(self, observations: list[ChannelObservation]) -> None:
         self.latest_channels = observations
-        self.store.insert_channel_observations(observations)
-        previous_states = dict(self.channel_tracker.states)
-        alert_observations = [
-            item for item in observations
-            if self.config.channel_settings.get(item.channel_id, {}).get("alert_enabled", True)
-        ]
-        events = self.channel_tracker.evaluate(alert_observations)
+
+    def _run_channel_probe_worker(self, stop_event: threading.Event) -> None:
         try:
-            self._send_events(events)
+            worker = ChannelProbeWorker(
+                self.config,
+                NewAPIClient(self.config),
+                RelayProbeClient(self.config) if self.config.real_probe_rules else None,
+                StateStore(self.config.state_db),
+                NotificationDispatcher(self.config),
+                lambda: list(self.channel_snapshot or []),
+                self._publish_channel_observations,
+                stale_after_seconds=self.collector_thresholds["channel_probe"],
+            )
+            worker.run(stop_event, self.config.channel_interval_seconds)
         except Exception:
-            self.channel_tracker.states = previous_states
-            raise
-        self.store.set_json("channel_states", self.channel_tracker.states)
-        LOGGER.info("channel check complete: total=%d healthy=%d", len(observations), sum(item.success for item in observations))
+            LOGGER.exception("channel probe worker stopped unexpectedly")
 
     def collect_logs(self) -> None:
         now = int(time.time())
@@ -2287,6 +2491,7 @@ class MonitorApp:
                 LOGGER.exception("startup email failed")
 
         channel_sync_stop = threading.Event()
+        channel_probe_stop = threading.Event()
         channel_sync_thread = threading.Thread(
             target=self._run_channel_sync_worker,
             args=(channel_sync_stop,),
@@ -2294,7 +2499,13 @@ class MonitorApp:
             daemon=True,
         )
         channel_sync_thread.start()
-        next_channel = 0.0
+        channel_probe_thread = threading.Thread(
+            target=self._run_channel_probe_worker,
+            args=(channel_probe_stop,),
+            name="newapi-channel-probe",
+            daemon=True,
+        )
+        channel_probe_thread.start()
         next_log = 0.0
         next_resource = 0.0
         next_report = time.monotonic() + self.config.report_interval_seconds
@@ -2302,14 +2513,6 @@ class MonitorApp:
             while stop_event is None or not stop_event.is_set():
                 self._drain_channel_sync_results()
                 now = time.monotonic()
-                if now >= next_channel and self.channel_snapshot is not None:
-                    try:
-                        self.check_channels()
-                        self._record_collector_result("channel_probe", True)
-                    except Exception as error:
-                        self._record_collector_result("channel_probe", False, str(error))
-                        LOGGER.exception("channel check failed")
-                    next_channel = now + self.config.channel_interval_seconds
                 if now >= next_log:
                     try:
                         self.collect_logs()
@@ -2342,7 +2545,9 @@ class MonitorApp:
                     break
         finally:
             channel_sync_stop.set()
+            channel_probe_stop.set()
             channel_sync_thread.join(timeout=20)
+            channel_probe_thread.join(timeout=90)
             self._drain_channel_sync_results()
             self.store.connection.close()
 
