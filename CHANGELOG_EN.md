@@ -4,6 +4,19 @@
 
 ## Unreleased
 
+## 1.2.0 - 2026-07-22
+
+### Added
+
+- Integrated OpenAI's official status feed for platform state, component health, active incidents, and official update timelines.
+- Added a dedicated OpenAI status section to the overview; it is excluded from local channel overall health by default to avoid misclassifying upstream advisories as local failures.
+- Added an Upstream Status settings page for polling, timeout, alert impact, consecutive confirmation, component scope, role visibility, and live connection testing.
+- Correlated official incidents with local OpenAI-model channel health and exposed provider filtering, details, and recovery evidence in the incident workspace.
+
+### Security
+
+- Restricted official status collection to a hard-coded HTTPS endpoint with response-size, timeout, and schema validation to prevent configurable-URL SSRF exposure.
+
 ## 1.1.0 - 2026-07-22
 
 ### Added
