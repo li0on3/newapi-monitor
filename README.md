@@ -41,77 +41,49 @@
 
 ## 快速部署
 
-### 1. 初始化安全配置
-
-Linux：
+### Linux 一键安装（推荐）
 
 ```bash
-git clone <your-repository-url> newapi-monitor
-cd newapi-monitor
-python3 manage.py init
+curl -fsSL https://github.com/li0on3/newapi-monitor/releases/latest/download/install.sh | sudo bash
 ```
 
-Windows：
-
-```powershell
-git clone <your-repository-url> newapi-monitor
-Set-Location newapi-monitor
-python manage.py init
-```
-
-初始化命令会生成：
-
-- 随机紧急管理员密码；
-- 用于数据库敏感配置加密的 `MONITOR_SECRET_KEY`；
-- 权限受限的 `.env` 配置文件。
-
-紧急管理员密码只显示一次，请保存到密码管理器。
-
-### 2. 编辑 `.env`
-
-必须填写：
-
-- `NEW_API_BASE_URL`
-- `NEW_API_ACCESS_TOKEN`
-- `NEW_API_USER_ID`
-- 至少一种通知渠道；可先使用 SMTP 环境变量，也可以启动后在“系统配置 → 通知中心”配置企微或飞书
-- `DASHBOARD_ALLOWED_HOSTS`，填写监控页面实际域名
-
-真实探测建议在系统启动后通过“渠道配置”页面启用，不需要手工编写 JSON。
-
-### 3. 部署前检查
+若新机器尚未安装 Docker，请先审阅 [Docker 官方安装脚本](https://get.docker.com)，再显式允许安装：
 
 ```bash
-python3 manage.py doctor
+curl -fsSL https://github.com/li0on3/newapi-monitor/releases/latest/download/install.sh | sudo bash -s -- --install-docker
 ```
 
-只有配置、Host 白名单、密码、加密密钥和 Compose 均检查通过后再部署。
+安装器会校验发布包 SHA-256、拉取固定版本的 GHCR 多架构镜像、默认仅绑定 `127.0.0.1:18081`，并一次性显示 15 分钟有效的初始化令牌、紧急管理员随机密码和 SSH 隧道命令。
 
-### 4. 启动
+浏览器打开 `http://127.0.0.1:18081/monitor/`，在初始化向导中填写 New API 地址与管理员账号。管理员密码只用于向 New API 换取管理令牌和独立探测 Key，不会写入监控数据库。也可切换为“已有令牌”模式手工填写。
+
+远程服务器在配置 HTTPS 反向代理前，可使用：
 
 ```bash
-./install.sh
+ssh -L 18081:127.0.0.1:18081 user@server
 ```
 
-或：
+### 日常运维
 
 ```bash
-docker compose build monitor
-docker compose up -d
-docker compose ps
+sudo monitorctl status
+sudo monitorctl doctor
+sudo monitorctl logs
+sudo monitorctl backup
+sudo monitorctl update
+sudo monitorctl rollback
+sudo monitorctl reset-admin
 ```
 
-默认仅监听：
+`monitorctl update` 会先在线备份 SQLite 和加密密钥环境文件，再升级到最新 release；`rollback` 会切回上一次镜像。首次初始化令牌过期时运行 `sudo monitorctl renew-setup`。
 
-```text
-127.0.0.1:18081
-```
+需要修改代码时仍可克隆仓库，执行 `python3 manage.py init` 后使用 `docker compose build monitor` 源码构建。
 
-请使用 Nginx、OpenResty、Caddy 或其他 HTTPS 反向代理对外提供 `/monitor/`。
-反向代理必须将 `/monitor/` 下的所有深层路径转发到监控服务，前端支持直接刷新和浏览器前进/后退：
+请使用 Nginx、OpenResty、Caddy 或其他 HTTPS 反向代理对外提供 `/monitor/`。反向代理必须转发全部深层路径：
 
 ```text
 /monitor/                       总览
+/monitor/key-usage              Key 用量查询
 /monitor/logs                   使用日志
 /monitor/resources              机器资源
 /monitor/incidents              事件
@@ -135,6 +107,8 @@ curl -fsS http://127.0.0.1:18081/api/health
 ```json
 {"status":"ok","timestamp":1784476800}
 ```
+
+首次安装尚未完成向导时返回 HTTP 200 和 `{"status":"setup_required"}`，便于容器健康检查通过，但采集线程尚未启动。
 
 以下任一情况返回 HTTP 503：
 
@@ -178,10 +152,10 @@ curl -fsS http://127.0.0.1:18081/api/health
 ## 备份
 
 ```bash
-python3 manage.py backup
+sudo monitorctl backup
 ```
 
-备份使用 SQLite Online Backup API，并在输出前执行完整性检查。恢复备份时必须同时持有原来的 `MONITOR_SECRET_KEY`，否则数据库中的敏感配置无法解密。
+备份使用 SQLite Online Backup API，同时打包权限为 `0600` 的环境配置。恢复备份时必须持有原来的 `MONITOR_SECRET_KEY`，否则数据库中的敏感配置无法解密。
 
 建议同时安全备份：
 
@@ -196,14 +170,12 @@ python3 manage.py backup
 升级前：
 
 ```bash
-python3 manage.py backup
-git pull --ff-only
-python3 manage.py doctor
-docker compose build monitor
-docker compose up -d
+sudo monitorctl update
+# 如新版本出现回归
+sudo monitorctl rollback
 ```
 
-建议使用 Git tag 或 release 固定生产版本。回滚代码后重新构建镜像，数据库表采用向后兼容的增量创建方式；执行重大版本回滚前仍应恢复对应备份。
+安装器固定使用 GitHub Release 版本镜像，升级前自动备份并记录上一个镜像。执行重大版本回滚前仍应确认数据库兼容性，必要时恢复对应备份。
 
 ## 开发验证
 

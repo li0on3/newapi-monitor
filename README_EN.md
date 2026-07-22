@@ -42,59 +42,27 @@ Every screenshot below is generated from the built-in synthetic demo dataset. It
 
 ## Quick Start
 
-### 1. Initialize secure configuration
-
-Linux:
+### One-click Linux installation (recommended)
 
 ```bash
-git clone <your-repository-url> newapi-monitor
-cd newapi-monitor
-python3 manage.py init
+curl -fsSL https://github.com/li0on3/newapi-monitor/releases/latest/download/install.sh | sudo bash
 ```
 
-Windows:
-
-```powershell
-git clone <your-repository-url> newapi-monitor
-Set-Location newapi-monitor
-python manage.py init
-```
-
-The initialization command creates a random emergency administrator password, a `MONITOR_SECRET_KEY`, and a permission-restricted `.env` file. Store the one-time password in a password manager.
-
-### 2. Configure `.env`
-
-Required values:
-
-- `NEW_API_BASE_URL`
-- `NEW_API_ACCESS_TOKEN`
-- `NEW_API_USER_ID`
-- At least one notification channel, configured either through environment variables or later in **System Settings → Notification Center**
-- `DASHBOARD_ALLOWED_HOSTS` with the actual monitoring hostname
-
-Real probes should normally be enabled and configured from the Channel Settings page after startup.
-
-### 3. Run preflight checks
+If Docker is missing, review the [official Docker convenience script](https://get.docker.com) first, then opt in explicitly:
 
 ```bash
-python3 manage.py doctor
+curl -fsSL https://github.com/li0on3/newapi-monitor/releases/latest/download/install.sh | sudo bash -s -- --install-docker
 ```
 
-### 4. Start
+The installer verifies the release bundle SHA-256, pulls a pinned multi-architecture GHCR image, binds to `127.0.0.1:18081`, and prints a one-time 15-minute setup token, a generated emergency password, and an SSH tunnel command.
 
-```bash
-./install.sh
-```
+Open `http://127.0.0.1:18081/monitor/` and complete the wizard with the New API URL and administrator credentials. The New API password is only exchanged for required tokens and is never stored. Existing tokens can be supplied instead.
 
-Or:
+Daily operations are available through `sudo monitorctl status|doctor|logs|backup|update|rollback|reset-admin`. Use `sudo monitorctl renew-setup` only if the first-run token expires before setup is complete.
 
-```bash
-docker compose build monitor
-docker compose up -d
-docker compose ps
-```
+Source builds remain available by cloning the repository, running `python3 manage.py init`, and using `docker compose build monitor`.
 
-The service listens on `127.0.0.1:18081` by default. Publish `/monitor/` through an HTTPS reverse proxy. Every nested path under `/monitor/` must be forwarded to the monitoring service.
+Publish `/monitor/` through an HTTPS reverse proxy and forward every nested path.
 
 ```text
 /monitor/                       Overview
@@ -120,6 +88,8 @@ Healthy response:
 ```json
 {"status":"ok","timestamp":1784476800}
 ```
+
+Before the first-run wizard is completed, health returns HTTP 200 with `{"status":"setup_required"}` so orchestration remains healthy while collectors stay stopped.
 
 HTTP 503 is returned when SQLite is unavailable, the monitoring worker has stopped, or a channel sync, probe, log, or resource collector has exceeded its dynamic stale threshold.
 
@@ -153,22 +123,20 @@ See [SECURITY_EN.md](SECURITY_EN.md) for the security boundary, [ROADMAP_EN.md](
 ## Backup
 
 ```bash
-python3 manage.py backup
+sudo monitorctl backup
 ```
 
-Backups use the SQLite Online Backup API and run an integrity check. Restoring encrypted configuration also requires the original `MONITOR_SECRET_KEY`. Never commit backups, `.env`, or reverse-proxy credentials.
+Backups use the SQLite Online Backup API and package the permission-restricted environment. Restoring encrypted configuration also requires the original `MONITOR_SECRET_KEY`. Never commit backups, `.env`, or reverse-proxy credentials.
 
 ## Upgrade and Rollback
 
 ```bash
-python3 manage.py backup
-git pull --ff-only
-python3 manage.py doctor
-docker compose build monitor
-docker compose up -d
+sudo monitorctl update
+# If the new release regresses:
+sudo monitorctl rollback
 ```
 
-Pin production deployments to a Git tag or release. Rebuild the image after rollback and restore the matching database backup before a major-version rollback.
+One-click deployments pin GitHub Release images, create a backup before upgrading, and record the previous image. Confirm database compatibility or restore the matching backup before a major-version rollback.
 
 ## Development Verification
 

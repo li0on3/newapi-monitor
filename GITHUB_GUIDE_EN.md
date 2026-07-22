@@ -50,7 +50,7 @@ git tag -a v1.0.1 -m "New API Monitor v1.0.1"
 git push origin v1.0.1
 ```
 
-The release workflow builds AMD64/ARM64 images, publishes GHCR tags, and creates the GitHub Release.
+The release workflow builds AMD64/ARM64 images, publishes GHCR tags, creates the GitHub Release, and attaches `install.sh`, the one-click deployment bundle, and its SHA-256 checksum. Validate a fresh install plus `monitorctl update/rollback` on a clean Linux host after publishing.
 
 ## Security Rules
 

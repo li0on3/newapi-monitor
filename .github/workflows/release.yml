@@ -57,9 +57,27 @@ jobs:
           provenance: mode=max
           sbom: true
 
+      - name: Build one-click installation bundle
+        shell: bash
+        run: |
+          version="${{ steps.version.outputs.value }}"
+          bundle="newapi-monitor-bundle-$version"
+          install -d "$bundle"
+          install -m 0644 compose.yaml .env.example VERSION LICENSE "$bundle/"
+          install -m 0755 install.sh monitorctl "$bundle/"
+          tar -czf "$bundle.tar.gz" -C "$bundle" .
+          sha256sum "$bundle.tar.gz" > "$bundle.tar.gz.sha256"
+
       - uses: softprops/action-gh-release@v3
         with:
           generate_release_notes: true
+          files: |
+            install.sh
+            newapi-monitor-bundle-${{ steps.version.outputs.value }}.tar.gz
+            newapi-monitor-bundle-${{ steps.version.outputs.value }}.tar.gz.sha256
           body: |
             Docker image / Docker 镜像:
             `${{ steps.image.outputs.name }}:${{ steps.version.outputs.value }}`
+
+            One-click install / 一键安装:
+            `curl -fsSL https://github.com/${{ github.repository }}/releases/latest/download/install.sh | sudo bash`

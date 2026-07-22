@@ -50,7 +50,7 @@ git tag -a v1.0.1 -m "New API Monitor v1.0.1"
 git push origin v1.0.1
 ```
 
-Release 工作流会自动构建 AMD64/ARM64 镜像、发布 GHCR 镜像并创建 GitHub Release。
+Release 工作流会自动构建 AMD64/ARM64 镜像、发布 GHCR 镜像、创建 GitHub Release，并上传 `install.sh`、一键部署包和 SHA-256 校验文件。发布后应在干净 Linux 主机验证一次全新安装和 `monitorctl update/rollback`。
 
 ## 安全规则
 
