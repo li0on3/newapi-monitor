@@ -8,6 +8,11 @@ class ContainerManifestTests(unittest.TestCase):
 
         self.assertIn("dashboard_key_usage.py", dockerfile)
 
+    def test_runtime_image_includes_setup_module(self):
+        dockerfile = Path("Dockerfile").read_text(encoding="utf-8")
+
+        self.assertIn("dashboard_setup.py", dockerfile)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -129,6 +129,35 @@ class SettingsStore:
             ).fetchone()
         return int(row["value"] if row else 1)
 
+    def is_setup_complete(self) -> bool:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT value FROM monitor_metadata WHERE key = 'setup_completed'"
+            ).fetchone()
+        return bool(row and int(row["value"]) == 1)
+
+    def complete_setup(self, actor: str) -> None:
+        now = int(time.time())
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO monitor_metadata(key, value) VALUES ('setup_completed', 1)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                """
+            )
+            self._audit(
+                connection,
+                now,
+                actor,
+                "setup.complete",
+                "system",
+                {"completed": False},
+                {"completed": True},
+                "",
+            )
+            self._bump_version(connection)
+            connection.commit()
+
     def update_settings(
         self,
         updates: dict[str, Any],
