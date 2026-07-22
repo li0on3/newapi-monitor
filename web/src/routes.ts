@@ -1,5 +1,5 @@
 export type AppTab = 'overview' | 'keyUsage' | 'logs' | 'resources' | 'incidents' | 'channels' | 'settings';
-export type SettingsPage = 'status' | 'overview' | 'notifications' | 'connection' | 'keyUsage' | 'collection' | 'thresholds' | 'advanced' | 'access' | 'audit';
+export type SettingsPage = 'status' | 'overview' | 'notifications' | 'providers' | 'connection' | 'keyUsage' | 'collection' | 'thresholds' | 'advanced' | 'access' | 'audit';
 
 export type AppRoute = {
   tab: AppTab;
@@ -21,6 +21,7 @@ const SETTINGS_PATHS: Record<SettingsPage, string> = {
   status: 'status',
   overview: 'overview',
   notifications: 'notifications',
+  providers: 'providers',
   connection: 'connection',
   keyUsage: 'key-usage',
   collection: 'collection',

@@ -82,6 +82,11 @@ class DashboardRepository:
                 """
             ).fetchall()
 
+        incident_rows = [
+            row for row in incident_rows
+            if not str(row["incident_key"]).startswith("provider:")
+        ]
+
         enabled = [row for row in channel_rows if int(row["status"] or 0) == 1]
         if channel_ids is not None:
             enabled = [row for row in enabled if int(row["channel_id"]) in channel_ids]
@@ -360,6 +365,57 @@ class DashboardRepository:
             samples.append(item)
         return {"generated_at": current_time, "hours": hours, "samples": samples}
 
+    def provider_status(
+        self,
+        provider: str,
+        now: int | None = None,
+        stale_after_seconds: int = 180,
+    ) -> dict[str, Any]:
+        current_time = int(time.time()) if now is None else int(now)
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT observed_at, payload_json
+                FROM provider_status_samples
+                WHERE provider = ?
+                ORDER BY observed_at DESC, id DESC LIMIT 1
+                """,
+                (provider,),
+            ).fetchone()
+        if row is None:
+            return {
+                "provider": provider,
+                "available": False,
+                "stale": True,
+                "observed_at": 0,
+                "indicator": "unknown",
+                "description": "Waiting for first sample",
+                "components": [],
+                "incidents": [],
+                "active_incident_count": 0,
+                "degraded_component_count": 0,
+            }
+        payload = self._decode_json(row["payload_json"], {})
+        components = [item for item in payload.get("components", []) if isinstance(item, dict)]
+        incidents = [item for item in payload.get("incidents", []) if isinstance(item, dict)]
+        active_incidents = [item for item in incidents if str(item.get("status")) != "resolved"]
+        observed_at = int(row["observed_at"])
+        return {
+            **payload,
+            "provider": provider,
+            "available": True,
+            "observed_at": observed_at,
+            "age_seconds": max(0, current_time - observed_at),
+            "stale": current_time - observed_at > max(1, stale_after_seconds),
+            "components": components,
+            "incidents": active_incidents,
+            "active_incident_count": len(active_incidents),
+            "degraded_component_count": sum(
+                str(item.get("status") or "unknown") != "operational"
+                for item in components
+            ),
+        }
+
     def incidents(
         self,
         status: str = "all",
@@ -379,7 +435,7 @@ class DashboardRepository:
                 """
                 SELECT id, incident_key, kind, severity, title, body, resolution_body,
                        legacy_cause_missing, status,
-                       started_at, updated_at, resolved_at, last_notified_at
+                       started_at, updated_at, resolved_at, last_notified_at, metadata_json
                 FROM incidents
                 ORDER BY CASE status WHEN 'open' THEN 0 ELSE 1 END,
                          updated_at DESC, id DESC
@@ -414,6 +470,7 @@ class DashboardRepository:
             item["legacy_cause_missing"] = legacy_cause_missing
             item["body"] = "" if legacy_cause_missing else cause_body
             item["resolution_body"] = resolution_body
+            item["metadata"] = self._decode_json(item.pop("metadata_json", "{}"), {})
             item["duration_seconds"] = max(
                 0,
                 (resolved_at or current_time) - int(item["started_at"]),
@@ -454,10 +511,10 @@ class DashboardRepository:
     @staticmethod
     def _incident_category(incident_key: str, kind: str) -> str:
         prefix = incident_key.partition(":")[0].strip().lower()
-        if prefix in {"channel", "latency", "resource", "container", "service", "collector"}:
+        if prefix in {"channel", "latency", "resource", "container", "service", "collector", "provider"}:
             return prefix
         lowered_kind = kind.lower()
-        for candidate in ("channel", "latency", "resource", "container", "service", "collector"):
+        for candidate in ("channel", "latency", "resource", "container", "service", "collector", "provider"):
             if candidate in lowered_kind:
                 return candidate
         return "other"

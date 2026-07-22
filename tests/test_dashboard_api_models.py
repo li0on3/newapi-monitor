@@ -114,6 +114,30 @@ class DashboardApiModelTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             NotificationTestPayload.model_validate({"channel": "unknown"})
 
+    def test_openai_status_settings_are_bounded(self):
+        settings = SettingsUpdatePayload.model_validate(
+            {
+                "openai_status_enabled": True,
+                "openai_status_interval_seconds": 60,
+                "openai_status_timeout_seconds": 10,
+                "openai_status_min_impact": "major",
+                "openai_status_component_ids": ["responses-id", "codex-api-id"],
+                "openai_status_failure_threshold": 2,
+                "openai_status_recovery_threshold": 2,
+                "openai_status_include_in_overall": False,
+                "openai_status_admin_visible": True,
+                "openai_status_viewer_visible": True,
+            }
+        )
+        self.assertEqual(["responses-id", "codex-api-id"], settings.openai_status_component_ids)
+
+        with self.assertRaises(ValidationError):
+            SettingsUpdatePayload.model_validate({"openai_status_interval_seconds": 5})
+        with self.assertRaises(ValidationError):
+            SettingsUpdatePayload.model_validate({"openai_status_min_impact": "unknown"})
+        with self.assertRaises(ValidationError):
+            SettingsUpdatePayload.model_validate({"openai_status_component_ids": ["x" * 129]})
+
     def test_viewer_cannot_use_privileged_dependencies(self):
         viewer = {"username": "viewer", "role": "viewer"}
 

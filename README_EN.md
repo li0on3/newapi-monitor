@@ -39,6 +39,7 @@ Every screenshot below is generated from the built-in synthetic demo dataset. It
 - Automatically follows the browser language for Chinese or English, with a persistent manual switch in the page header.
 - Stores runtime configuration in the monitor database and never writes configuration back to New API.
 - Maintains separate channel visibility lists for administrators/operators and regular viewers.
+- Synchronizes OpenAI overall status, components, and incidents from the official JSON feed and correlates them with local probes. It is excluded from local `OVERALL STATUS` by default and never modifies or disables New API channels automatically.
 
 ## Quick Start
 
@@ -73,6 +74,7 @@ Publish `/monitor/` through an HTTPS reverse proxy and forward every nested path
 /monitor/channels               Channel settings
 /monitor/system                 System settings
 /monitor/system/notifications   Notification center
+/monitor/system/providers       Upstream provider status
 ```
 
 Every configured notification channel can trigger a real test alert from the UI, even while the channel is disabled. Unsaved changes must be saved first so the test always uses the active configuration.
@@ -91,7 +93,7 @@ Healthy response:
 
 Before the first-run wizard is completed, health returns HTTP 200 with `{"status":"setup_required"}` so orchestration remains healthy while collectors stay stopped.
 
-HTTP 503 is returned when SQLite is unavailable, the monitoring worker has stopped, or a channel sync, probe, log, or resource collector has exceeded its dynamic stale threshold.
+HTTP 503 is returned when SQLite is unavailable, the monitoring worker has stopped, or a channel sync, probe, log, resource, or enabled OpenAI status collector has exceeded its dynamic stale threshold.
 
 ## Default Policy
 
@@ -101,6 +103,7 @@ HTTP 503 is returned when SQLite is unavailable, the monitoring worker has stopp
 | Usage log synchronization | 30 seconds |
 | Resource sampling | 15 seconds |
 | Real channel probes | 5 minutes |
+| OpenAI official status | 60 seconds |
 | Slow request | Any latency metric over 60 seconds |
 | Window alert | 3 of 5, or 5 of 10 |
 | Single critical alert | Over 180 seconds |
@@ -117,6 +120,8 @@ HTTP 503 is returned when SQLite is unavailable, the monitoring worker has stopp
 - Regular New API users can only see the overview by default. Operators can inspect logs, resources, incidents, and channels. Monitor administrators can manage settings and role mappings.
 - API key usage lookup is admin-only by default, rate-limited, and only calls New API read-only endpoints.
 - Configuration and role changes are audited, with secrets always masked.
+- Each OpenAI collection cycle only reads the fixed official `https://status.openai.com/api/v2/summary.json`, enforces response-size and timeout limits, and never accepts a configurable URL, preventing SSRF abuse.
+- Only the latest official-status snapshot is retained; incident progress is stored separately in the incident workspace, preventing unbounded SQLite growth at a 60-second polling interval.
 
 See [SECURITY_EN.md](SECURITY_EN.md) for the security boundary, [ROADMAP_EN.md](ROADMAP_EN.md) for planned work, and [GITHUB_GUIDE_EN.md](GITHUB_GUIDE_EN.md) for the protected-branch workflow.
 

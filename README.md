@@ -38,6 +38,7 @@
 - 中英文界面自动跟随浏览器语言，也可在页面右上角手动切换并持久化偏好。
 - 页面动态配置，不写回 New API，不影响 New API 升级。
 - 管理端与普通用户可使用独立的总览渠道清单；隐藏渠道只影响对应角色的展示和状态汇总，不停止探测、日志采集或告警。
+- 通过 OpenAI 官方 JSON 状态接口同步整体状态、组件和事件，将官方故障与本地真实探测关联；默认不纳入本地 `OVERALL STATUS`，也不会自动修改或禁用 New API 渠道。
 
 ## 快速部署
 
@@ -90,6 +91,7 @@ sudo monitorctl reset-admin
 /monitor/channels               渠道配置
 /monitor/system                 系统配置
 /monitor/system/notifications   通知中心
+/monitor/system/providers       上游官方状态
 ```
 
 通知中心的每个已配置渠道均可单独点击“触发测试告警”；渠道无需先启用，但未保存的配置必须先保存，避免测试内容与实际生效配置不一致。
@@ -114,7 +116,7 @@ curl -fsS http://127.0.0.1:18081/api/health
 
 - SQLite 无法读取；
 - 监控主线程停止；
-- 渠道同步、渠道探测、日志或资源采集超过动态失效阈值。
+- 渠道同步、渠道探测、日志、资源或已启用的 OpenAI 官方状态采集超过动态失效阈值。
 
 管理员可以在“系统配置 → 运行状态”查看每个采集器最后成功时间、连续失败次数、错误摘要和失效阈值。
 
@@ -126,6 +128,7 @@ curl -fsS http://127.0.0.1:18081/api/health
 | 日志同步 | 30 秒 |
 | 资源采样 | 15 秒 |
 | 渠道真实探测 | 5 分钟 |
+| OpenAI 官方状态 | 60 秒 |
 | 慢请求 | 任一耗时指标超过 60 秒 |
 | 窗口告警 | 5 次中 3 次，或 10 次中 5 次 |
 | 单次严重告警 | 超过 180 秒 |
@@ -146,6 +149,8 @@ curl -fsS http://127.0.0.1:18081/api/health
 - Key 用量查询默认仅管理员可用；管理员可在“系统配置 → Key 用量查询”中启停功能、调整最低角色、单次日志数量、查询频率和额度换算单位。
 - Key 查询只调用 New API 的只读 `/api/usage/token/` 与 `/api/log/token` 接口，不持久化原始 Key，也不会修改 New API 数据。
 - 配置变更和角色变更写入审计表，秘密字段始终脱敏。
+- OpenAI Status 采集器每轮只读取固定的 `https://status.openai.com/api/v2/summary.json`，限制响应体与超时时间，不接受用户自定义目标 URL，避免形成 SSRF 能力。
+- 官方状态只保留最新快照，事件进展单独写入事件中心，避免 60 秒采集在长期运行后造成 SQLite 无界增长。
 
 详细安全边界见 [SECURITY.md](SECURITY.md)，后续计划见 [ROADMAP.md](ROADMAP.md)，GitHub 维护流程见 [GITHUB_GUIDE.md](GITHUB_GUIDE.md)。
 

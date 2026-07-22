@@ -8,12 +8,14 @@ import {
   CircleGauge,
   CircleDollarSign,
   CircleDot,
+  Cloud,
   Clock3,
   Copy,
   Cpu,
   Database,
   Eye,
   EyeOff,
+  ExternalLink,
   HardDrive,
   Inbox,
   Fingerprint,
@@ -44,7 +46,7 @@ import { api, ApiError } from './api';
 import { getLanguage, setLanguage, t } from './i18n';
 import { readRoute, routePath } from './routes';
 import type { AppRoute, AppTab, SettingsPage } from './routes';
-import type { AuthUser, Channel, ChannelMonitorConfig, ContainerMetric, Incident, IncidentPayload, IncidentSummary, KeyUsageCall, KeyUsageResult, LogItem, ResourceSample, Summary, SystemHealth } from './types';
+import type { AuthUser, Channel, ChannelMonitorConfig, ContainerMetric, Incident, IncidentPayload, IncidentSummary, KeyUsageCall, KeyUsageResult, LogItem, ProviderStatus, ResourceSample, Summary, SystemHealth } from './types';
 
 type Tab = AppTab;
 
@@ -366,6 +368,9 @@ function SettingsView({ activePage, onActivePageChange }: { activePage: Settings
   const [audit, setAudit] = useState<Array<Record<string, unknown>>>([]);
   const [users, setUsers] = useState<Array<{ username: string; role: string }>>([]);
   const [systemStatus, setSystemStatus] = useState<SystemHealth | null>(null);
+  const [openAIStatus, setOpenAIStatus] = useState<ProviderStatus | null>(null);
+  const [testingOpenAIStatus, setTestingOpenAIStatus] = useState(false);
+  const [openAIStatusTest, setOpenAIStatusTest] = useState<{ success: boolean; text: string } | null>(null);
   const [overviewChannels, setOverviewChannels] = useState<Channel[]>([]);
   const [overviewBaseline, setOverviewBaseline] = useState('[]');
   const [newUser, setNewUser] = useState('');
@@ -376,8 +381,9 @@ function SettingsView({ activePage, onActivePageChange }: { activePage: Settings
   const [expandedNotifications, setExpandedNotifications] = useState<Set<NotificationChannelId>>(new Set(['wecom_app']));
   const [message, setMessage] = useState('');
   const load = useCallback(async () => {
-    const [settingsPayload, auditPayload, usersPayload, statusPayload, channelPayload] = await Promise.all([api<{ values: Record<string, unknown> }>('settings'), api<{ items: Array<Record<string, unknown>> }>('config-audit?limit=30'), api<{ items: Array<{ username: string; role: string }> }>('access/users'), api<SystemHealth>('system/status'), api<{ items: Channel[] }>('channel-settings')]);
+    const [settingsPayload, auditPayload, usersPayload, statusPayload, channelPayload, providerPayload] = await Promise.all([api<{ values: Record<string, unknown> }>('settings'), api<{ items: Array<Record<string, unknown>> }>('config-audit?limit=30'), api<{ items: Array<{ username: string; role: string }> }>('access/users'), api<SystemHealth>('system/status'), api<{ items: Channel[] }>('channel-settings'), api<ProviderStatus>('provider-status/openai').catch(() => null)]);
     setValues(settingsPayload.values); setBaseline(settingsPayload.values); setAudit(auditPayload.items); setUsers(usersPayload.items); setSystemStatus(statusPayload);
+    setOpenAIStatus(providerPayload);
     const normalizedChannels = channelPayload.items.map((channel) => {
       const legacyVisible = channel.monitor_config?.display_enabled ?? true;
       return {
@@ -420,6 +426,31 @@ function SettingsView({ activePage, onActivePageChange }: { activePage: Settings
     if (next.has(channel)) next.delete(channel); else next.add(channel);
     return next;
   });
+  const testOpenAIStatus = async () => {
+    setTestingOpenAIStatus(true); setOpenAIStatusTest(null); setMessage('');
+    try {
+      const result = await api<ProviderStatus & { success: boolean; component_count: number }>('provider-status/openai/test', { method: 'POST' });
+      setOpenAIStatusTest({ success: true, text: t('连接成功：{{description}} · {{components}} 个组件 · {{incidents}} 个活跃事件', { description: result.description, components: result.component_count, incidents: result.active_incident_count }) });
+      setOpenAIStatus(result);
+    } catch (error) {
+      setOpenAIStatusTest({ success: false, text: error instanceof Error ? error.message : t('OpenAI Status 连接测试失败') });
+    } finally { setTestingOpenAIStatus(false); }
+  };
+  const effectiveOpenAIComponentIds = useMemo(() => {
+    const configured = Array.isArray(values.openai_status_component_ids)
+      ? values.openai_status_component_ids.map(String)
+      : [];
+    if (configured.includes('__none__')) return [];
+    if (configured.length) return configured;
+    return (openAIStatus?.components || [])
+      .filter((component) => DEFAULT_OPENAI_COMPONENT_NAMES.has(component.name))
+      .map((component) => component.id);
+  }, [openAIStatus, values.openai_status_component_ids]);
+  const toggleOpenAIComponent = (componentId: string) => {
+    const selected = new Set(effectiveOpenAIComponentIds);
+    if (selected.has(componentId)) selected.delete(componentId); else selected.add(componentId);
+    setValue('openai_status_component_ids', selected.size ? Array.from(selected) : ['__none__']);
+  };
   const addUser = async () => { if (!newUser.trim()) return; await api(`access/users/${encodeURIComponent(newUser.trim())}`, { method: 'PUT', body: JSON.stringify({ role: newRole }) }); setNewUser(''); await load(); };
   const setOverviewVisibility = (channelId: number, audience: 'admin' | 'viewer', visible: boolean) => setOverviewChannels((current) => current.map((channel) => channel.channel_id === channelId ? { ...channel, [audience === 'admin' ? 'overview_admin_visible' : 'overview_viewer_visible']: visible } : channel));
   const setAllOverviewVisibility = (audience: 'admin' | 'viewer', visible: boolean) => setOverviewChannels((current) => current.map((channel) => ({ ...channel, [audience === 'admin' ? 'overview_admin_visible' : 'overview_viewer_visible']: visible })));
@@ -439,6 +470,7 @@ function SettingsView({ activePage, onActivePageChange }: { activePage: Settings
     { id: 'status', title: t('运行状态'), description: t('采集链路自检'), icon: <ShieldCheck size={18} />, count: systemStatus ? Object.keys(systemStatus.collectors).length : 0 },
     { id: 'overview', title: t('总览展示'), description: t('按角色控制渠道'), icon: <Eye size={18} />, count: overviewChannels.filter((channel) => channel.enabled).length },
     { id: 'notifications', title: t('通知中心'), description: t('企微、飞书与邮件'), icon: <BellRing size={18} />, count: ['email_enabled', 'wecom_app_enabled', 'wecom_webhook_enabled', 'feishu_app_enabled', 'feishu_webhook_enabled'].filter((key) => Boolean(values[key])).length },
+    { id: 'providers', title: t('上游官方状态'), description: t('OpenAI 状态与关联'), icon: <Cloud size={18} />, count: openAIStatus?.active_incident_count || 0 },
     ...SETTING_SECTIONS.map((section) => ({ id: section.id, title: section.title, description: section.short, icon: section.icon, count: section.fields.length })),
     { id: 'access', title: t('角色映射'), description: t('访问与权限'), icon: <UserCog size={18} />, count: users.length },
     { id: 'audit', title: t('配置审计'), description: t('最近变更记录'), icon: <Clock3 size={18} />, count: audit.length },
@@ -449,7 +481,7 @@ function SettingsView({ activePage, onActivePageChange }: { activePage: Settings
     <div className="settings-workspace">
       <aside className="settings-nav" aria-label={t("系统配置分类")}>{pages.map((page) => <button type="button" className={classNames(activePage === page.id && 'active')} key={page.id} onClick={() => onActivePageChange(page.id)}><span className="settings-nav-icon">{page.icon}</span><span><strong>{page.title}</strong><small>{page.description}</small></span>{page.count != null && <b>{page.count}</b>}<ChevronRight size={15} /></button>)}</aside>
       <div className="settings-stage">
-        {activePage === 'status' && <article className="settings-card settings-focus-card"><div className="settings-card-head settings-focus-head"><div className="settings-section-mark"><ShieldCheck size={18} /></div><div><span className="eyebrow">SELF MONITORING</span><h3>{t("采集链路状态")}</h3><p>{t("监控程序同时检查自身是否仍在持续产生新数据，避免“页面正常但采集已经停止”。")}</p></div><StatusPill tone={systemStatus?.status === 'ok' ? 'ok' : 'bad'}>{systemStatus?.status === 'ok' ? t('全部正常') : t('存在降级')}</StatusPill></div><div className="collector-health-grid"><div className="collector-health-card"><span>{t("数据库")}</span><strong>{systemStatus?.database === 'ok' ? t('正常') : t('异常')}</strong><small>{systemStatus?.database_error || t('SQLite 可读写')}</small></div><div className="collector-health-card"><span>{t("监控进程")}</span><strong>{systemStatus?.monitor_worker === 'running' ? t('运行中') : systemStatus?.monitor_worker || t('未知')}</strong><small>{systemStatus?.monitor_error || t('工作线程持续运行')}</small></div>{Object.entries(systemStatus?.collectors || {}).map(([name, collector]) => { const labels: Record<string, string> = { channel_sync: t('渠道同步'), channel_probe: t('渠道探测'), logs: t('使用日志'), resources: t('机器资源') }; return <div className={classNames('collector-health-card', collector.status === 'stale' && 'collector-health-stale')} key={name}><span>{labels[name] || name}</span><strong>{collector.status === 'ok' ? t('正常') : collector.status === 'starting' ? t('启动中') : t('数据过期')}</strong><small>{t("最后成功")} {collector.age_seconds}{t("s 前 · 阈值")} {collector.stale_after_seconds}s</small>{collector.consecutive_failures > 0 && <em>{t("连续失败")} {collector.consecutive_failures} {t("次")}</em>}{collector.last_error && <code title={collector.last_error}>{collector.last_error}</code>}</div>; })}</div><div className="settings-action-bar"><div><strong>{t("最后检查")} {systemStatus ? formatFullTime(systemStatus.timestamp) : '—'}</strong><small>{t("数据超过动态失效阈值后，健康检查变为 503，并生成异常与恢复事件。")}</small></div><button className="secondary-button" onClick={() => void load()}><RefreshCw size={16} />{t("立即刷新")}</button></div></article>}
+        {activePage === 'status' && <article className="settings-card settings-focus-card"><div className="settings-card-head settings-focus-head"><div className="settings-section-mark"><ShieldCheck size={18} /></div><div><span className="eyebrow">SELF MONITORING</span><h3>{t("采集链路状态")}</h3><p>{t("监控程序同时检查自身是否仍在持续产生新数据，避免“页面正常但采集已经停止”。")}</p></div><StatusPill tone={systemStatus?.status === 'ok' ? 'ok' : 'bad'}>{systemStatus?.status === 'ok' ? t('全部正常') : t('存在降级')}</StatusPill></div><div className="collector-health-grid"><div className="collector-health-card"><span>{t("数据库")}</span><strong>{systemStatus?.database === 'ok' ? t('正常') : t('异常')}</strong><small>{systemStatus?.database_error || t('SQLite 可读写')}</small></div><div className="collector-health-card"><span>{t("监控进程")}</span><strong>{systemStatus?.monitor_worker === 'running' ? t('运行中') : systemStatus?.monitor_worker || t('未知')}</strong><small>{systemStatus?.monitor_error || t('工作线程持续运行')}</small></div>{Object.entries(systemStatus?.collectors || {}).map(([name, collector]) => { const labels: Record<string, string> = { channel_sync: t('渠道同步'), channel_probe: t('渠道探测'), logs: t('使用日志'), resources: t('机器资源'), openai_status: t('OpenAI 官方状态') }; return <div className={classNames('collector-health-card', collector.status === 'stale' && 'collector-health-stale')} key={name}><span>{labels[name] || name}</span><strong>{collector.status === 'ok' ? t('正常') : collector.status === 'starting' ? t('启动中') : t('数据过期')}</strong><small>{t("最后成功")} {collector.age_seconds}{t("s 前 · 阈值")} {collector.stale_after_seconds}s</small>{collector.consecutive_failures > 0 && <em>{t("连续失败")} {collector.consecutive_failures} {t("次")}</em>}{collector.last_error && <code title={collector.last_error}>{collector.last_error}</code>}</div>; })}</div><div className="settings-action-bar"><div><strong>{t("最后检查")} {systemStatus ? formatFullTime(systemStatus.timestamp) : '—'}</strong><small>{t("数据超过动态失效阈值后，健康检查变为 503，并生成异常与恢复事件。")}</small></div><button className="secondary-button" onClick={() => void load()}><RefreshCw size={16} />{t("立即刷新")}</button></div></article>}
         {activePage === 'overview' && <article className="settings-card settings-focus-card overview-settings-card">
           <div className="settings-card-head settings-focus-head"><div className="settings-section-mark"><Eye size={18} /></div><div><span className="eyebrow">ROLE-BASED OVERVIEW</span><h3>{t("总览渠道展示")}</h3><p>{t("管理端与普通用户使用独立渠道清单；总览状态、渠道卡片和异常判断都按当前登录角色计算。")}</p></div><span className="settings-field-count">{overviewChannels.length} {t("个渠道")}</span></div>
           <div className="overview-audience-summary">
@@ -463,6 +495,38 @@ function SettingsView({ activePage, onActivePageChange }: { activePage: Settings
             {overviewChannels.map((channel) => <div className={classNames('overview-visibility-row', !channel.enabled && 'disabled')} key={channel.channel_id}><div><span className="provider-mark compact">{channel.name.slice(0, 2).toUpperCase()}</span><span><strong>{channel.name}</strong><small>#{channel.channel_id} · {channel.group || 'default'}</small></span></div><StatusPill tone={channel.enabled ? 'ok' : 'muted'}>{channel.enabled ? t('已启用') : t('已禁用')}</StatusPill><Toggle checked={channel.overview_admin_visible ?? true} onChange={(visible) => setOverviewVisibility(channel.channel_id, 'admin', visible)} label={t("管理端")} /><Toggle checked={channel.overview_viewer_visible ?? true} onChange={(visible) => setOverviewVisibility(channel.channel_id, 'viewer', visible)} label={t("普通用户")} /></div>)}
           </div>
           <div className="settings-action-bar"><div><strong>{overviewDirty ? t('展示范围尚未应用') : t('角色展示范围已生效')}</strong><small>{t("保存后无需重启，管理员和普通用户刷新总览即可看到各自渠道。")}</small></div><button className="secondary-button" disabled={!overviewDirty || saving} onClick={() => void load()}>{t("撤销更改")}</button><button className="primary-button settings-save" disabled={!overviewDirty || saving || !overviewChannels.length} onClick={() => void saveOverviewVisibility()}>{saving ? <RefreshCw className="spin" size={16} /> : <Save size={16} />}{t("保存展示范围")}</button></div>
+        </article>}
+        {activePage === 'providers' && <article className="settings-card settings-focus-card provider-settings-card">
+          <div className="settings-card-head settings-focus-head"><div className="settings-section-mark"><Cloud size={18} /></div><div><span className="eyebrow">UPSTREAM STATUS INTELLIGENCE</span><h3>{t('OpenAI 官方状态')}</h3><p>{t('将 OpenAI 官方事件与本地真实探测并列展示，用于解释故障和减少重复告警。')}</p></div><StatusPill tone={!openAIStatus || openAIStatus.stale ? 'muted' : openAIStatus.indicator === 'none' ? 'ok' : 'bad'}>{!openAIStatus ? t('等待同步') : openAIStatus.stale ? t('数据过期') : openAIStatus.description}</StatusPill></div>
+          <div className="provider-settings-summary">
+            <div><span>{t('官方整体状态')}</span><strong>{openAIStatus?.description || t('等待首次同步')}</strong><small>{openAIStatus?.observed_at ? formatFullTime(openAIStatus.observed_at) : t('尚无采集数据')}</small></div>
+            <div><span>{t('组件与事件')}</span><strong>{openAIStatus?.components.length || 0} / {openAIStatus?.active_incident_count || 0}</strong><small>{t('组件总数 / 活跃官方事件')}</small></div>
+            <div><span>{t('安全边界')}</span><strong>{t('只读')}</strong><small>{t('上游官方状态不会自动修改或禁用 New API 渠道。')}</small></div>
+          </div>
+          <div className="provider-settings-grid">
+            <section className="provider-settings-controls">
+              <div className="provider-subsection-head"><div><strong>{t('采集与告警')}</strong><small>{t('官方状态变化较慢，默认每 60 秒采集一次。')}</small></div></div>
+              <div className="provider-toggle-stack"><Toggle checked={Boolean(values.openai_status_enabled)} onChange={(value) => setValue('openai_status_enabled', value)} label={t('启用 OpenAI Status 监控')} /><Toggle checked={Boolean(values.openai_status_alert_enabled)} onChange={(value) => setValue('openai_status_alert_enabled', value)} label={t('发送官方事件告警')} /><Toggle checked={Boolean(values.openai_status_include_in_overall)} onChange={(value) => setValue('openai_status_include_in_overall', value)} label={t('纳入 OVERALL STATUS')} /></div>
+              <div className="provider-field-grid">
+                <label><span>{t('采集间隔（秒）')}</span><input type="number" min="30" max="3600" value={String(values.openai_status_interval_seconds ?? 60)} onChange={(event) => setValue('openai_status_interval_seconds', Number(event.target.value))} /><small>{t('建议 60–300 秒')}</small></label>
+                <label><span>{t('请求超时（秒）')}</span><input type="number" min="3" max="30" value={String(values.openai_status_timeout_seconds ?? 10)} onChange={(event) => setValue('openai_status_timeout_seconds', Number(event.target.value))} /><small>{t('采集失败不等于 OpenAI 故障')}</small></label>
+                <label><span>{t('最低告警等级')}</span><select value={String(values.openai_status_min_impact ?? 'major')} onChange={(event) => setValue('openai_status_min_impact', event.target.value)}><option value="none">None</option><option value="minor">Minor</option><option value="major">Major</option><option value="critical">Critical</option></select><small>{t('建议 Major，避免低影响事件打扰')}</small></label>
+                <label><span>{t('异常确认次数')}</span><input type="number" min="1" max="10" value={String(values.openai_status_failure_threshold ?? 2)} onChange={(event) => setValue('openai_status_failure_threshold', Number(event.target.value))} /><small>{t('用于组件状态防抖')}</small></label>
+                <label><span>{t('恢复确认次数')}</span><input type="number" min="1" max="10" value={String(values.openai_status_recovery_threshold ?? 2)} onChange={(event) => setValue('openai_status_recovery_threshold', Number(event.target.value))} /><small>{t('连续正常后再发送恢复')}</small></label>
+              </div>
+              <div className="provider-subsection-head provider-visibility-head"><div><strong>{t('总览可见范围')}</strong><small>{t('管理员与普通用户可以独立控制。')}</small></div></div>
+              <div className="provider-toggle-stack provider-visibility-toggles"><Toggle checked={Boolean(values.openai_status_admin_visible)} onChange={(value) => setValue('openai_status_admin_visible', value)} label={t('管理员与运维员可见')} /><Toggle checked={Boolean(values.openai_status_viewer_visible)} onChange={(value) => setValue('openai_status_viewer_visible', value)} label={t('普通用户可见')} /></div>
+            </section>
+            <section className="provider-component-selector">
+              <div className="provider-subsection-head"><div><strong>{t('关注组件')}</strong><small>{t('只监控与你当前业务有关的 OpenAI 服务。')}</small></div><button type="button" onClick={() => setValue('openai_status_component_ids', [])}>{t('恢复推荐')}</button></div>
+              <div className="provider-component-list">
+                {(openAIStatus?.components || []).map((component) => <label className={classNames(effectiveOpenAIComponentIds.includes(component.id) && 'selected', component.status !== 'operational' && 'degraded')} key={component.id}><input type="checkbox" checked={effectiveOpenAIComponentIds.includes(component.id)} onChange={() => toggleOpenAIComponent(component.id)} /><span><strong>{component.name}</strong><small>{component.status.replaceAll('_', ' ')}</small></span><i /></label>)}
+                {!openAIStatus?.components.length && <div className="provider-components-empty"><Cloud size={24} /><strong>{t('等待组件同步')}</strong><span>{t('点击测试官方连接可立即读取组件列表。')}</span></div>}
+              </div>
+              <div className="provider-test-zone"><button type="button" className="secondary-button" disabled={testingOpenAIStatus} onClick={() => void testOpenAIStatus()}>{testingOpenAIStatus ? <RefreshCw className="spin" size={15} /> : <Network size={15} />}{testingOpenAIStatus ? t('正在测试') : t('测试官方连接')}</button>{openAIStatusTest && <div className={classNames('provider-test-result', openAIStatusTest.success ? 'success' : 'failed')}>{openAIStatusTest.success ? <CheckCircle2 size={15} /> : <XCircle size={15} />}<span>{openAIStatusTest.text}</span></div>}</div>
+            </section>
+          </div>
+          <div className="settings-action-bar"><div><strong>{dirty ? t('上游状态配置尚未应用') : t('上游状态监控已生效')}</strong><small>{t('保存后采集器热加载；不会重启或修改 New API。')}</small></div><button className="secondary-button" disabled={!dirty || saving} onClick={() => { setValues(baseline); setMessage(t('已撤销本次未保存更改')); }}>{t('撤销更改')}</button><button className="primary-button settings-save" disabled={!dirty || saving} onClick={() => void save()}>{saving ? <RefreshCw className="spin" size={16} /> : <Save size={16} />}{t('保存并应用')}</button></div>
         </article>}
         {activePage === 'notifications' && <article className="settings-card settings-focus-card notification-center-card">
           <div className="settings-card-head settings-focus-head"><div className="settings-section-mark"><BellRing size={18} /></div><div><span className="eyebrow">MULTI-CHANNEL DELIVERY</span><h3>{t("告警通知中心")}</h3><p>{t("同一告警可同时发送到多个渠道；单个渠道失败不会阻断其他渠道。敏感凭据加密保存且不会回显。")}</p></div><span className="settings-field-count">{['email_enabled', 'wecom_app_enabled', 'wecom_webhook_enabled', 'feishu_app_enabled', 'feishu_webhook_enabled'].filter((key) => Boolean(values[key])).length} {t("个已启用")}</span></div>
@@ -667,6 +731,44 @@ function DetailDrawer({ channel, onClose }: { channel: Channel; onClose: () => v
   );
 }
 
+const DEFAULT_OPENAI_COMPONENT_NAMES = new Set(['Responses', 'Chat Completions', 'Codex API', 'CLI']);
+
+function ProviderStatusPanel({ status }: { status: ProviderStatus }) {
+  const monitoredIds = new Set(status.monitored_component_ids || []);
+  const monitored = status.components.filter((component) => monitoredIds.size
+    ? monitoredIds.has(component.id)
+    : DEFAULT_OPENAI_COMPONENT_NAMES.has(component.name));
+  const unhealthy = !status.stale && (
+    status.indicator !== 'none'
+    || status.active_incident_count > 0
+    || monitored.some((component) => component.status !== 'operational')
+  );
+  const tone = status.stale ? 'muted' : unhealthy ? 'bad' : 'ok';
+  const label = status.stale ? t('数据过期') : unhealthy ? t('官方服务异常') : t('官方运行正常');
+  const latestIncident = status.incidents[0];
+  return (
+    <section className={classNames('provider-status-panel', `provider-status-${tone}`)}>
+      <div className="provider-status-head">
+        <div className="provider-status-brand"><span><Cloud size={21} /></span><div><small>UPSTREAM PROVIDER</small><strong>{t('OpenAI 官方状态')}</strong></div></div>
+        <StatusPill tone={tone}>{label}</StatusPill>
+        <a href={status.source_url || 'https://status.openai.com/'} target="_blank" rel="noreferrer">status.openai.com <ExternalLink size={13} /></a>
+      </div>
+      <div className="provider-status-content">
+        <div className="provider-status-summary">
+          <div><span>{t('整体状态')}</span><strong>{status.description || t('等待首次同步')}</strong><small>{status.observed_at ? t('最后同步 {{time}}', { time: formatFullTime(status.observed_at) }) : t('等待首次同步')}</small></div>
+          <div><span>{t('活跃官方事件')}</span><strong>{status.active_incident_count}</strong><small>{latestIncident ? latestIncident.name : t('当前没有官方事件')}</small></div>
+          <div><span>{t('关注组件')}</span><strong>{monitored.filter((component) => component.status === 'operational').length}/{monitored.length}</strong><small>{t('仅用于解释上游故障，不会替代真实探测')}</small></div>
+        </div>
+        <div className="provider-component-strip">
+          {monitored.map((component) => <span className={component.status === 'operational' ? 'healthy' : 'degraded'} key={component.id}><i />{component.name}<em>{component.status === 'operational' ? t('正常') : component.status.replaceAll('_', ' ')}</em></span>)}
+          {!monitored.length && <span className="provider-component-empty">{t('尚未选择关注组件')}</span>}
+        </div>
+        {latestIncident && <div className="provider-incident-brief"><AlertTriangle size={16} /><div><strong>{latestIncident.name}</strong><span>{latestIncident.latest_update?.body || t('OpenAI 尚未提供进一步说明')}</span></div><b>{latestIncident.status}</b></div>}
+      </div>
+    </section>
+  );
+}
+
 function Overview({ summary, channels, onChannel }: { summary: Summary; channels: Channel[]; onChannel: (channel: Channel) => void }) {
   const resourceAge = summary.resources.created_at ? Math.floor(Date.now() / 1000 - summary.resources.created_at) : null;
   return (
@@ -677,6 +779,7 @@ function Overview({ summary, channels, onChannel }: { summary: Summary; channels
         <MetricCard icon={<AlertTriangle />} label={t("慢请求")} value={`${summary.requests.slow}`} detail={`${t('总耗时')} / ${t('首字')} > ${SLOW_SECONDS}s · ${summary.requests.slow_ratio.toFixed(1)}%`} tone={summary.requests.slow ? 'warn' : 'ok'} />
         <MetricCard icon={<Server />} label={t("机器资源")} value={`MEM ${formatPercent(summary.resources.system_memory)}`} detail={resourceAge == null ? t('等待资源样本') : `${resourceAge}s ${t('前更新')} · DISK ${formatPercent(summary.resources.system_disk)}`} tone={(summary.resources.system_memory || 0) > 85 ? 'bad' : 'neutral'} />
       </section>
+      {summary.provider_status && <ProviderStatusPanel status={summary.provider_status} />}
       <div className="section-heading"><div><span className="eyebrow">LIVE CHANNEL MATRIX</span><h2>{t("渠道运行状态")}</h2></div><div className="legend"><span><i className="legend-ok" />{t("正常")}</span><span><i className="legend-warn" />{t("延迟")}</span><span><i className="legend-bad" />{t("异常")}</span></div></div>
       <section className="channel-grid">
         {channels.map((channel) => <ChannelCard key={channel.channel_id} channel={channel} onOpen={() => onChannel(channel)} />)}
@@ -920,6 +1023,7 @@ const INCIDENT_CATEGORIES: Record<string, string> = {
   container: t('容器状态'),
   service: t('服务可用性'),
   collector: t('采集器'),
+  provider: t('上游官方状态'),
   other: t('其他'),
 };
 
@@ -1048,6 +1152,11 @@ function IncidentsView() {
               <div className={selected.status === 'resolved' ? 'complete' : ''}><span><CheckCircle2 size={15} /></span><div><strong>{selected.status === 'resolved' ? t('指标恢复') : t('等待恢复')}</strong><small>{selected.resolved_at ? formatFullTime(selected.resolved_at) : t('最后更新 {{time}}', { time: formatFullTime(selected.updated_at) })}</small></div></div>
             </div>
 
+            {selected.metadata?.provider && <div className="provider-incident-context">
+              <div className="provider-incident-context-head"><div><Cloud size={17} /><span><strong>{t('官方事件上下文')}</strong><small>{selected.metadata.provider.toUpperCase()} · {selected.metadata.impact || selected.severity} · {selected.metadata.phase || selected.status}</small></span></div>{selected.metadata.source_url && <a href={selected.metadata.source_url} target="_blank" rel="noreferrer">{t('查看官方状态页')}<ExternalLink size={13} /></a>}</div>
+              {selected.metadata.timeline?.length ? <div className="provider-official-timeline">{selected.metadata.timeline.map((update, index) => <article key={`${update.id || index}-${update.created_at}`}><span><i /></span><div><div><strong>{update.status}</strong><time>{formatFullTime(update.created_at)}</time></div><p>{update.body || t('OpenAI 尚未提供进一步说明')}</p></div></article>)}</div> : <p className="provider-timeline-empty">{t('当前事件未附带官方更新记录。')}</p>}
+            </div>}
+
             <div className="incident-explanation-grid">
               <article className="incident-explanation cause"><div><AlertTriangle size={17} /><span>{t("为什么发生")}</span></div>{selected.legacy_cause_missing ? <p className="incident-legacy-note">{t("该事件由旧版本记录，恢复时曾覆盖原始告警内容，因此无法可靠还原触发原因。新事件已完整保留告警与恢复上下文。")}</p> : <pre>{selected.body || t('事件源未提供额外诊断内容，请结合事件标识和对应监控指标排查。')}</pre>}</article>
               <article className="incident-explanation recovery"><div><CheckCircle2 size={17} /><span>{t("为什么恢复")}</span></div>{selected.status === 'resolved' ? <pre>{selected.resolution_body || t('监控指标已重新满足健康条件，但事件源未提供详细恢复说明。')}</pre> : <p>{t("尚未恢复。系统会持续采样；当指标回到恢复阈值并通过状态判定后，会在这里记录恢复依据和时间。")}</p>}</article>
@@ -1133,7 +1242,12 @@ export default function App() {
 
   const overall = useMemo(() => {
     if (!summary) return { tone: 'muted' as const, label: t('正在同步') };
-    if (summary.channels.failed || summary.incidents.critical) return { tone: 'bad' as const, label: t('存在异常') };
+    const providerIssue = summary.provider_status?.include_in_overall
+      && !summary.provider_status.stale
+      && (summary.provider_status.indicator !== 'none'
+        || summary.provider_status.active_incident_count > 0
+        || summary.provider_status.degraded_component_count > 0);
+    if (summary.channels.failed || summary.incidents.critical || providerIssue) return { tone: 'bad' as const, label: t('存在异常') };
     if (summary.channels.unknown || summary.requests.slow) return { tone: 'warn' as const, label: t('需要关注') };
     return { tone: 'ok' as const, label: t('运行正常') };
   }, [summary]);
@@ -1163,7 +1277,7 @@ export default function App() {
         {error && <div className="inline-error"><AlertTriangle size={16} />{error}<button onClick={() => void loadCore()}>{t("重试")}</button></div>}
         {summary ? <>{tab === 'overview' && <Overview summary={summary} channels={channels} onChannel={setSelectedChannel} />}{tab === 'keyUsage' && user?.key_usage_available && <KeyUsageView />}{tab === 'logs' && elevated && <LogsView channels={channels} />}{tab === 'resources' && elevated && <ResourcesView />}{tab === 'incidents' && elevated && <IncidentsView />}{tab === 'channels' && elevated && <ChannelSettingsView />}{tab === 'settings' && user?.role === 'admin' && <SettingsView activePage={route.settingsPage} onActivePageChange={(settingsPage) => navigate({ tab: 'settings', settingsPage })} />}</> : <div className="loading-panel"><RefreshCw className="spin" /><span>{t("正在读取第一批监控数据")}</span></div>}
       </main>
-      <footer><span>{t("数据源：New API 管理接口 / 真实 Relay 请求 / Linux")} & Docker</span><span>{t("告警阈值：总耗时或首字")} &gt; {t("60s，3/5 或 5/10 触发")}</span></footer>
+      <footer><span>{t("数据源：New API 管理接口 / 真实 Relay 请求 / Linux")} & Docker / OpenAI Status</span><span>{t("告警阈值：总耗时或首字")} &gt; {t("60s，3/5 或 5/10 触发")}</span></footer>
       {selectedChannel && <DetailDrawer channel={selectedChannel} onClose={() => setSelectedChannel(null)} />}
     </div>
   );

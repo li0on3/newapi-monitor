@@ -173,6 +173,27 @@ class DashboardRepositoryTests(unittest.TestCase):
         self.assertEqual(1, summary["incidents"]["open"])
         self.assertEqual(0, summary["incidents"]["critical"])
 
+    def test_summary_never_mixes_provider_incidents_into_local_overall_health(self):
+        before = self.repository.summary(now=1_700_000_100)
+        store = StateStore(self.db_path)
+        store.record_alert_events(
+            [
+                AlertEvent(
+                    "provider_incident",
+                    "OpenAI incident",
+                    "official outage",
+                    key="provider:openai:incident:one",
+                    severity="critical",
+                )
+            ],
+            now=1_700_000_000,
+        )
+        store.connection.close()
+
+        summary = self.repository.summary(now=1_700_000_100)
+
+        self.assertEqual(before["incidents"], summary["incidents"])
+
     def test_summary_marks_stale_channel_observations_unknown(self):
         repository = DashboardRepository(
             self.db_path,
@@ -288,6 +309,49 @@ class DashboardRepositoryTests(unittest.TestCase):
         self.assertEqual("当前值：92%\n阈值：85%", item["body"])
         self.assertEqual("当前值：62%\n恢复阈值：68%", item["resolution_body"])
         self.assertEqual(60, item["duration_seconds"])
+
+    def test_provider_status_and_incident_metadata_are_available_to_dashboard(self):
+        store = StateStore(self.db_path)
+        store.record_provider_status(
+            "openai",
+            {
+                "provider": "openai",
+                "indicator": "major",
+                "description": "Partial System Outage",
+                "components": [{"id": "responses-id", "name": "Responses", "status": "degraded_performance"}],
+                "incidents": [{"id": "incident-1", "name": "Responses API errors", "status": "investigating"}],
+            },
+            observed_at=1_250,
+        )
+        store.record_alert_events(
+            [
+                AlertEvent(
+                    "provider_incident",
+                    "OpenAI 官方状态异常：Responses API errors",
+                    "官方阶段：Investigating",
+                    key="provider:openai:incident:incident-1",
+                    severity="critical",
+                    metadata={
+                        "provider": "openai",
+                        "official_id": "incident-1",
+                        "source_url": "https://status.openai.com/",
+                        "phase": "investigating",
+                    },
+                )
+            ],
+            now=1_250,
+        )
+        store.connection.close()
+
+        provider = self.repository.provider_status("openai", now=1_300, stale_after_seconds=180)
+        incidents = self.repository.incidents(category="provider", now=1_300)
+
+        self.assertEqual("major", provider["indicator"])
+        self.assertFalse(provider["stale"])
+        self.assertEqual(1, provider["active_incident_count"])
+        self.assertEqual(1, incidents["total"])
+        self.assertEqual("provider", incidents["items"][0]["category"])
+        self.assertEqual("incident-1", incidents["items"][0]["metadata"]["official_id"])
 
 
 if __name__ == "__main__":

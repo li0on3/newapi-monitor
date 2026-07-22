@@ -21,4 +21,12 @@ describe('translations', () => {
   test('keeps Chinese source copy in Chinese mode', () => {
     expect(translate('机器资源', 'zh-CN')).toBe('机器资源')
   })
+
+  test('translates OpenAI provider status controls', () => {
+    expect(translate('OpenAI 官方状态', 'en')).toBe('OpenAI official status')
+    expect(translate('测试官方连接', 'en')).toBe('Test official connection')
+    expect(translate('上游官方状态不会自动修改或禁用 New API 渠道。', 'en')).toBe(
+      'Upstream status never modifies or disables New API channels automatically.',
+    )
+  })
 })

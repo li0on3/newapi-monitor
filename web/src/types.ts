@@ -137,6 +137,51 @@ export type Summary = {
   };
   resources: ResourceSample & { containers?: Record<string, ContainerMetric> };
   incidents: { open: number; critical: number };
+  provider_status?: ProviderStatus;
+};
+
+export type ProviderStatusComponent = {
+  id: string;
+  name: string;
+  status: string;
+  updated_at?: number;
+};
+
+export type ProviderStatusUpdate = {
+  id?: string;
+  status: string;
+  body: string;
+  created_at: number;
+  updated_at?: number;
+};
+
+export type ProviderStatusIncident = {
+  id: string;
+  name: string;
+  status: string;
+  impact: string;
+  created_at: number;
+  updated_at: number;
+  latest_update?: ProviderStatusUpdate;
+  updates?: ProviderStatusUpdate[];
+};
+
+export type ProviderStatus = {
+  provider: string;
+  enabled?: boolean;
+  available: boolean;
+  stale: boolean;
+  observed_at: number;
+  age_seconds?: number;
+  indicator: string;
+  description: string;
+  source_url?: string;
+  components: ProviderStatusComponent[];
+  incidents: ProviderStatusIncident[];
+  active_incident_count: number;
+  degraded_component_count: number;
+  include_in_overall?: boolean;
+  monitored_component_ids?: string[];
 };
 
 export type LogItem = {
@@ -191,6 +236,16 @@ export type Incident = {
   updated_at: number;
   resolved_at: number | null;
   last_notified_at: number;
+  metadata?: {
+    provider?: string;
+    official_id?: string;
+    source_url?: string;
+    impact?: string;
+    phase?: string;
+    component_id?: string;
+    component_name?: string;
+    timeline?: ProviderStatusUpdate[];
+  };
 };
 
 export type IncidentSummary = {
