@@ -38,7 +38,7 @@
 - 中英文界面自动跟随浏览器语言，也可在页面右上角手动切换并持久化偏好。
 - 页面动态配置，不写回 New API，不影响 New API 升级。
 - 管理端与普通用户可使用独立的总览渠道清单；隐藏渠道只影响对应角色的展示和状态汇总，不停止探测、日志采集或告警。
-- 通过 OpenAI 官方 JSON 状态接口同步整体状态、组件和事件，将官方故障与本地真实探测关联；默认不纳入本地 `OVERALL STATUS`，也不会自动修改或禁用 New API 渠道。
+- 通过 OpenAI 官方 JSON 状态接口同步整体状态、组件和事件；独立页面区分“业务相关组件”和“OpenAI 全局事件”，总览只保留轻量参考提示，本地真实渠道始终是主要判断依据。
 
 ## 快速部署
 
@@ -89,9 +89,10 @@ sudo monitorctl reset-admin
 /monitor/resources              机器资源
 /monitor/incidents              事件
 /monitor/channels               渠道配置
+/monitor/upstream-status        OpenAI 官方状态
 /monitor/system                 系统配置
 /monitor/system/notifications   通知中心
-/monitor/system/providers       上游官方状态
+/monitor/system/providers       上游官方状态配置
 ```
 
 通知中心的每个已配置渠道均可单独点击“触发测试告警”；渠道无需先启用，但未保存的配置必须先保存，避免测试内容与实际生效配置不一致。

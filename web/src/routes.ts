@@ -1,4 +1,4 @@
-export type AppTab = 'overview' | 'keyUsage' | 'logs' | 'resources' | 'incidents' | 'channels' | 'settings';
+export type AppTab = 'overview' | 'keyUsage' | 'logs' | 'resources' | 'incidents' | 'channels' | 'providerStatus' | 'settings';
 export type SettingsPage = 'status' | 'overview' | 'notifications' | 'providers' | 'connection' | 'keyUsage' | 'collection' | 'thresholds' | 'advanced' | 'access' | 'audit';
 
 export type AppRoute = {
@@ -13,6 +13,7 @@ const TAB_PATHS: Record<AppTab, string> = {
   resources: 'resources',
   incidents: 'incidents',
   channels: 'channels',
+  providerStatus: 'upstream-status',
   settings: 'system',
 };
 
