@@ -18,7 +18,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime
 from email.message import EmailMessage
 from pathlib import Path
 from typing import Any, Callable, Iterable
@@ -87,6 +88,8 @@ class AlertEvent:
     key: str = ""
     severity: str = "warning"
     recovery: bool = False
+    metadata: dict[str, Any] = field(default_factory=dict)
+    notify: bool = True
 
 
 @dataclass(frozen=True)
@@ -642,6 +645,451 @@ class ResourceStateTracker:
         return events
 
 
+OPENAI_STATUS_SUMMARY_URL = "https://status.openai.com/api/v2/summary.json"
+OPENAI_STATUS_SOURCE_URL = "https://status.openai.com/"
+DEFAULT_OPENAI_COMPONENT_NAMES = {
+    "Responses",
+    "Chat Completions",
+    "Codex API",
+    "CLI",
+}
+OPENAI_IMPACT_RANK = {"none": 0, "minor": 1, "major": 2, "critical": 3}
+
+
+def parse_status_timestamp(value: Any) -> int:
+    text = str(value or "").strip()
+    if not text:
+        return 0
+    try:
+        return int(datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp())
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
+class OpenAIStatusClient:
+    def __init__(self, fetch_json: Callable[[str, int], dict[str, Any]] | None = None):
+        self.fetch_json = fetch_json or self._fetch_json
+
+    @staticmethod
+    def _fetch_json(url: str, timeout_seconds: int) -> dict[str, Any]:
+        if url != OPENAI_STATUS_SUMMARY_URL:
+            raise ValueError("unsupported OpenAI Status endpoint")
+        request = urllib.request.Request(
+            url,
+            headers={
+                "Accept": "application/json",
+                "User-Agent": "newapi-monitor-provider-status/1.0",
+            },
+            method="GET",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+                body = response.read(1_048_577)
+        except urllib.error.HTTPError as error:
+            detail = error.read(1000).decode("utf-8", errors="replace")
+            raise RuntimeError(f"OpenAI Status returned HTTP {error.code}: {detail}") from error
+        except (urllib.error.URLError, TimeoutError, OSError) as error:
+            raise RuntimeError(f"OpenAI Status unavailable: {error}") from error
+        if len(body) > 1_048_576:
+            raise RuntimeError("OpenAI Status response exceeds 1 MiB")
+        try:
+            payload = json.loads(body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise RuntimeError("OpenAI Status returned invalid JSON") from error
+        if not isinstance(payload, dict):
+            raise RuntimeError("OpenAI Status returned a non-object response")
+        return payload
+
+    @staticmethod
+    def _text(value: Any, limit: int = 2000) -> str:
+        return str(value or "").strip()[:limit]
+
+    def fetch(
+        self,
+        timeout_seconds: int = 10,
+        observed_at: int | None = None,
+    ) -> dict[str, Any]:
+        summary = self.fetch_json(OPENAI_STATUS_SUMMARY_URL, timeout_seconds)
+        status = summary.get("status")
+        page = summary.get("page")
+        components_raw = summary.get("components")
+        incidents_raw = summary.get("incidents")
+        if not isinstance(status, dict) or not isinstance(page, dict):
+            raise RuntimeError("OpenAI Status summary is missing page or status")
+        if not isinstance(components_raw, list) or not isinstance(incidents_raw, list):
+            raise RuntimeError("OpenAI Status response is missing components or incidents")
+
+        components: list[dict[str, Any]] = []
+        for item in components_raw[:500]:
+            if not isinstance(item, dict):
+                continue
+            component_id = self._text(item.get("id"), 128)
+            name = self._text(item.get("name"), 256)
+            if not component_id or not name:
+                continue
+            components.append(
+                {
+                    "id": component_id,
+                    "name": name,
+                    "status": self._text(item.get("status"), 64) or "unknown",
+                    "updated_at": parse_status_timestamp(item.get("updated_at")),
+                }
+            )
+
+        incidents: list[dict[str, Any]] = []
+        for item in incidents_raw[:100]:
+            if not isinstance(item, dict):
+                continue
+            incident_id = self._text(item.get("id"), 128)
+            name = self._text(item.get("name"), 512)
+            if not incident_id or not name:
+                continue
+            updates: list[dict[str, Any]] = []
+            raw_updates = item.get("incident_updates")
+            if isinstance(raw_updates, list):
+                for update in raw_updates[:50]:
+                    if not isinstance(update, dict):
+                        continue
+                    updates.append(
+                        {
+                            "id": self._text(update.get("id"), 128),
+                            "status": self._text(update.get("status"), 64) or "unknown",
+                            "body": self._text(update.get("body"), 4000),
+                            "created_at": parse_status_timestamp(update.get("created_at")),
+                            "updated_at": parse_status_timestamp(update.get("updated_at")),
+                        }
+                    )
+            updates.sort(key=lambda update: (int(update["created_at"]), int(update["updated_at"])))
+            latest_update = updates[-1] if updates else {
+                "id": "",
+                "status": self._text(item.get("status"), 64) or "unknown",
+                "body": "",
+                "created_at": parse_status_timestamp(item.get("updated_at")),
+                "updated_at": parse_status_timestamp(item.get("updated_at")),
+            }
+            incidents.append(
+                {
+                    "id": incident_id,
+                    "name": name,
+                    "status": self._text(item.get("status"), 64) or "unknown",
+                    "impact": self._text(item.get("impact"), 64) or "none",
+                    "created_at": parse_status_timestamp(item.get("created_at")),
+                    "updated_at": parse_status_timestamp(item.get("updated_at")),
+                    "resolved_at": parse_status_timestamp(item.get("resolved_at")),
+                    "latest_update": latest_update,
+                    "updates": updates[-20:],
+                }
+            )
+
+        return {
+            "provider": "openai",
+            "observed_at": int(time.time()) if observed_at is None else int(observed_at),
+            "source_url": OPENAI_STATUS_SOURCE_URL,
+            "page_updated_at": parse_status_timestamp(page.get("updated_at")),
+            "indicator": self._text(status.get("indicator"), 64) or "unknown",
+            "description": self._text(status.get("description"), 512) or "Unknown",
+            "components": components,
+            "incidents": incidents,
+        }
+
+
+class OpenAIStatusTracker:
+    def __init__(
+        self,
+        initial_state: dict[str, Any] | None = None,
+        component_ids: Iterable[str] = (),
+        min_impact: str = "major",
+        failure_threshold: int = 2,
+        recovery_threshold: int = 2,
+        alerts_enabled: bool = True,
+    ):
+        state = dict(initial_state or {})
+        self.state = {
+            "incidents": dict(state.get("incidents") or {}),
+            "components": dict(state.get("components") or {}),
+        }
+        self.component_ids = {str(item) for item in component_ids if str(item)}
+        self.min_impact = min_impact if min_impact in OPENAI_IMPACT_RANK else "major"
+        self.failure_threshold = max(1, int(failure_threshold))
+        self.recovery_threshold = max(1, int(recovery_threshold))
+        self.alerts_enabled = bool(alerts_enabled)
+
+    @staticmethod
+    def _severity(impact: str) -> str:
+        return "critical" if impact in {"major", "critical"} else "warning"
+
+    def _component_selected(self, component_id: str, name: str) -> bool:
+        if self.component_ids:
+            return component_id in self.component_ids
+        return name in DEFAULT_OPENAI_COMPONENT_NAMES
+
+    @staticmethod
+    def _local_impact_line(local_impact: dict[str, int] | None) -> str:
+        if not local_impact:
+            return "本地影响：尚无可关联的渠道探测数据"
+        total = int(local_impact.get("total") or 0)
+        failed = int(local_impact.get("failed") or 0)
+        if total <= 0:
+            return "本地影响：尚无可关联的 OpenAI 渠道"
+        if failed:
+            return f"本地影响：{failed}/{total} 个相关渠道异常"
+        return f"本地影响：0/{total} 个相关渠道异常，本地暂未复现"
+
+    @staticmethod
+    def _incident_metadata(incident: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "provider": "openai",
+            "official_id": str(incident.get("id") or ""),
+            "source_url": OPENAI_STATUS_SOURCE_URL,
+            "impact": str(incident.get("impact") or "none"),
+            "phase": str(incident.get("status") or "unknown"),
+            "timeline": list(incident.get("updates") or [])[-20:],
+        }
+
+    def _incident_body(
+        self,
+        incident: dict[str, Any],
+        local_impact: dict[str, int] | None,
+    ) -> str:
+        latest = dict(incident.get("latest_update") or {})
+        return "\n".join(
+            [
+                f"官方影响等级：{str(incident.get('impact') or 'none').upper()}",
+                f"官方阶段：{str(incident.get('status') or 'unknown')}",
+                self._local_impact_line(local_impact),
+                f"官方说明：{str(latest.get('body') or '暂无进一步说明')[:4000]}",
+                f"来源：{OPENAI_STATUS_SOURCE_URL}",
+            ]
+        )
+
+    def evaluate(
+        self,
+        snapshot: dict[str, Any],
+        local_impact: dict[str, int] | None = None,
+    ) -> list[AlertEvent]:
+        events: list[AlertEvent] = []
+        current_incident_ids: set[str] = set()
+        active_alert_worthy_incident = False
+        incident_states = self.state["incidents"]
+        for incident in snapshot.get("incidents") or []:
+            if not isinstance(incident, dict):
+                continue
+            incident_id = str(incident.get("id") or "")
+            if not incident_id:
+                continue
+            current_incident_ids.add(incident_id)
+            status = str(incident.get("status") or "unknown")
+            impact = str(incident.get("impact") or "none")
+            latest = dict(incident.get("latest_update") or {})
+            signature = "|".join(
+                [
+                    status,
+                    impact,
+                    str(incident.get("updated_at") or 0),
+                    str(latest.get("status") or ""),
+                    str(latest.get("body") or "")[:1000],
+                ]
+            )
+            previous = dict(incident_states.get(incident_id) or {})
+            alert_worthy = OPENAI_IMPACT_RANK.get(impact, 0) >= OPENAI_IMPACT_RANK[self.min_impact]
+            if status != "resolved" and alert_worthy:
+                active_alert_worthy_incident = True
+                should_record = not previous.get("alerted") or previous.get("signature") != signature
+                should_notify = self.alerts_enabled and previous.get("notified_signature") != signature
+                if should_record or should_notify:
+                    events.append(
+                        AlertEvent(
+                            kind="provider_incident",
+                            title=f"OpenAI 官方状态异常：{str(incident.get('name') or incident_id)}",
+                            body=self._incident_body(incident, local_impact),
+                            key=f"provider:openai:incident:{incident_id}",
+                            severity=self._severity(impact),
+                            metadata=self._incident_metadata(incident),
+                            notify=self.alerts_enabled,
+                        )
+                    )
+                    previous["alerted"] = True
+                    if self.alerts_enabled:
+                        previous["notified_signature"] = signature
+            elif status == "resolved" and previous.get("alerted"):
+                events.append(
+                    AlertEvent(
+                        kind="provider_incident_recovered",
+                        title=f"OpenAI 官方事件恢复：{str(incident.get('name') or incident_id)}",
+                        body=self._incident_body(incident, local_impact),
+                        key=f"provider:openai:incident:{incident_id}",
+                        severity="info",
+                        recovery=True,
+                        metadata=self._incident_metadata(incident),
+                        notify=self.alerts_enabled,
+                    )
+                )
+                previous["alerted"] = False
+                previous["notified_signature"] = ""
+            elif status != "resolved" and previous.get("alerted"):
+                events.append(
+                    AlertEvent(
+                        kind="provider_incident_scope_changed",
+                        title=f"OpenAI 官方事件低于告警阈值：{str(incident.get('name') or incident_id)}",
+                        body="\n".join(
+                            [
+                                f"当前影响等级：{impact.upper()}",
+                                f"配置的最低告警等级：{self.min_impact.upper()}",
+                                "官方事件仍可能处于活动状态，但已不再计入监控事件。",
+                                f"来源：{OPENAI_STATUS_SOURCE_URL}",
+                            ]
+                        ),
+                        key=f"provider:openai:incident:{incident_id}",
+                        severity="info",
+                        recovery=True,
+                        metadata={
+                            **self._incident_metadata(incident),
+                            "phase": "below-threshold",
+                        },
+                        notify=False,
+                    )
+                )
+                previous["alerted"] = False
+                previous["notified_signature"] = ""
+            previous.update(
+                {
+                    "name": str(incident.get("name") or incident_id),
+                    "status": status,
+                    "impact": impact,
+                    "signature": signature,
+                }
+            )
+            incident_states[incident_id] = previous
+
+        for incident_id, previous_raw in list(incident_states.items()):
+            previous = dict(previous_raw or {})
+            if incident_id in current_incident_ids or not previous.get("alerted"):
+                continue
+            events.append(
+                AlertEvent(
+                    kind="provider_incident_recovered",
+                    title=f"OpenAI 官方事件恢复：{previous.get('name') or incident_id}",
+                    body=f"官方事件已不再处于活动状态。\n来源：{OPENAI_STATUS_SOURCE_URL}",
+                    key=f"provider:openai:incident:{incident_id}",
+                    severity="info",
+                    recovery=True,
+                    metadata={
+                        "provider": "openai",
+                        "official_id": incident_id,
+                        "source_url": OPENAI_STATUS_SOURCE_URL,
+                        "phase": "resolved",
+                    },
+                    notify=self.alerts_enabled,
+                )
+            )
+            previous["alerted"] = False
+            previous["notified_signature"] = ""
+            previous["status"] = "resolved"
+            incident_states[incident_id] = previous
+
+        component_states = self.state["components"]
+        for component_id, previous_raw in list(component_states.items()):
+            previous = dict(previous_raw or {})
+            if self._component_selected(component_id, str(previous.get("name") or component_id)):
+                continue
+            if previous.get("alerted"):
+                events.append(
+                    AlertEvent(
+                        kind="provider_component_scope_changed",
+                        title=f"OpenAI 组件已移出关注范围：{previous.get('name') or component_id}",
+                        body="该组件已从监控配置的关注范围移除，原事件按配置变更结束。",
+                        key=f"provider:openai:component:{component_id}",
+                        severity="info",
+                        recovery=True,
+                        metadata={
+                            "provider": "openai",
+                            "component_id": component_id,
+                            "component_name": str(previous.get("name") or component_id),
+                            "source_url": OPENAI_STATUS_SOURCE_URL,
+                            "phase": "scope-removed",
+                        },
+                        notify=False,
+                    )
+                )
+            component_states.pop(component_id, None)
+        for component in snapshot.get("components") or []:
+            if not isinstance(component, dict):
+                continue
+            component_id = str(component.get("id") or "")
+            name = str(component.get("name") or component_id)
+            if not self._component_selected(component_id, name):
+                continue
+            status = str(component.get("status") or "unknown")
+            previous = dict(component_states.get(component_id) or {})
+            previous.setdefault("failures", 0)
+            previous.setdefault("recoveries", 0)
+            previous.setdefault("alerted", False)
+            if status == "operational":
+                previous["failures"] = 0
+                if previous["alerted"]:
+                    previous["recoveries"] = int(previous["recoveries"]) + 1
+                    if previous["recoveries"] >= self.recovery_threshold:
+                        events.append(
+                            AlertEvent(
+                                kind="provider_component_recovered",
+                                title=f"OpenAI 组件恢复：{name}",
+                                body=f"官方组件状态：operational\n来源：{OPENAI_STATUS_SOURCE_URL}",
+                                key=f"provider:openai:component:{component_id}",
+                                severity="info",
+                                recovery=True,
+                                metadata={
+                                    "provider": "openai",
+                                    "component_id": component_id,
+                                    "component_name": name,
+                                    "source_url": OPENAI_STATUS_SOURCE_URL,
+                                    "phase": "operational",
+                                },
+                                notify=self.alerts_enabled,
+                            )
+                        )
+                        previous["alerted"] = False
+                        previous["notified_signature"] = ""
+                        previous["recoveries"] = 0
+                else:
+                    previous["recoveries"] = 0
+            else:
+                previous["recoveries"] = 0
+                previous["failures"] = int(previous["failures"]) + 1
+                should_record = not previous["alerted"] and previous["failures"] >= self.failure_threshold
+                should_notify = self.alerts_enabled and previous.get("notified_signature") != status
+                if not active_alert_worthy_incident and (should_record or (previous["alerted"] and should_notify)):
+                    events.append(
+                        AlertEvent(
+                            kind="provider_component_failed",
+                            title=f"OpenAI 组件异常：{name}",
+                            body="\n".join(
+                                [
+                                    f"官方组件状态：{status}",
+                                    self._local_impact_line(local_impact),
+                                    f"来源：{OPENAI_STATUS_SOURCE_URL}",
+                                ]
+                            ),
+                            key=f"provider:openai:component:{component_id}",
+                            severity="warning",
+                            metadata={
+                                "provider": "openai",
+                                "component_id": component_id,
+                                "component_name": name,
+                                "source_url": OPENAI_STATUS_SOURCE_URL,
+                                "phase": status,
+                            },
+                            notify=self.alerts_enabled,
+                        )
+                    )
+                    previous["alerted"] = True
+                    if self.alerts_enabled:
+                        previous["notified_signature"] = status
+            previous["name"] = name
+            previous["status"] = status
+            component_states[component_id] = previous
+        return events
+
+
 @dataclass(frozen=True)
 class Config:
     base_url: str
@@ -705,6 +1153,17 @@ class Config:
     feishu_webhook_secret: str
     send_startup_email: bool
     subject_prefix: str
+    openai_status_enabled: bool
+    openai_status_alert_enabled: bool
+    openai_status_interval_seconds: int
+    openai_status_timeout_seconds: int
+    openai_status_min_impact: str
+    openai_status_component_ids: tuple[str, ...]
+    openai_status_failure_threshold: int
+    openai_status_recovery_threshold: int
+    openai_status_include_in_overall: bool
+    openai_status_admin_visible: bool
+    openai_status_viewer_visible: bool
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -751,6 +1210,11 @@ class Config:
             "excluded_token_names",
             "EXCLUDED_TOKEN_NAMES",
             "模型测试,newapi-monitor-probe",
+        )
+        component_ids_value = value(
+            "openai_status_component_ids",
+            "OPENAI_STATUS_COMPONENT_IDS",
+            "",
         )
         return cls(
             base_url=str(value("new_api_base_url", "NEW_API_BASE_URL", "http://new-api:3000")).rstrip("/"),
@@ -822,6 +1286,27 @@ class Config:
             feishu_webhook_secret=str(value("feishu_webhook_secret", "FEISHU_WEBHOOK_SECRET", "")),
             send_startup_email=bool(value("send_startup_email", "SEND_STARTUP_EMAIL", True)),
             subject_prefix=str(value("subject_prefix", "SUBJECT_PREFIX", "[New API监控]")),
+            openai_status_enabled=bool(value("openai_status_enabled", "OPENAI_STATUS_ENABLED", True)),
+            openai_status_alert_enabled=bool(value("openai_status_alert_enabled", "OPENAI_STATUS_ALERT_ENABLED", True)),
+            openai_status_interval_seconds=max(30, int(value("openai_status_interval_seconds", "OPENAI_STATUS_INTERVAL_SECONDS", 60))),
+            openai_status_timeout_seconds=max(3, min(30, int(value("openai_status_timeout_seconds", "OPENAI_STATUS_TIMEOUT_SECONDS", 10)))),
+            openai_status_min_impact=str(value("openai_status_min_impact", "OPENAI_STATUS_MIN_IMPACT", "major")).lower(),
+            openai_status_component_ids=tuple(
+                dict.fromkeys(
+                    str(item).strip()
+                    for item in (
+                        component_ids_value
+                        if isinstance(component_ids_value, list)
+                        else str(component_ids_value).split(",")
+                    )
+                    if str(item).strip()
+                )
+            ),
+            openai_status_failure_threshold=max(1, min(10, int(value("openai_status_failure_threshold", "OPENAI_STATUS_FAILURE_THRESHOLD", 2)))),
+            openai_status_recovery_threshold=max(1, min(10, int(value("openai_status_recovery_threshold", "OPENAI_STATUS_RECOVERY_THRESHOLD", 2)))),
+            openai_status_include_in_overall=bool(value("openai_status_include_in_overall", "OPENAI_STATUS_INCLUDE_IN_OVERALL", False)),
+            openai_status_admin_visible=bool(value("openai_status_admin_visible", "OPENAI_STATUS_ADMIN_VISIBLE", True)),
+            openai_status_viewer_visible=bool(value("openai_status_viewer_visible", "OPENAI_STATUS_VIEWER_VISIBLE", True)),
         )
 
     def validate(self) -> None:
@@ -857,6 +1342,8 @@ class Config:
                 missing.append("FEISHU_RECEIVE_ID")
         if self.feishu_webhook_enabled and not self.feishu_webhook_url:
             missing.append("FEISHU_WEBHOOK_URL")
+        if self.openai_status_min_impact not in OPENAI_IMPACT_RANK:
+            raise ValueError("OPENAI_STATUS_MIN_IMPACT must be none, minor, major or critical")
         if missing:
             raise ValueError("missing required settings: " + ", ".join(missing))
 
@@ -1093,10 +1580,20 @@ class StateStore:
                 started_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL,
                 resolved_at INTEGER,
-                last_notified_at INTEGER NOT NULL
+                last_notified_at INTEGER NOT NULL,
+                metadata_json TEXT NOT NULL DEFAULT '{}'
             );
             CREATE INDEX IF NOT EXISTS idx_incident_status_time ON incidents(status, updated_at);
             CREATE INDEX IF NOT EXISTS idx_incident_key ON incidents(incident_key, id);
+
+            CREATE TABLE IF NOT EXISTS provider_status_samples (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                provider TEXT NOT NULL,
+                observed_at INTEGER NOT NULL,
+                payload_json TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_provider_status_time
+                ON provider_status_samples(provider, observed_at DESC, id DESC);
             """
         )
         incident_columns = {
@@ -1128,6 +1625,10 @@ class StateStore:
                 SET legacy_cause_missing = 1
                 WHERE status = 'resolved' AND resolution_body = body AND body != ''
                 """
+            )
+        if "metadata_json" not in incident_columns:
+            self.connection.execute(
+                "ALTER TABLE incidents ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}'"
             )
         self.connection.commit()
 
@@ -1299,6 +1800,72 @@ class StateStore:
         )
         self.connection.commit()
 
+    def record_provider_status(
+        self,
+        provider: str,
+        payload: dict[str, Any],
+        observed_at: int | None = None,
+    ) -> None:
+        timestamp = int(time.time()) if observed_at is None else int(observed_at)
+        normalized = dict(payload)
+        normalized["provider"] = str(provider)
+        normalized["observed_at"] = timestamp
+        self.connection.execute(
+            "DELETE FROM provider_status_samples WHERE provider = ?",
+            (str(provider),),
+        )
+        self.connection.execute(
+            "INSERT INTO provider_status_samples(provider, observed_at, payload_json) VALUES (?, ?, ?)",
+            (str(provider), timestamp, json.dumps(normalized, ensure_ascii=False)),
+        )
+        self.connection.commit()
+
+    def provider_local_impact(
+        self,
+        provider: str,
+        now: int | None = None,
+        stale_after_seconds: int = 900,
+    ) -> dict[str, int]:
+        if provider != "openai":
+            return {"total": 0, "healthy": 0, "failed": 0, "unknown": 0}
+        timestamp = int(time.time()) if now is None else int(now)
+        rows = self.connection.execute(
+            """
+            SELECT c.channel_id, c.models, latest.success, latest.observed_at
+            FROM channels c
+            LEFT JOIN channel_observations latest ON latest.id = (
+                SELECT id FROM channel_observations
+                WHERE channel_id = c.channel_id
+                ORDER BY observed_at DESC, id DESC LIMIT 1
+            )
+            WHERE c.status = 1
+            """
+        ).fetchall()
+        prefixes = ("gpt-", "o1", "o3", "o4", "codex", "text-embedding", "dall-e")
+        related = [
+            row for row in rows
+            if any(
+                model.strip().lower().startswith(prefixes)
+                for model in str(row["models"] or "").split(",")
+                if model.strip()
+            )
+        ]
+        healthy = 0
+        failed = 0
+        for row in related:
+            if not row["observed_at"] or int(row["observed_at"]) < timestamp - stale_after_seconds:
+                continue
+            if int(row["success"] or 0) == 1:
+                healthy += 1
+            else:
+                failed += 1
+        return {
+            "total": len(related),
+            "healthy": healthy,
+            "failed": failed,
+            "unknown": len(related) - healthy - failed,
+        }
+
     def record_alert_events(self, events: Iterable[AlertEvent], now: int | None = None) -> None:
         timestamp = int(time.time()) if now is None else now
         for event in events:
@@ -1316,10 +1883,17 @@ class StateStore:
                     self.connection.execute(
                         """
                         UPDATE incidents
-                        SET status = 'resolved', updated_at = ?, resolved_at = ?, resolution_body = ?
+                        SET status = 'resolved', updated_at = ?, resolved_at = ?, resolution_body = ?,
+                            metadata_json = ?
                         WHERE id = ?
                         """,
-                        (timestamp, timestamp, event.body, int(open_row["id"])),
+                        (
+                            timestamp,
+                            timestamp,
+                            event.body,
+                            json.dumps(event.metadata, ensure_ascii=False),
+                            int(open_row["id"]),
+                        ),
                     )
                 continue
             if open_row is None:
@@ -1327,8 +1901,8 @@ class StateStore:
                     """
                     INSERT INTO incidents(
                         incident_key, kind, severity, title, body, status,
-                        started_at, updated_at, resolved_at, last_notified_at
-                    ) VALUES (?, ?, ?, ?, ?, 'open', ?, ?, NULL, ?)
+                        started_at, updated_at, resolved_at, last_notified_at, metadata_json
+                    ) VALUES (?, ?, ?, ?, ?, 'open', ?, ?, NULL, ?, ?)
                     """,
                     (
                         incident_key,
@@ -1339,6 +1913,7 @@ class StateStore:
                         timestamp,
                         timestamp,
                         timestamp,
+                        json.dumps(event.metadata, ensure_ascii=False),
                     ),
                 )
             else:
@@ -1346,7 +1921,7 @@ class StateStore:
                     """
                     UPDATE incidents
                     SET kind = ?, severity = ?, title = ?, body = ?,
-                        updated_at = ?, last_notified_at = ?
+                        updated_at = ?, last_notified_at = ?, metadata_json = ?
                     WHERE id = ?
                     """,
                     (
@@ -1356,10 +1931,29 @@ class StateStore:
                         event.body,
                         timestamp,
                         timestamp,
+                        json.dumps(event.metadata, ensure_ascii=False),
                         int(open_row["id"]),
                     ),
                 )
         self.connection.commit()
+
+    def resolve_open_incidents(
+        self,
+        incident_prefix: str,
+        resolution_body: str,
+        now: int | None = None,
+    ) -> int:
+        timestamp = int(time.time()) if now is None else int(now)
+        cursor = self.connection.execute(
+            """
+            UPDATE incidents
+            SET status = 'resolved', updated_at = ?, resolved_at = ?, resolution_body = ?
+            WHERE status = 'open' AND incident_key LIKE ?
+            """,
+            (timestamp, timestamp, resolution_body, f"{incident_prefix}%"),
+        )
+        self.connection.commit()
+        return int(cursor.rowcount)
 
     def has_open_incident(self, incident_key: str) -> bool:
         row = self.connection.execute(
@@ -1472,6 +2066,7 @@ class StateStore:
         self.connection.execute("DELETE FROM latency_samples WHERE created_at < ?", (before_timestamp,))
         self.connection.execute("DELETE FROM channel_observations WHERE observed_at < ?", (before_timestamp,))
         self.connection.execute("DELETE FROM resource_samples WHERE created_at < ?", (before_timestamp,))
+        self.connection.execute("DELETE FROM provider_status_samples WHERE observed_at < ?", (before_timestamp,))
         self.connection.commit()
 
 
@@ -2230,7 +2825,22 @@ class MonitorApp:
         self.config = config
         self.client = NewAPIClient(config)
         self.store = StateStore(config.state_db)
+        if not config.openai_status_enabled:
+            self.store.resolve_open_incidents(
+                "provider:openai:",
+                "OpenAI 官方状态监控已关闭，该事件因监控范围变更结束。",
+            )
+            self.store.set_json("openai_status_state", {})
         self.notifier = NotificationDispatcher(config)
+        self.openai_status_client = OpenAIStatusClient()
+        self.openai_status_tracker = OpenAIStatusTracker(
+            self.store.get_json("openai_status_state", {}),
+            component_ids=config.openai_status_component_ids,
+            min_impact=config.openai_status_min_impact,
+            failure_threshold=config.openai_status_failure_threshold,
+            recovery_threshold=config.openai_status_recovery_threshold,
+            alerts_enabled=config.openai_status_alert_enabled,
+        )
         self.resource_collector = ResourceCollector(config.disk_path, config.docker_container_names)
         self.service_tracker = ServiceStateTracker(str(self.store.get_json("service_state", "unknown")))
         self.latency_tracker = LatencyStateTracker(
@@ -2257,6 +2867,11 @@ class MonitorApp:
             "logs": max(120, config.log_interval_seconds * 4),
             "resources": max(90, config.resource_interval_seconds * 4),
         }
+        if config.openai_status_enabled:
+            self.collector_thresholds["openai_status"] = max(
+                90,
+                config.openai_status_interval_seconds * 3,
+            )
         for collector_name, threshold in self.collector_thresholds.items():
             self.store.ensure_collector(collector_name, threshold)
         self.collector_tracker = CollectorFreshnessTracker(
@@ -2278,12 +2893,16 @@ class MonitorApp:
         if not events:
             return
         self.store.record_alert_events(events)
-        subject = "；".join(event.title for event in events)
-        body = "\n\n".join(f"[{event.title}]\n{event.body}" for event in events)
+        notifiable = [event for event in events if event.notify]
+        if not notifiable:
+            LOGGER.info("recorded %d alert events with delivery disabled", len(events))
+            return
+        subject = "；".join(event.title for event in notifiable)
+        body = "\n\n".join(f"[{event.title}]\n{event.body}" for event in notifiable)
         result = self.notifier.send(subject, body)
         LOGGER.info(
             "sent %d alert events through %s; failed=%s",
-            len(events),
+            len(notifiable),
             ",".join(result["succeeded"]) or "none",
             ",".join(result["failed"]) or "none",
         )
@@ -2460,6 +3079,32 @@ class MonitorApp:
         self._send_events(events)
         LOGGER.info("resource collection complete: %s", json.dumps(metrics, ensure_ascii=False))
 
+    def collect_openai_status(self) -> dict[str, Any]:
+        snapshot = self.openai_status_client.fetch(
+            timeout_seconds=self.config.openai_status_timeout_seconds,
+        )
+        local_impact = self.store.provider_local_impact(
+            "openai",
+            now=int(snapshot["observed_at"]),
+            stale_after_seconds=max(300, self.config.channel_interval_seconds * 3),
+        )
+        previous_state = json.loads(json.dumps(self.openai_status_tracker.state))
+        events = self.openai_status_tracker.evaluate(snapshot, local_impact)
+        try:
+            self._send_events(events)
+        except Exception:
+            self.openai_status_tracker.state = previous_state
+            raise
+        self.store.record_provider_status("openai", snapshot, observed_at=int(snapshot["observed_at"]))
+        self.store.set_json("openai_status_state", self.openai_status_tracker.state)
+        LOGGER.info(
+            "OpenAI Status collection complete: indicator=%s active_incidents=%d degraded_components=%d",
+            snapshot["indicator"],
+            sum(str(item.get("status") or "") != "resolved" for item in snapshot["incidents"]),
+            sum(str(item.get("status") or "") != "operational" for item in snapshot["components"]),
+        )
+        return snapshot
+
     def send_report(self) -> None:
         now = int(time.time())
         summary = self.store.latency_summary(now - self.config.report_interval_seconds, self.config.slow_request_seconds)
@@ -2508,6 +3153,7 @@ class MonitorApp:
         channel_probe_thread.start()
         next_log = 0.0
         next_resource = 0.0
+        next_openai_status = 0.0
         next_report = time.monotonic() + self.config.report_interval_seconds
         try:
             while stop_event is None or not stop_event.is_set():
@@ -2529,6 +3175,14 @@ class MonitorApp:
                         self._record_collector_result("resources", False, str(error))
                         LOGGER.exception("resource collection failed")
                     next_resource = now + self.config.resource_interval_seconds
+                if self.config.openai_status_enabled and now >= next_openai_status:
+                    try:
+                        self.collect_openai_status()
+                        self._record_collector_result("openai_status", True)
+                    except Exception as error:
+                        self._record_collector_result("openai_status", False, str(error))
+                        LOGGER.exception("OpenAI Status collection failed")
+                    next_openai_status = now + self.config.openai_status_interval_seconds
                 if now >= next_report:
                     try:
                         self.send_report()

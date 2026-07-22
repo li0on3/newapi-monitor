@@ -24,7 +24,7 @@ from dashboard_key_usage import KeyUsageClient, KeyUsageError, SlidingWindowRate
 from dashboard_settings import SECRET_KEYS, SettingsStore
 from dashboard_setup import NewAPIProvisioner, SetupError, verify_setup_token
 from dashboard_sso import NewAPISessionVerifier
-from newapi_monitor import Config, MonitorApp, NotificationDispatcher, StateStore, env_bool, env_int
+from newapi_monitor import Config, DEFAULT_OPENAI_COMPONENT_NAMES, MonitorApp, NotificationDispatcher, OpenAIStatusClient, StateStore, env_bool, env_int
 
 
 logging.basicConfig(
@@ -148,6 +148,34 @@ class SettingsUpdatePayload(BaseModel):
     key_usage_log_limit: int | None = Field(None, ge=10, le=500)
     key_usage_attempts_per_minute: int | None = Field(None, ge=1, le=120)
     key_usage_quota_per_unit: float | None = Field(None, gt=0, le=1_000_000_000)
+    openai_status_enabled: bool | None = None
+    openai_status_alert_enabled: bool | None = None
+    openai_status_interval_seconds: int | None = Field(None, ge=30, le=3600)
+    openai_status_timeout_seconds: int | None = Field(None, ge=3, le=30)
+    openai_status_min_impact: str | None = Field(
+        None,
+        pattern="^(none|minor|major|critical)$",
+    )
+    openai_status_component_ids: list[str] | None = Field(None, max_length=500)
+    openai_status_failure_threshold: int | None = Field(None, ge=1, le=10)
+    openai_status_recovery_threshold: int | None = Field(None, ge=1, le=10)
+    openai_status_include_in_overall: bool | None = None
+    openai_status_admin_visible: bool | None = None
+    openai_status_viewer_visible: bool | None = None
+
+    @field_validator("openai_status_component_ids")
+    @classmethod
+    def validate_openai_component_ids(cls, value: list[str] | None) -> list[str] | None:
+        if value is None:
+            return None
+        normalized: list[str] = []
+        for component_id in value:
+            item = component_id.strip()
+            if not item or len(item) > 128 or any(ord(character) < 32 for character in item):
+                raise ValueError("openai_status_component_ids contains an invalid component ID")
+            if item not in normalized:
+                normalized.append(item)
+        return normalized
 
     @field_validator("new_api_base_url")
     @classmethod
@@ -326,6 +354,14 @@ class Runtime:
         if not os.getenv("MONITOR_SECRET_KEY", ""):
             LOGGER.warning("MONITOR_SECRET_KEY is not configured; sensitive settings are stored without application-level encryption")
         values = self.settings.runtime_values()
+        if not bool(values.get("openai_status_enabled", True)):
+            state_store = StateStore(self.state_db)
+            state_store.resolve_open_incidents(
+                "provider:openai:",
+                "OpenAI 官方状态监控已关闭，该事件因监控范围变更结束。",
+            )
+            state_store.set_json("openai_status_state", {})
+            state_store.connection.close()
         configured = bool(
             str(values.get("new_api_base_url") or "").strip()
             and str(values.get("new_api_access_token") or "").strip()
@@ -476,6 +512,21 @@ class Runtime:
             "key_usage_log_limit": env_int("KEY_USAGE_LOG_LIMIT", 100),
             "key_usage_attempts_per_minute": env_int("KEY_USAGE_ATTEMPTS_PER_MINUTE", 10),
             "key_usage_quota_per_unit": float(os.getenv("KEY_USAGE_QUOTA_PER_UNIT", "500000")),
+            "openai_status_enabled": env_bool("OPENAI_STATUS_ENABLED", True),
+            "openai_status_alert_enabled": env_bool("OPENAI_STATUS_ALERT_ENABLED", True),
+            "openai_status_interval_seconds": env_int("OPENAI_STATUS_INTERVAL_SECONDS", 60),
+            "openai_status_timeout_seconds": env_int("OPENAI_STATUS_TIMEOUT_SECONDS", 10),
+            "openai_status_min_impact": os.getenv("OPENAI_STATUS_MIN_IMPACT", "major"),
+            "openai_status_component_ids": [
+                item.strip()
+                for item in os.getenv("OPENAI_STATUS_COMPONENT_IDS", "").split(",")
+                if item.strip()
+            ],
+            "openai_status_failure_threshold": env_int("OPENAI_STATUS_FAILURE_THRESHOLD", 2),
+            "openai_status_recovery_threshold": env_int("OPENAI_STATUS_RECOVERY_THRESHOLD", 2),
+            "openai_status_include_in_overall": env_bool("OPENAI_STATUS_INCLUDE_IN_OVERALL", False),
+            "openai_status_admin_visible": env_bool("OPENAI_STATUS_ADMIN_VISIBLE", True),
+            "openai_status_viewer_visible": env_bool("OPENAI_STATUS_VIEWER_VISIBLE", True),
         }
 
     def monitor_config(self) -> Config:
@@ -842,6 +893,7 @@ def query_key_usage(payload: KeyUsageQueryPayload, request: Request, user: Authe
 def dashboard_summary(user: AuthenticatedUser) -> dict[str, Any]:
     if runtime.settings is None:
         return repository().summary()
+    values = runtime.settings.runtime_values()
     audience = "viewer" if user["role"] == "viewer" else "admin"
     visible = runtime.settings.decorate_channels(
         repository().channels(),
@@ -849,7 +901,94 @@ def dashboard_summary(user: AuthenticatedUser) -> dict[str, Any]:
         audience=audience,
     )
     visible_channel_ids = {int(item["channel_id"]) for item in visible}
-    return repository().summary(channel_ids=visible_channel_ids)
+    result = repository().summary(channel_ids=visible_channel_ids)
+    provider_visible = bool(
+        values.get(
+            "openai_status_viewer_visible" if audience == "viewer" else "openai_status_admin_visible",
+            True,
+        )
+    )
+    if bool(values.get("openai_status_enabled", True)) and provider_visible:
+        provider = repository().provider_status(
+            "openai",
+            stale_after_seconds=max(
+                90,
+                int(values.get("openai_status_interval_seconds", 60)) * 3,
+            ),
+        )
+        provider["include_in_overall"] = bool(values.get("openai_status_include_in_overall", False))
+        monitored_ids = list(values.get("openai_status_component_ids") or [])
+        provider["monitored_component_ids"] = monitored_ids
+        provider["degraded_component_count"] = sum(
+            str(component.get("status") or "unknown") != "operational"
+            for component in provider["components"]
+            if (
+                str(component.get("id") or "") in monitored_ids
+                if monitored_ids
+                else str(component.get("name") or "") in DEFAULT_OPENAI_COMPONENT_NAMES
+            )
+        )
+        result["provider_status"] = provider
+    return result
+
+
+@app.get("/api/provider-status/openai")
+def openai_provider_status(user: AuthenticatedUser) -> dict[str, Any]:
+    if runtime.settings is None:
+        return repository().provider_status("openai")
+    values = runtime.settings.runtime_values()
+    audience = "viewer" if user["role"] == "viewer" else "admin"
+    visible = bool(
+        values.get(
+            "openai_status_viewer_visible" if audience == "viewer" else "openai_status_admin_visible",
+            True,
+        )
+    )
+    if not visible:
+        raise HTTPException(status_code=404, detail="OpenAI Status is not visible for this role")
+    result = repository().provider_status(
+        "openai",
+        stale_after_seconds=max(90, int(values.get("openai_status_interval_seconds", 60)) * 3),
+    )
+    result["enabled"] = bool(values.get("openai_status_enabled", True))
+    result["include_in_overall"] = bool(values.get("openai_status_include_in_overall", False))
+    monitored_ids = list(values.get("openai_status_component_ids") or [])
+    result["monitored_component_ids"] = monitored_ids
+    result["degraded_component_count"] = sum(
+        str(component.get("status") or "unknown") != "operational"
+        for component in result["components"]
+        if (
+            str(component.get("id") or "") in monitored_ids
+            if monitored_ids
+            else str(component.get("name") or "") in DEFAULT_OPENAI_COMPONENT_NAMES
+        )
+    )
+    return result
+
+
+@app.post("/api/provider-status/openai/test")
+def test_openai_provider_status(_: AdminUser) -> dict[str, Any]:
+    values = runtime.settings.runtime_values() if runtime.settings is not None else {}
+    timeout_seconds = max(3, min(30, int(values.get("openai_status_timeout_seconds", 10))))
+    snapshot = OpenAIStatusClient().fetch(timeout_seconds=timeout_seconds)
+    active_incidents = [
+        item for item in snapshot["incidents"]
+        if str(item.get("status") or "") != "resolved"
+    ]
+    return {
+        **snapshot,
+        "success": True,
+        "available": True,
+        "stale": False,
+        "age_seconds": 0,
+        "component_count": len(snapshot["components"]),
+        "incidents": active_incidents,
+        "active_incident_count": len(active_incidents),
+        "degraded_component_count": sum(
+            str(item.get("status") or "unknown") != "operational"
+            for item in snapshot["components"]
+        ),
+    }
 
 
 @app.get("/api/channels")
@@ -910,7 +1049,7 @@ def incidents(
     severity: str = Query("all", pattern="^(all|info|warning|critical)$"),
     category: str = Query(
         "all",
-        pattern="^(all|channel|latency|resource|container|service|collector|other)$",
+        pattern="^(all|channel|latency|resource|container|service|collector|provider|other)$",
     ),
     query: str = Query("", alias="q", max_length=200),
     window_hours: int = Query(0, ge=0, le=8760),
@@ -941,6 +1080,7 @@ def update_settings(payload: SettingsUpdatePayload, request: Request, user: Admi
         raise HTTPException(status_code=503, detail="settings are unavailable")
     try:
         candidate = runtime.settings.runtime_values()
+        openai_status_was_enabled = bool(candidate.get("openai_status_enabled", True))
         updates = payload.model_dump(exclude_unset=True)
         candidate.update({
             key: value for key, value in updates.items()
@@ -951,6 +1091,8 @@ def update_settings(payload: SettingsUpdatePayload, request: Request, user: Admi
             "log_interval_seconds", "resource_interval_seconds", "report_interval_seconds",
             "log_overlap_seconds", "log_initial_lookback_seconds", "latency_reminder_seconds",
             "resource_sustain_seconds", "retention_days", "smtp_port",
+            "openai_status_interval_seconds", "openai_status_timeout_seconds",
+            "openai_status_failure_threshold", "openai_status_recovery_threshold",
         ):
             if int(candidate[key]) <= 0:
                 raise ValueError(f"{key} must be greater than zero")
@@ -969,6 +1111,14 @@ def update_settings(payload: SettingsUpdatePayload, request: Request, user: Admi
     except (TypeError, ValueError) as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
     runtime.refresh_repository()
+    if openai_status_was_enabled and not bool(values.get("openai_status_enabled", True)):
+        state_store = StateStore(runtime.state_db)
+        state_store.resolve_open_incidents(
+            "provider:openai:",
+            "OpenAI 官方状态监控已关闭，该事件因监控范围变更结束。",
+        )
+        state_store.set_json("openai_status_state", {})
+        state_store.connection.close()
     return {"values": values, "version": runtime.settings.version(), "reloading": True}
 
 

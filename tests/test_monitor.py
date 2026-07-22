@@ -6,6 +6,7 @@ import unittest
 import base64
 import hashlib
 import hmac
+import json
 from pathlib import Path
 from unittest import mock
 
@@ -507,6 +508,30 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(72, config.system_cpu_threshold)
         self.assertEqual(74, config.system_memory_threshold)
 
+    def test_openai_status_configuration_is_dynamic(self):
+        config = Config.from_values(
+            {
+                "openai_status_enabled": True,
+                "openai_status_alert_enabled": False,
+                "openai_status_interval_seconds": 120,
+                "openai_status_timeout_seconds": 8,
+                "openai_status_min_impact": "minor",
+                "openai_status_component_ids": ["responses", "codex-api", "responses"],
+                "openai_status_failure_threshold": 3,
+                "openai_status_recovery_threshold": 2,
+                "openai_status_include_in_overall": True,
+                "openai_status_admin_visible": True,
+                "openai_status_viewer_visible": False,
+            }
+        )
+
+        self.assertEqual(120, config.openai_status_interval_seconds)
+        self.assertEqual(("responses", "codex-api"), config.openai_status_component_ids)
+        self.assertEqual("minor", config.openai_status_min_impact)
+        self.assertFalse(config.openai_status_alert_enabled)
+        self.assertTrue(config.openai_status_include_in_overall)
+        self.assertFalse(config.openai_status_viewer_visible)
+
     def test_dynamic_channel_settings_are_loaded(self):
         config = Config.from_values({"channel_settings": {"7": {"maintenance_mode": True}}})
 
@@ -865,6 +890,281 @@ class ChannelProbeWorkerTests(unittest.TestCase):
             "channel_probe", True, "", stale_after_seconds=900
         )
 
+
+class OpenAIStatusTests(unittest.TestCase):
+    @staticmethod
+    def _summary(component_status: str = "operational", incidents: list[dict] | None = None) -> dict:
+        return {
+            "page": {
+                "name": "OpenAI",
+                "url": "https://status.openai.com/",
+                "updated_at": "2026-07-22T02:50:19Z",
+            },
+            "status": {"indicator": "major", "description": "Partial System Outage"},
+            "components": [
+                {
+                    "id": "responses-id",
+                    "name": "Responses",
+                    "status": component_status,
+                    "updated_at": "2026-07-22T02:49:00Z",
+                },
+                {
+                    "id": "unselected-id",
+                    "name": "Sora",
+                    "status": "operational",
+                    "updated_at": "2026-07-22T02:49:00Z",
+                },
+            ],
+            "incidents": incidents or [],
+        }
+
+    @staticmethod
+    def _incidents(status: str = "investigating", body: str = "We are investigating.") -> dict:
+        return {
+            "incidents": [
+                {
+                    "id": "incident-1",
+                    "name": "Responses API errors",
+                    "status": status,
+                    "impact": "major",
+                    "created_at": "2026-07-22T02:40:00Z",
+                    "updated_at": "2026-07-22T02:50:00Z",
+                    "resolved_at": "2026-07-22T03:10:00Z" if status == "resolved" else None,
+                    "incident_updates": [
+                        {
+                            "id": "update-1",
+                            "status": status,
+                            "body": body,
+                            "created_at": "2026-07-22T02:50:00Z",
+                            "updated_at": "2026-07-22T02:50:00Z",
+                        }
+                    ],
+                }
+            ]
+        }
+
+    def test_client_normalizes_official_status_without_configurable_urls(self):
+        client_class = getattr(newapi_monitor, "OpenAIStatusClient", None)
+        self.assertIsNotNone(client_class)
+        requested_urls: list[str] = []
+
+        def fetch_json(url: str, timeout_seconds: int) -> dict:
+            requested_urls.append(url)
+            self.assertEqual(7, timeout_seconds)
+            self.assertTrue(url.endswith("summary.json"))
+            return self._summary(incidents=self._incidents()["incidents"])
+
+        snapshot = client_class(fetch_json=fetch_json).fetch(timeout_seconds=7, observed_at=1234)
+
+        self.assertEqual(
+            [
+                "https://status.openai.com/api/v2/summary.json",
+            ],
+            requested_urls,
+        )
+        self.assertEqual("openai", snapshot["provider"])
+        self.assertEqual(1234, snapshot["observed_at"])
+        self.assertEqual("major", snapshot["indicator"])
+        self.assertEqual("Responses", snapshot["components"][0]["name"])
+        self.assertEqual("We are investigating.", snapshot["incidents"][0]["latest_update"]["body"])
+
+    def test_tracker_deduplicates_updates_and_resolves_official_incident(self):
+        tracker_class = getattr(newapi_monitor, "OpenAIStatusTracker", None)
+        client_class = getattr(newapi_monitor, "OpenAIStatusClient", None)
+        self.assertIsNotNone(tracker_class)
+        self.assertIsNotNone(client_class)
+
+        payloads = {"summary": self._summary(incidents=self._incidents()["incidents"])}
+        client = client_class(
+            fetch_json=lambda _url, _timeout: payloads["summary"]
+        )
+        tracker = tracker_class(
+            component_ids=("responses-id",),
+            min_impact="major",
+            failure_threshold=2,
+            recovery_threshold=2,
+        )
+        snapshot = client.fetch(observed_at=100)
+
+        events = tracker.evaluate(snapshot, {"total": 2, "failed": 1, "healthy": 1, "unknown": 0})
+        self.assertEqual(1, len(events))
+        self.assertEqual("provider:openai:incident:incident-1", events[0].key)
+        self.assertEqual("critical", events[0].severity)
+        self.assertEqual("openai", events[0].metadata["provider"])
+        self.assertIn("本地影响：1/2", events[0].body)
+        self.assertEqual([], tracker.evaluate(snapshot))
+
+        payloads["summary"]["incidents"] = self._incidents(
+            "identified", "The issue has been identified."
+        )["incidents"]
+        update = tracker.evaluate(client.fetch(observed_at=120))
+        self.assertEqual(1, len(update))
+        self.assertEqual("identified", update[0].metadata["phase"])
+
+        payloads["summary"]["incidents"] = self._incidents(
+            "resolved", "The issue has been resolved."
+        )["incidents"]
+        recovered = tracker.evaluate(client.fetch(observed_at=180))
+        self.assertEqual(1, len(recovered))
+        self.assertTrue(recovered[0].recovery)
+        self.assertEqual("provider:openai:incident:incident-1", recovered[0].key)
+
+    def test_component_requires_consecutive_samples_and_recovers_without_incident(self):
+        tracker_class = getattr(newapi_monitor, "OpenAIStatusTracker", None)
+        client_class = getattr(newapi_monitor, "OpenAIStatusClient", None)
+        self.assertIsNotNone(tracker_class)
+        self.assertIsNotNone(client_class)
+        summary = self._summary("degraded_performance")
+        client = client_class(fetch_json=lambda _url, _timeout: summary)
+        tracker = tracker_class(
+            component_ids=("responses-id",),
+            min_impact="major",
+            failure_threshold=2,
+            recovery_threshold=2,
+        )
+
+        self.assertEqual([], tracker.evaluate(client.fetch(observed_at=100)))
+        events = tracker.evaluate(client.fetch(observed_at=160))
+        self.assertEqual(1, len(events))
+        self.assertEqual("provider:openai:component:responses-id", events[0].key)
+
+        summary["components"][0]["status"] = "operational"
+        self.assertEqual([], tracker.evaluate(client.fetch(observed_at=220)))
+        recovered = tracker.evaluate(client.fetch(observed_at=280))
+        self.assertEqual(1, len(recovered))
+        self.assertTrue(recovered[0].recovery)
+
+    def test_state_store_correlates_only_openai_model_channels(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = StateStore(str(Path(temp_dir) / "monitor.db"))
+            store.upsert_channels(
+                [
+                    {"id": 1, "name": "openai", "type": 1, "status": 1, "models": "gpt-5.4", "group": "default", "base_url": ""},
+                    {"id": 2, "name": "claude", "type": 14, "status": 1, "models": "claude-opus-4-8", "group": "default", "base_url": ""},
+                ],
+                now=100,
+            )
+            store.insert_channel_observations(
+                [
+                    ChannelObservation(1, "openai", False, 2, "timeout"),
+                    ChannelObservation(2, "claude", False, 2, "timeout"),
+                ],
+                observed_at=110,
+            )
+
+            impact = store.provider_local_impact("openai", now=120, stale_after_seconds=60)
+
+            self.assertEqual({"total": 1, "healthy": 0, "failed": 1, "unknown": 0}, impact)
+            store.connection.close()
+
+    def test_state_store_keeps_only_latest_provider_snapshot(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = StateStore(str(Path(temp_dir) / "monitor.db"))
+            store.record_provider_status("openai", {"indicator": "none"}, observed_at=100)
+            store.record_provider_status("openai", {"indicator": "minor"}, observed_at=200)
+
+            rows = store.connection.execute(
+                "SELECT observed_at, payload_json FROM provider_status_samples WHERE provider = 'openai'"
+            ).fetchall()
+
+            self.assertEqual(1, len(rows))
+            self.assertEqual(200, int(rows[0]["observed_at"]))
+            self.assertEqual("minor", json.loads(rows[0]["payload_json"])["indicator"])
+            store.connection.close()
+
+    def test_alert_delivery_can_be_enabled_after_incident_was_recorded(self):
+        tracker = newapi_monitor.OpenAIStatusTracker(
+            component_ids=("responses-id",),
+            min_impact="major",
+            alerts_enabled=False,
+        )
+        snapshot = self._summary(incidents=self._incidents()["incidents"])
+
+        recorded = tracker.evaluate(snapshot)
+        self.assertEqual(1, len(recorded))
+        self.assertFalse(recorded[0].notify)
+        self.assertEqual([], tracker.evaluate(snapshot))
+
+        tracker.alerts_enabled = True
+        notifiable = tracker.evaluate(snapshot)
+        self.assertEqual(1, len(notifiable))
+        self.assertTrue(notifiable[0].notify)
+
+    def test_component_scope_change_resolves_recorded_incident_without_notification(self):
+        tracker = newapi_monitor.OpenAIStatusTracker(
+            component_ids=("responses-id",),
+            min_impact="critical",
+            failure_threshold=1,
+        )
+        snapshot = self._summary("degraded_performance")
+        failed = tracker.evaluate(snapshot)
+        self.assertEqual(1, len(failed))
+        self.assertFalse(failed[0].recovery)
+
+        tracker.component_ids = {"__none__"}
+        recovered = tracker.evaluate(snapshot)
+
+        self.assertEqual(1, len(recovered))
+        self.assertTrue(recovered[0].recovery)
+        self.assertFalse(recovered[0].notify)
+
+    def test_state_store_can_resolve_provider_incidents_when_monitoring_is_disabled(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = StateStore(str(Path(temp_dir) / "monitor.db"))
+            store.record_alert_events(
+                [
+                    AlertEvent(
+                        "provider_incident",
+                        "OpenAI incident",
+                        "upstream outage",
+                        key="provider:openai:incident:one",
+                        severity="critical",
+                    )
+                ],
+                now=100,
+            )
+
+            resolved = store.resolve_open_incidents(
+                "provider:openai:",
+                "monitoring disabled",
+                now=200,
+            )
+            row = store.connection.execute(
+                "SELECT status, resolved_at, resolution_body FROM incidents WHERE incident_key = ?",
+                ("provider:openai:incident:one",),
+            ).fetchone()
+
+            self.assertEqual(1, resolved)
+            self.assertEqual("resolved", row["status"])
+            self.assertEqual(200, int(row["resolved_at"]))
+            self.assertEqual("monitoring disabled", row["resolution_body"])
+            store.connection.close()
+
+    def test_monitor_collection_persists_snapshot_state_and_events(self):
+        app = object.__new__(newapi_monitor.MonitorApp)
+        app.config = mock.Mock(openai_status_timeout_seconds=8, channel_interval_seconds=300)
+        app.openai_status_client = mock.Mock()
+        app.openai_status_client.fetch.return_value = {
+            "provider": "openai",
+            "observed_at": 500,
+            "indicator": "major",
+            "description": "Partial System Outage",
+            "components": [],
+            "incidents": [],
+        }
+        app.openai_status_tracker = mock.Mock(state={"incidents": {}, "components": {}})
+        app.openai_status_tracker.evaluate.return_value = [AlertEvent("provider_incident", "title", "body")]
+        app.store = mock.Mock()
+        app.store.provider_local_impact.return_value = {"total": 1, "healthy": 1, "failed": 0, "unknown": 0}
+        app._send_events = mock.Mock()
+
+        snapshot = app.collect_openai_status()
+
+        self.assertEqual(500, snapshot["observed_at"])
+        app.openai_status_client.fetch.assert_called_once_with(timeout_seconds=8)
+        app._send_events.assert_called_once()
+        app.store.record_provider_status.assert_called_once_with("openai", snapshot, observed_at=500)
+        app.store.set_json.assert_called_once_with("openai_status_state", app.openai_status_tracker.state)
 
 if __name__ == "__main__":
     unittest.main()
