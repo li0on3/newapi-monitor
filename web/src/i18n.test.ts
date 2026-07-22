@@ -28,5 +28,9 @@ describe('translations', () => {
     expect(translate('上游官方状态不会自动修改或禁用 New API 渠道。', 'en')).toBe(
       'Upstream status never modifies or disables New API channels automatically.',
     )
+    expect(translate('官方状态仅作参考', 'en')).toBe('Official status is contextual only')
+    expect(translate('查看官方状态详情', 'en')).toBe('View official status details')
+    expect(translate('业务相关组件', 'en')).toBe('Workload-relevant components')
+    expect(translate('官方状态页可见范围', 'en')).toBe('Official status page visibility')
   })
 })

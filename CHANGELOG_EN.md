@@ -4,6 +4,15 @@
 
 ## Unreleased
 
+## 1.2.1 - 2026-07-22
+
+### Changed
+
+- Moved the large OpenAI status section from the overview to `/monitor/upstream-status`; the overview now keeps only a compact contextual hint so channel cards remain primary.
+- Established real local channel probes as the primary decision signal and OpenAI global status as secondary context, preventing unrelated official incidents from looking like local channel failures.
+- Even when administrators opt into official-status influence, only degraded workload-relevant components can affect `OVERALL STATUS`.
+- Refined desktop, narrow-screen, and mobile navigation so the additional page never causes wrapped or overlapping menu items.
+
 ## 1.2.0 - 2026-07-22
 
 ### Added

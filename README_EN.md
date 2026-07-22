@@ -39,7 +39,7 @@ Every screenshot below is generated from the built-in synthetic demo dataset. It
 - Automatically follows the browser language for Chinese or English, with a persistent manual switch in the page header.
 - Stores runtime configuration in the monitor database and never writes configuration back to New API.
 - Maintains separate channel visibility lists for administrators/operators and regular viewers.
-- Synchronizes OpenAI overall status, components, and incidents from the official JSON feed and correlates them with local probes. It is excluded from local `OVERALL STATUS` by default and never modifies or disables New API channels automatically.
+- Synchronizes OpenAI status, components, and incidents from the official JSON feed. A dedicated page separates workload-relevant components from global incidents, while the overview keeps only a compact contextual hint and real local probes remain authoritative.
 
 ## Quick Start
 
@@ -72,9 +72,10 @@ Publish `/monitor/` through an HTTPS reverse proxy and forward every nested path
 /monitor/resources              Host and container resources
 /monitor/incidents              Incidents
 /monitor/channels               Channel settings
+/monitor/upstream-status        OpenAI official status
 /monitor/system                 System settings
 /monitor/system/notifications   Notification center
-/monitor/system/providers       Upstream provider status
+/monitor/system/providers       Upstream provider settings
 ```
 
 Every configured notification channel can trigger a real test alert from the UI, even while the channel is disabled. Unsaved changes must be saved first so the test always uses the active configuration.
