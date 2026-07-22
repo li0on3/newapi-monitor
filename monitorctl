@@ -1,0 +1,140 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+umask 077
+
+HOME_DIR="${NEWAPI_MONITOR_HOME:-/opt/newapi-monitor}"
+ENV_FILE="$HOME_DIR/.env"
+COMPOSE=(docker compose --env-file "$ENV_FILE" -f "$HOME_DIR/compose.yaml")
+
+fail() { printf '[monitorctl] ERROR: %s\n' "$*" >&2; exit 1; }
+need_install() { [[ -f "$ENV_FILE" && -f "$HOME_DIR/compose.yaml" ]] || fail "installation not found at $HOME_DIR"; }
+need_root() { [[ "$(id -u)" == "0" ]] || fail "this command requires root"; }
+env_value() { sed -n "s/^$1=//p" "$ENV_FILE" | tail -n 1; }
+set_env() {
+  local key="$1" value="$2" temporary
+  temporary="$(mktemp "$HOME_DIR/.env.XXXXXX")"
+  grep -v "^${key}=" "$ENV_FILE" > "$temporary" || true
+  printf '%s=%s\n' "$key" "$value" >> "$temporary"
+  chmod 0600 "$temporary"
+  mv "$temporary" "$ENV_FILE"
+}
+health_url() { local port; port="$(env_value MONITOR_PORT)"; printf 'http://127.0.0.1:%s/api/health' "${port:-18081}"; }
+wait_healthy() {
+  for _ in $(seq 1 60); do curl -fsS "$(health_url)" >/dev/null 2>&1 && return 0; sleep 3; done
+  return 1
+}
+
+usage() {
+  cat <<'EOF'
+Usage: monitorctl <command> [options]
+  status                 Show containers and application health
+  logs [service]         Follow logs (default: monitor)
+  doctor                 Validate Compose, permissions, and health
+  backup                 Create a consistent database and environment backup
+  update [version]       Upgrade to latest or a specified release
+  rollback               Switch back to the image used before the last update
+  restart                Recreate the services
+  reset-admin            Generate a new emergency administrator password
+  renew-setup            Renew an expired first-run setup token
+  uninstall [--purge]    Stop services; --purge also deletes the Docker volume
+EOF
+}
+
+command="${1:-}"; shift || true
+case "$command" in
+  status)
+    need_install
+    "${COMPOSE[@]}" ps
+    curl -fsS "$(health_url)"; printf '\n'
+    ;;
+  logs)
+    need_install
+    "${COMPOSE[@]}" logs --tail 200 -f "${1:-monitor}"
+    ;;
+  doctor)
+    need_install
+    docker compose version
+    "${COMPOSE[@]}" config --quiet
+    [[ "$(stat -c '%a' "$ENV_FILE")" == "600" ]] || fail ".env permissions must be 600"
+    curl -fsS "$(health_url)"; printf '\n'
+    ;;
+  backup)
+    need_root; need_install
+    timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
+    backup_dir="$HOME_DIR/backups/$timestamp"
+    mkdir -p "$backup_dir"
+    db_name="monitor-$timestamp.db"
+    "${COMPOSE[@]}" exec -T monitor python -c "import sqlite3; source=sqlite3.connect('/data/monitor.db'); target=sqlite3.connect('/data/$db_name'); source.backup(target); target.close(); source.close()"
+    docker cp "newapi-monitor:/data/$db_name" "$backup_dir/monitor.db" >/dev/null
+    "${COMPOSE[@]}" exec -T monitor rm -f "/data/$db_name"
+    cp "$ENV_FILE" "$backup_dir/environment.env"
+    cp "$HOME_DIR/VERSION" "$backup_dir/VERSION" 2>/dev/null || true
+    tar -czf "$HOME_DIR/backups/newapi-monitor-$timestamp.tar.gz" -C "$backup_dir" .
+    rm -rf "$backup_dir"
+    chmod 0600 "$HOME_DIR/backups/newapi-monitor-$timestamp.tar.gz"
+    printf '%s\n' "$HOME_DIR/backups/newapi-monitor-$timestamp.tar.gz"
+    ;;
+  update)
+    need_root; need_install
+    installer="$(mktemp)"; trap 'rm -f "$installer"' EXIT
+    if [[ -n "${1:-}" ]]; then
+      installer_url="https://github.com/li0on3/newapi-monitor/releases/download/v$1/install.sh"
+    else
+      installer_url="https://github.com/li0on3/newapi-monitor/releases/latest/download/install.sh"
+    fi
+    curl -fsSL "$installer_url" -o "$installer"
+    bind_address="$(env_value MONITOR_BIND_ADDRESS)"
+    args=(--upgrade --install-dir "$HOME_DIR" --bind "${bind_address:-127.0.0.1}")
+    [[ -n "${1:-}" ]] && args+=(--version "$1")
+    bash "$installer" "${args[@]}"
+    ;;
+  rollback)
+    need_root; need_install
+    [[ -s "$HOME_DIR/.previous-image" ]] || fail "no previous image is recorded"
+    previous="$(cat "$HOME_DIR/.previous-image")"
+    current="$(env_value MONITOR_IMAGE)"
+    set_env MONITOR_IMAGE "$previous"
+    printf '%s\n' "$current" > "$HOME_DIR/.previous-image"
+    "${COMPOSE[@]}" pull monitor state-init
+    "${COMPOSE[@]}" up -d --no-build --remove-orphans
+    wait_healthy || fail "rollback started but health check failed"
+    printf 'rolled back to %s\n' "$previous"
+    ;;
+  restart)
+    need_root; need_install
+    "${COMPOSE[@]}" up -d --no-build --force-recreate --remove-orphans
+    wait_healthy || fail "restart completed but health check failed"
+    ;;
+  reset-admin)
+    need_root; need_install
+    password="$(openssl rand -base64 24 | tr -d '\n')"
+    username="$(env_value DASHBOARD_ADMIN_USERNAME)"; username="${username:-admin}"
+    "${COMPOSE[@]}" exec -T -e MONITOR_RESET_USERNAME="$username" -e MONITOR_RESET_PASSWORD="$password" monitor python -c "import os; from dashboard_auth import AuthStore; AuthStore('/data/monitor.db').set_password(os.environ['MONITOR_RESET_USERNAME'], os.environ['MONITOR_RESET_PASSWORD'])"
+    set_env DASHBOARD_ADMIN_PASSWORD "$password"
+    printf 'Emergency administrator: %s\nNew password: %s\n' "$username" "$password"
+    ;;
+  renew-setup)
+    need_root; need_install
+    required="$(curl -fsS "$(health_url | sed 's#/api/health#/api/setup/status#')" | tr -d '[:space:]')"
+    [[ "$required" == *'"required":true'* ]] || fail "setup is already complete; refusing to reopen it"
+    token="$(openssl rand -hex 24)"
+    digest="$(printf '%s' "$token" | sha256sum | awk '{print $1}')"
+    set_env SETUP_TOKEN_HASH "$digest"
+    set_env SETUP_TOKEN_EXPIRES_AT "$(( $(date +%s) + 900 ))"
+    "${COMPOSE[@]}" up -d --no-build --force-recreate monitor
+    wait_healthy || fail "setup token renewed but health check failed"
+    printf 'One-time setup token (15 minutes): %s\n' "$token"
+    ;;
+  uninstall)
+    need_root; need_install
+    if [[ "${1:-}" == "--purge" ]]; then
+      "${COMPOSE[@]}" down -v --remove-orphans
+      printf 'services and persistent volume removed; files remain in %s\n' "$HOME_DIR"
+    else
+      "${COMPOSE[@]}" down --remove-orphans
+      printf 'services stopped; data volume and files preserved\n'
+    fi
+    ;;
+  -h|--help|help|'') usage ;;
+  *) fail "unknown command: $command" ;;
+esac

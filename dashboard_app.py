@@ -16,12 +16,13 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import FileResponse, JSONResponse
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from dashboard_auth import AuthStore
 from dashboard_data import DashboardRepository
 from dashboard_key_usage import KeyUsageClient, KeyUsageError, SlidingWindowRateLimiter, role_allows_key_lookup
 from dashboard_settings import SECRET_KEYS, SettingsStore
+from dashboard_setup import NewAPIProvisioner, SetupError, verify_setup_token
 from dashboard_sso import NewAPISessionVerifier
 from newapi_monitor import Config, MonitorApp, NotificationDispatcher, StateStore, env_bool, env_int
 
@@ -38,6 +39,44 @@ class LoginPayload(BaseModel):
 
     username: str = Field(min_length=1, max_length=128)
     password: str = Field(min_length=1, max_length=512)
+
+
+class SetupCompletePayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    setup_token: str = Field(min_length=8, max_length=512)
+    new_api_base_url: str = Field(min_length=8, max_length=2048)
+    username: str | None = Field(None, min_length=1, max_length=128)
+    password: str | None = Field(None, min_length=1, max_length=512)
+    new_api_access_token: str | None = Field(None, min_length=1, max_length=4096)
+    new_api_user_id: int | None = Field(None, ge=1)
+    relay_api_token: str | None = Field(None, min_length=1, max_length=4096)
+
+    @field_validator("new_api_base_url")
+    @classmethod
+    def validate_setup_base_url(cls, value: str) -> str:
+        parsed = urllib.parse.urlsplit(value.strip())
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            raise ValueError("new_api_base_url must be an absolute HTTP(S) URL")
+        if parsed.username or parsed.password or parsed.query or parsed.fragment:
+            raise ValueError("new_api_base_url must not contain credentials, query or fragment")
+        return value.strip().rstrip("/")
+
+    @model_validator(mode="after")
+    def validate_authentication_mode(self) -> "SetupCompletePayload":
+        credential_fields = bool(self.username or self.password)
+        token_fields = bool(
+            self.new_api_access_token or self.new_api_user_id or self.relay_api_token
+        )
+        credentials = bool(self.username and self.password)
+        tokens = bool(self.new_api_access_token and self.new_api_user_id and self.relay_api_token)
+        if credential_fields and not credentials:
+            raise ValueError("username and password must be provided together")
+        if token_fields and not tokens:
+            raise ValueError("management token, user ID and relay token must be provided together")
+        if credentials == tokens:
+            raise ValueError("provide either New API credentials or explicit tokens")
+        return self
 
 
 class SettingsUpdatePayload(BaseModel):
@@ -263,6 +302,10 @@ class Runtime:
         self.monitor_thread: threading.Thread | None = None
         self.monitor_stop = threading.Event()
         self.monitor_error = ""
+        self.setup_required = False
+        self.setup_token_hash = os.getenv("SETUP_TOKEN_HASH", "").strip().lower()
+        self.setup_token_expires_at = env_int("SETUP_TOKEN_EXPIRES_AT", 0)
+        self.monitor_lock = threading.Lock()
 
     def initialize(self) -> None:
         state_store = StateStore(self.state_db)
@@ -282,6 +325,15 @@ class Runtime:
         )
         if not os.getenv("MONITOR_SECRET_KEY", ""):
             LOGGER.warning("MONITOR_SECRET_KEY is not configured; sensitive settings are stored without application-level encryption")
+        values = self.settings.runtime_values()
+        configured = bool(
+            str(values.get("new_api_base_url") or "").strip()
+            and str(values.get("new_api_access_token") or "").strip()
+            and int(values.get("new_api_user_id") or 0) > 0
+        )
+        if not self.settings.is_setup_complete() and configured:
+            self.settings.complete_setup("legacy-bootstrap")
+        self.setup_required = not self.settings.is_setup_complete()
         bootstrap_rules = json.loads(os.getenv("REAL_PROBE_RULES", "{}") or "{}")
         self.settings.bootstrap_channel_settings({
             int(channel_id): {
@@ -303,7 +355,14 @@ class Runtime:
             cache_seconds=env_int("NEW_API_SSO_CACHE_SECONDS", 30),
         )
         self.refresh_repository()
-        if self.monitor_enabled:
+        if self.monitor_enabled and not self.setup_required:
+            self.start_monitor()
+
+    def start_monitor(self) -> None:
+        with self.monitor_lock:
+            if self.monitor_thread is not None and self.monitor_thread.is_alive():
+                return
+            self.monitor_stop.clear()
             self.monitor_thread = threading.Thread(
                 target=self._run_monitor,
                 name="newapi-monitor-worker",
@@ -446,6 +505,7 @@ class Runtime:
 
 runtime = Runtime()
 login_limiter = LoginRateLimiter()
+setup_limiter = LoginRateLimiter(attempts=5, window_seconds=600)
 key_usage_limiter = SlidingWindowRateLimiter()
 
 
@@ -498,6 +558,16 @@ async def security_headers(request: Request, call_next):
     return response
 
 
+@app.middleware("http")
+async def direct_monitor_prefix(request: Request, call_next):
+    path = request.scope.get("path", "")
+    if path == "/monitor/api" or path.startswith("/monitor/api/"):
+        normalized = path[len("/monitor"):]
+        request.scope["path"] = normalized
+        request.scope["raw_path"] = normalized.encode("utf-8")
+    return await call_next(request)
+
+
 def require_auth(request: Request) -> dict[str, Any]:
     if runtime.auth is None:
         raise HTTPException(status_code=503, detail="dashboard is starting")
@@ -545,6 +615,11 @@ def repository() -> DashboardRepository:
 @app.get("/api/health")
 def health() -> JSONResponse:
     details = system_health_snapshot()
+    if details["status"] == "setup_required":
+        return JSONResponse(
+            status_code=200,
+            content={"status": details["status"], "timestamp": details["timestamp"]},
+        )
     healthy = details["status"] == "ok"
     return JSONResponse(
         status_code=200 if healthy else 503,
@@ -560,7 +635,7 @@ def system_health_snapshot() -> dict[str, Any]:
     except Exception as error:
         database_ok = False
         database_error = str(error)
-    monitor_alive = not runtime.monitor_enabled or bool(
+    monitor_alive = runtime.setup_required or not runtime.monitor_enabled or bool(
         runtime.monitor_thread and runtime.monitor_thread.is_alive()
     )
     monitor_ok = monitor_alive and not runtime.monitor_error
@@ -573,10 +648,10 @@ def system_health_snapshot() -> dict[str, Any]:
         except Exception as error:
             database_ok = False
             database_error = str(error)
-    collectors_ok = all(item.get("status") != "stale" for item in collectors.values())
+    collectors_ok = runtime.setup_required or all(item.get("status") != "stale" for item in collectors.values())
     healthy = database_ok and monitor_ok and collectors_ok
     return {
-        "status": "ok" if healthy else "degraded",
+        "status": "setup_required" if runtime.setup_required and database_ok else ("ok" if healthy else "degraded"),
         "database": "ok" if database_ok else "degraded",
         "database_error": database_error,
         "monitor_worker": "disabled" if not runtime.monitor_enabled else ("running" if monitor_ok else "degraded"),
@@ -584,6 +659,84 @@ def system_health_snapshot() -> dict[str, Any]:
         "collectors": collectors,
         "timestamp": int(time.time()),
     }
+
+
+@app.get("/api/setup/status")
+def setup_status() -> dict[str, Any]:
+    now = int(time.time())
+    return {
+        "required": runtime.setup_required,
+        "available": bool(
+            runtime.setup_required
+            and runtime.setup_token_hash
+            and runtime.setup_token_expires_at > now
+        ),
+        "expires_at": runtime.setup_token_expires_at if runtime.setup_required else 0,
+    }
+
+
+@app.post("/api/setup/complete")
+async def complete_setup(payload: SetupCompletePayload, request: Request) -> dict[str, Any]:
+    if runtime.settings is None:
+        raise HTTPException(status_code=503, detail="settings are unavailable")
+    if not runtime.setup_required:
+        raise HTTPException(status_code=409, detail="setup is already complete")
+    remote_addr = runtime.remote_addr(request)
+    retry_after = setup_limiter.retry_after(remote_addr)
+    if retry_after:
+        raise HTTPException(
+            status_code=429,
+            detail="too many failed setup attempts",
+            headers={"Retry-After": str(retry_after)},
+        )
+    now = int(time.time())
+    token_valid = (
+        runtime.setup_token_expires_at > now
+        and verify_setup_token(payload.setup_token, runtime.setup_token_hash)
+    )
+    if not token_valid:
+        setup_limiter.fail(remote_addr)
+        await asyncio.sleep(0.35)
+        raise HTTPException(status_code=403, detail="invalid or expired setup token")
+
+    provisioner = NewAPIProvisioner()
+    try:
+        if payload.username and payload.password:
+            updates = await asyncio.to_thread(
+                provisioner.provision,
+                payload.new_api_base_url,
+                payload.username,
+                payload.password,
+            )
+        else:
+            assert payload.new_api_access_token is not None
+            assert payload.new_api_user_id is not None
+            assert payload.relay_api_token is not None
+            await asyncio.to_thread(
+                provisioner.validate_management_token,
+                payload.new_api_base_url,
+                payload.new_api_user_id,
+                payload.new_api_access_token,
+            )
+            updates = {
+                "new_api_base_url": payload.new_api_base_url,
+                "new_api_access_token": payload.new_api_access_token,
+                "new_api_user_id": payload.new_api_user_id,
+                "relay_api_token": payload.relay_api_token,
+            }
+    except SetupError as error:
+        setup_limiter.fail(remote_addr)
+        await asyncio.sleep(0.35)
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+    runtime.settings.update_settings(updates, "setup", remote_addr)
+    runtime.settings.complete_setup("setup")
+    runtime.setup_required = False
+    runtime.refresh_repository()
+    setup_limiter.clear(remote_addr)
+    if runtime.monitor_enabled:
+        runtime.start_monitor()
+    return {"completed": True, "new_api_user_id": int(updates["new_api_user_id"])}
 
 
 @app.get("/api/system/status")

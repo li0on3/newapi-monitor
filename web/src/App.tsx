@@ -186,6 +186,82 @@ function Login({ onSuccess }: { onSuccess: (username: string) => void }) {
   );
 }
 
+type SetupStatus = { required: boolean; available: boolean; expires_at: number };
+
+function SetupView({ status, onComplete }: { status: SetupStatus; onComplete: () => void }) {
+  const [mode, setMode] = useState<'credentials' | 'tokens'>('credentials');
+  const [setupToken, setSetupToken] = useState('');
+  const [baseUrl, setBaseUrl] = useState('');
+  const [username, setUsername] = useState('root');
+  const [password, setPassword] = useState('');
+  const [accessToken, setAccessToken] = useState('');
+  const [userId, setUserId] = useState('');
+  const [relayToken, setRelayToken] = useState('');
+  const [error, setError] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    setSubmitting(true);
+    setError('');
+    try {
+      await api('setup/complete', {
+        method: 'POST',
+        body: JSON.stringify({
+          setup_token: setupToken,
+          new_api_base_url: baseUrl,
+          ...(mode === 'credentials'
+            ? { username, password }
+            : { new_api_access_token: accessToken, new_api_user_id: Number(userId), relay_api_token: relayToken }),
+        }),
+      });
+      onComplete();
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : t('初始化失败'));
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  const canSubmit = status.available && setupToken && baseUrl && (mode === 'credentials'
+    ? username && password
+    : accessToken && Number(userId) > 0 && relayToken);
+
+  return (
+    <main className="login-shell setup-shell">
+      <section className="login-panel setup-panel">
+        <div className="login-language"><LanguageSwitch /></div>
+        <div className="setup-heading">
+          <div className="login-mark"><Network size={26} /></div>
+          <div><div className="eyebrow">SECURE FIRST-RUN SETUP</div><h1>{t('连接 New API')}</h1><p>{t('只需完成一次，配置将加密保存并立即启动监控。')}</p></div>
+        </div>
+        {!status.available && <div className="setup-expired"><AlertTriangle size={18} /><div><strong>{t('初始化令牌已过期')}</strong><span>{t('请在服务器运行 sudo monitorctl renew-setup 后刷新页面。')}</span></div></div>}
+        <form onSubmit={submit}>
+          <div className="setup-step"><span>01</span><div><strong>{t('验证安装')}</strong><small>{status.expires_at ? t('令牌有效期至 {{time}}', { time: formatFullTime(status.expires_at) }) : t('使用安装完成时显示的一次性令牌')}</small></div></div>
+          <label><span>{t('一次性初始化令牌')}</span><div className="input-wrap"><KeyRound size={17} /><input type="password" autoComplete="off" value={setupToken} onChange={(event) => setSetupToken(event.target.value)} /></div></label>
+          <div className="setup-step"><span>02</span><div><strong>{t('连接服务')}</strong><small>{t('凭据仅用于换取所需令牌，不会保存 New API 密码。')}</small></div></div>
+          <label><span>{t('New API 地址')}</span><div className="input-wrap"><Server size={17} /><input type="url" placeholder="https://newapi.example.com" value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} /></div></label>
+          <div className="setup-mode" role="tablist" aria-label={t('认证方式')}>
+            <button type="button" className={mode === 'credentials' ? 'active' : ''} onClick={() => setMode('credentials')}><ShieldCheck size={16} />{t('管理员账号')}</button>
+            <button type="button" className={mode === 'tokens' ? 'active' : ''} onClick={() => setMode('tokens')}><KeyRound size={16} />{t('已有令牌')}</button>
+          </div>
+          {mode === 'credentials' ? <div className="setup-grid">
+            <label><span>{t('New API 用户名')}</span><div className="input-wrap"><UserCog size={17} /><input autoComplete="username" value={username} onChange={(event) => setUsername(event.target.value)} /></div></label>
+            <label><span>{t('New API 密码')}</span><div className="input-wrap"><KeyRound size={17} /><input type="password" autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} /></div></label>
+          </div> : <div className="setup-grid">
+            <label className="setup-wide"><span>{t('New API 管理令牌')}</span><div className="input-wrap"><KeyRound size={17} /><input type="password" autoComplete="off" value={accessToken} onChange={(event) => setAccessToken(event.target.value)} /></div></label>
+            <label><span>{t('New API 用户 ID')}</span><div className="input-wrap"><Fingerprint size={17} /><input type="number" min="1" value={userId} onChange={(event) => setUserId(event.target.value)} /></div></label>
+            <label><span>{t('探测 API Key')}</span><div className="input-wrap"><Activity size={17} /><input type="password" autoComplete="off" value={relayToken} onChange={(event) => setRelayToken(event.target.value)} /></div></label>
+          </div>}
+          {error && <div className="form-error"><AlertTriangle size={16} />{error}</div>}
+          <div className="setup-security"><ShieldCheck size={17} /><span>{t('初始化接口受一次性令牌、有效期和速率限制保护；完成后自动关闭。')}</span></div>
+          <button className="primary-button" type="submit" disabled={submitting || !canSubmit}>{submitting ? <RefreshCw className="spin" size={17} /> : <CheckCircle2 size={17} />}{submitting ? t('正在初始化') : t('完成初始化并启动')}</button>
+        </form>
+      </section>
+    </main>
+  );
+}
+
 function Toggle({ checked, onChange, label }: { checked: boolean; onChange: (checked: boolean) => void; label: string }) {
   return <label className="toggle-row"><span>{label}</span><button type="button" className={classNames('switch', checked && 'switch-on')} role="switch" aria-label={label} aria-checked={checked} onClick={() => onChange(!checked)}><i /></button></label>;
 }
@@ -986,7 +1062,8 @@ function IncidentsView() {
 }
 
 export default function App() {
-  const [authState, setAuthState] = useState<'loading' | 'guest' | 'ready'>('loading');
+  const [authState, setAuthState] = useState<'loading' | 'setup' | 'guest' | 'ready'>('loading');
+  const [setupStatus, setSetupStatus] = useState<SetupStatus | null>(null);
   const [user, setUser] = useState<AuthUser | null>(null);
   const [route, setRoute] = useState<AppRoute>(() => readRoute());
   const [summary, setSummary] = useState<Summary | null>(null);
@@ -1006,7 +1083,18 @@ export default function App() {
     window.scrollTo({ top: 0, behavior: 'auto' });
   }, []);
 
-  useEffect(() => { api<AuthUser>('auth/me').then((result) => { setUser(result); setCountdown(result.dashboard_refresh_seconds || REFRESH_SECONDS); setAuthState('ready'); }).catch(() => setAuthState('guest')); }, []);
+  useEffect(() => {
+    api<SetupStatus>('setup/status').then((status) => {
+      setSetupStatus(status);
+      if (status.required) {
+        const base = window.location.pathname.startsWith('/monitor') ? '/monitor' : '';
+        window.history.replaceState(null, '', `${base}/setup`);
+        setAuthState('setup');
+        return;
+      }
+      api<AuthUser>('auth/me').then((result) => { setUser(result); setCountdown(result.dashboard_refresh_seconds || REFRESH_SECONDS); setAuthState('ready'); }).catch(() => setAuthState('guest'));
+    }).catch(() => setAuthState('guest'));
+  }, []);
   useEffect(() => {
     const onPopState = () => setRoute(readRoute());
     window.addEventListener('popstate', onPopState);
@@ -1052,6 +1140,7 @@ export default function App() {
 
   async function logout() { await api('auth/logout', { method: 'POST' }).catch(() => undefined); setAuthState('guest'); setUser(null); setSummary(null); }
   if (authState === 'loading') return <div className="boot-screen"><Activity className="spin" /><span>{t("正在建立安全会话")}</span></div>;
+  if (authState === 'setup' && setupStatus) return <SetupView status={setupStatus} onComplete={() => { const base = window.location.pathname.startsWith('/monitor') ? '/monitor/' : '/'; window.history.replaceState(null, '', base); setAuthState('guest'); }} />;
   if (authState === 'guest') return <Login onSuccess={(name) => { api<AuthUser>('auth/me').then((authenticatedUser) => setUser(authenticatedUser)).catch(() => setUser({ authenticated: true, username: name, role: 'admin', source: 'emergency', key_usage_available: true })); setAuthState('ready'); }} />;
 
   const elevated = user?.role === 'operator' || user?.role === 'admin';

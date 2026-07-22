@@ -21,6 +21,9 @@ Include the affected version or commit, impact and prerequisites, a minimal repr
 - Expose Docker only through the restricted Socket Proxy. Never mount the production Docker socket directly into the monitor container.
 - Keep emergency administrator credentials separate and rotate them regularly.
 - Run `python manage.py doctor` and inspect `git status --ignored` before publishing or deploying.
+- The one-click setup token is valid for only 15 minutes and is shown once. Do not expose the direct monitor port publicly before setup is complete.
+- The New API administrator password entered in the setup wizard is only exchanged for a management token and dedicated probe key; it is not persisted. Confirm `/api/setup/status` returns `required: false` after setup.
+- `monitorctl backup` includes both the database and environment encryption key. Treat every backup as production credentials and store it encrypted offline.
 
 ## Trust Boundaries
 

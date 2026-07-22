@@ -4,6 +4,20 @@
 
 ## Unreleased
 
+## 1.1.0 - 2026-07-22
+
+### Added
+
+- SHA-256-verified one-click Linux installer using pinned multi-architecture GHCR images and loopback binding by default.
+- First-run setup wizard with a 15-minute one-time token, automatic New API credential exchange, and explicit-token mode.
+- `monitorctl` lifecycle commands for status, logs, diagnostics, online backup, update, rollback, emergency admin reset, setup-token renewal, and safe uninstall.
+- GitHub Releases now attach the installer, deployment bundle, and checksum.
+
+### Security
+
+- The New API administrator password is only used in memory to exchange tokens and is never persisted, logged, or returned.
+- The setup endpoint closes after completion and is protected by a token hash, expiry, and failed-attempt throttling.
+
 ### Added
 
 - Collector freshness checks for channel synchronization, probes, usage logs, and resource sampling.

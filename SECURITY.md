@@ -26,6 +26,9 @@
 - Docker Socket 只能通过只读 Socket Proxy 暴露，不得将 Socket 直接挂载给生产监控容器。
 - 紧急管理员只用于 New API SSO 不可用时的恢复操作，密码应单独保管并定期轮换。
 - 上传公开仓库前运行 `python manage.py doctor` 并检查 `git status --ignored`。
+- 一键安装生成的初始化令牌只有 15 分钟有效且只显示一次；初始化前不要将本地监控端口直接暴露到公网。
+- 初始化向导中的 New API 管理员密码只用于换取管理令牌和独立探测 Key，不会持久化；初始化完成后应确认 `/api/setup/status` 返回 `required: false`。
+- `monitorctl backup` 会同时备份数据库和含加密密钥的环境文件，备份等同于生产凭据，必须离线加密保管。
 
 ## 信任边界
 

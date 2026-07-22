@@ -7,6 +7,7 @@ from dashboard_app import (
     ChannelSettingsPayload,
     KeyUsageQueryPayload,
     NotificationTestPayload,
+    SetupCompletePayload,
     SettingsUpdatePayload,
     require_admin,
     require_operator,
@@ -14,6 +15,49 @@ from dashboard_app import (
 
 
 class DashboardApiModelTests(unittest.TestCase):
+    def test_setup_requires_credentials_or_explicit_tokens(self):
+        with self.assertRaises(ValidationError):
+            SetupCompletePayload.model_validate(
+                {"setup_token": "setup-token", "new_api_base_url": "https://newapi.example"}
+            )
+        credentials = SetupCompletePayload.model_validate(
+            {
+                "setup_token": "setup-token",
+                "new_api_base_url": "https://newapi.example",
+                "username": "root",
+                "password": "strong-password",
+            }
+        )
+        self.assertEqual("root", credentials.username)
+        tokens = SetupCompletePayload.model_validate(
+            {
+                "setup_token": "setup-token",
+                "new_api_base_url": "https://newapi.example",
+                "new_api_access_token": "access-token",
+                "new_api_user_id": 1,
+                "relay_api_token": "probe-token",
+            }
+        )
+        self.assertEqual(1, tokens.new_api_user_id)
+
+        with self.assertRaises(ValidationError):
+            SetupCompletePayload.model_validate(
+                {
+                    "setup_token": "setup-token",
+                    "new_api_base_url": "https://newapi.example",
+                    "username": "root",
+                }
+            )
+        with self.assertRaises(ValidationError):
+            SetupCompletePayload.model_validate(
+                {
+                    "setup_token": "setup-token",
+                    "new_api_base_url": "https://newapi.example",
+                    "new_api_access_token": "access-token",
+                    "new_api_user_id": 1,
+                }
+            )
+
     def test_settings_reject_unknown_fields_and_credentials_in_base_url(self):
         with self.assertRaises(ValidationError):
             SettingsUpdatePayload.model_validate({"unexpected": True})

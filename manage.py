@@ -200,6 +200,7 @@ def command_release_check(_: argparse.Namespace) -> int:
         "README.md", "README_EN.md", "CONTRIBUTING.md", "CONTRIBUTING_EN.md",
         "SECURITY.md", "SECURITY_EN.md", "ROADMAP.md", "ROADMAP_EN.md",
         "CHANGELOG.md", "CHANGELOG_EN.md", "GITHUB_GUIDE.md", "GITHUB_GUIDE_EN.md", "LICENSE",
+        "install.sh", "monitorctl", "compose.yaml", ".env.example",
     )
     for name in required_files:
         if not (ROOT / name).is_file():
