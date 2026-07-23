@@ -713,11 +713,13 @@ class OpenAIStatusClient:
         status = summary.get("status")
         page = summary.get("page")
         components_raw = summary.get("components")
-        incidents_raw = summary.get("incidents")
+        incidents_raw = summary.get("incidents", [])
         if not isinstance(status, dict) or not isinstance(page, dict):
             raise RuntimeError("OpenAI Status summary is missing page or status")
-        if not isinstance(components_raw, list) or not isinstance(incidents_raw, list):
-            raise RuntimeError("OpenAI Status response is missing components or incidents")
+        if not isinstance(components_raw, list):
+            raise RuntimeError("OpenAI Status response is missing components")
+        if not isinstance(incidents_raw, list):
+            raise RuntimeError("OpenAI Status response contains invalid incidents")
 
         components: list[dict[str, Any]] = []
         for item in components_raw[:500]:
