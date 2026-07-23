@@ -968,6 +968,16 @@ class OpenAIStatusTests(unittest.TestCase):
         self.assertEqual("Responses", snapshot["components"][0]["name"])
         self.assertEqual("We are investigating.", snapshot["incidents"][0]["latest_update"]["body"])
 
+    def test_client_accepts_summary_without_incidents_key(self):
+        payload = self._summary()
+        payload.pop("incidents")
+
+        snapshot = newapi_monitor.OpenAIStatusClient(
+            fetch_json=lambda _url, _timeout: payload
+        ).fetch(observed_at=1234)
+
+        self.assertEqual([], snapshot["incidents"])
+
     def test_tracker_deduplicates_updates_and_resolves_official_incident(self):
         tracker_class = getattr(newapi_monitor, "OpenAIStatusTracker", None)
         client_class = getattr(newapi_monitor, "OpenAIStatusClient", None)

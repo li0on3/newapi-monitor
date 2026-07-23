@@ -4,6 +4,12 @@
 
 ## Unreleased
 
+## 1.2.2 - 2026-07-23
+
+### Fixed
+
+- Accept OpenAI status summaries that omit the `incidents` field when no incident is active, preventing repeated provider-collector failures and false degraded platform health.
+
 ## 1.2.1 - 2026-07-22
 
 ### Changed
