@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from dashboard_http import NoRedirectHandler
 from dashboard_setup import NewAPIProvisioner, SetupError, hash_setup_token, verify_setup_token
 from dashboard_settings import SettingsStore
 import dashboard_app
@@ -22,8 +23,9 @@ class FakeResponse:
     def __exit__(self, *_args):
         return False
 
-    def read(self):
-        return json.dumps(self.payload).encode("utf-8")
+    def read(self, size=-1):
+        body = json.dumps(self.payload).encode("utf-8")
+        return body if size < 0 else body[:size]
 
 
 class SetupTokenTests(unittest.TestCase):
@@ -36,6 +38,17 @@ class SetupTokenTests(unittest.TestCase):
 
 
 class NewAPIProvisionerTests(unittest.TestCase):
+    def test_default_provisioner_rejects_redirects_and_bounds_responses(self):
+        provisioner = NewAPIProvisioner()
+        self.assertTrue(any(isinstance(handler, NoRedirectHandler) for handler in provisioner.opener.handlers))
+
+        opener = mock.Mock()
+        opener.open.return_value = FakeResponse({"success": True, "data": "x" * 64})
+        with self.assertRaisesRegex(SetupError, "oversized response"):
+            NewAPIProvisioner(opener=opener, max_response_bytes=8).provision(
+                "https://newapi.example", "root", "password"
+            )
+
     def test_admin_credentials_are_exchanged_without_being_returned(self):
         opener = mock.Mock()
         opener.open.side_effect = [
@@ -113,6 +126,32 @@ class SetupEndpointTests(unittest.IsolatedAsyncioTestCase):
         normalized = await dashboard_app.direct_monitor_prefix(request, capture_path)
 
         self.assertEqual("/api/setup/status", normalized)
+
+    async def test_direct_monitor_prefix_is_normalized_for_frontend_routes_and_assets(self):
+        for original, expected in (
+            ("/monitor", "/"),
+            ("/monitor/console/keys", "/console/keys"),
+            ("/monitor/assets/index.js", "/assets/index.js"),
+        ):
+            request = Request(
+                {
+                    "type": "http",
+                    "method": "GET",
+                    "scheme": "http",
+                    "server": ("localhost", 80),
+                    "client": ("127.0.0.1", 1234),
+                    "path": original,
+                    "raw_path": original.encode("utf-8"),
+                    "query_string": b"",
+                    "headers": [],
+                }
+            )
+
+            async def capture_path(current):
+                return current.scope["path"]
+
+            normalized = await dashboard_app.direct_monitor_prefix(request, capture_path)
+            self.assertEqual(expected, normalized)
 
     async def test_invalid_setup_token_is_rejected_before_new_api_request(self):
         with tempfile.TemporaryDirectory() as temp_dir:

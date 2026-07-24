@@ -2,6 +2,7 @@ import io
 import json
 import unittest
 
+from dashboard_http import open_without_redirects
 from dashboard_key_usage import KeyUsageClient, KeyUsageError, role_allows_key_lookup
 
 
@@ -15,11 +16,23 @@ class FakeResponse:
     def __exit__(self, *_):
         return False
 
-    def read(self):
-        return self.body.read()
+    def read(self, size=-1):
+        return self.body.read(size)
 
 
 class KeyUsageClientTests(unittest.TestCase):
+    def test_default_client_rejects_redirects_and_bounds_responses(self):
+        client = KeyUsageClient("https://newapi.example")
+        self.assertIs(open_without_redirects, client.opener)
+
+        oversized = KeyUsageClient(
+            "https://newapi.example",
+            max_response_bytes=8,
+            opener=lambda _request, timeout: FakeResponse({"success": True, "data": "x" * 64}),
+        )
+        with self.assertRaisesRegex(KeyUsageError, "数据过大"):
+            oversized.query("sk-test", 10, 500_000)
+
     def test_queries_usage_and_recent_calls_without_returning_the_key(self):
         requests = []
         responses = {

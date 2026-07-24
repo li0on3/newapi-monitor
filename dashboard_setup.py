@@ -9,6 +9,8 @@ import urllib.parse
 import urllib.request
 from typing import Any
 
+from dashboard_http import NoRedirectHandler
+
 
 class SetupError(RuntimeError):
     pass
@@ -25,11 +27,18 @@ def verify_setup_token(token: str, expected_hash: str) -> bool:
 
 
 class NewAPIProvisioner:
-    def __init__(self, opener: Any | None = None, timeout_seconds: int = 30):
+    def __init__(
+        self,
+        opener: Any | None = None,
+        timeout_seconds: int = 30,
+        max_response_bytes: int = 4 * 1024 * 1024,
+    ):
         self.opener = opener or urllib.request.build_opener(
-            urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar())
+            urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()),
+            NoRedirectHandler(),
         )
         self.timeout_seconds = timeout_seconds
+        self.max_response_bytes = max(1, max_response_bytes)
 
     def _request(
         self,
@@ -52,12 +61,15 @@ class NewAPIProvisioner:
         )
         try:
             with self.opener.open(request, timeout=self.timeout_seconds) as response:
-                result = json.loads(response.read().decode("utf-8"))
+                raw = response.read(self.max_response_bytes + 1)
         except urllib.error.HTTPError as error:
-            detail = error.read().decode("utf-8", errors="replace")[:500]
-            raise SetupError(f"New API returned HTTP {error.code}: {detail}") from error
+            raise SetupError(f"New API returned HTTP {error.code}") from error
         except (urllib.error.URLError, TimeoutError, OSError) as error:
             raise SetupError(f"New API connection failed: {error}") from error
+        if len(raw) > self.max_response_bytes:
+            raise SetupError("New API returned an oversized response")
+        try:
+            result = json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
             raise SetupError("New API returned invalid JSON") from error
         if not isinstance(result, dict):

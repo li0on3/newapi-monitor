@@ -21,6 +21,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from dashboard_auth import AuthStore
 from dashboard_data import DashboardRepository
 from dashboard_key_usage import KeyUsageClient, KeyUsageError, SlidingWindowRateLimiter, role_allows_key_lookup
+from dashboard_newapi_console import NewAPIConsoleClient, NewAPIConsoleError
 from dashboard_settings import SECRET_KEYS, SettingsStore
 from dashboard_setup import NewAPIProvisioner, SetupError, verify_setup_token
 from dashboard_sso import NewAPISessionVerifier
@@ -148,6 +149,15 @@ class SettingsUpdatePayload(BaseModel):
     key_usage_log_limit: int | None = Field(None, ge=10, le=500)
     key_usage_attempts_per_minute: int | None = Field(None, ge=1, le=120)
     key_usage_quota_per_unit: float | None = Field(None, gt=0, le=1_000_000_000)
+    console_enabled: bool | None = None
+    console_min_role: str | None = Field(None, pattern="^(viewer|operator|admin)$")
+    console_overview_enabled: bool | None = None
+    console_analytics_enabled: bool | None = None
+    console_keys_enabled: bool | None = None
+    console_logs_enabled: bool | None = None
+    console_default_days: int | None = Field(None, ge=1, le=30)
+    console_write_attempts_per_minute: int | None = Field(None, ge=1, le=120)
+    console_reveal_attempts_per_minute: int | None = Field(None, ge=1, le=30)
     openai_status_enabled: bool | None = None
     openai_status_alert_enabled: bool | None = None
     openai_status_interval_seconds: int | None = Field(None, ge=30, le=3600)
@@ -236,6 +246,61 @@ class KeyUsageQueryPayload(BaseModel):
         normalized = value.strip()
         if normalized != value or any(character.isspace() or ord(character) < 32 for character in value):
             raise ValueError("api_key must not contain whitespace or control characters")
+        return normalized
+
+
+class ConsoleTokenPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=50)
+    remain_quota: int = Field(0, ge=0, le=9_000_000_000_000_000)
+    expired_time: int = Field(-1, ge=-1, le=4_102_444_800)
+    unlimited_quota: bool = False
+    model_limits_enabled: bool = False
+    model_limits: str = Field("", max_length=8192)
+    allow_ips: str = Field("", max_length=4096)
+    group: str = Field("", max_length=128)
+    cross_group_retry: bool = False
+
+    @field_validator("name")
+    @classmethod
+    def validate_console_name(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("name must not be blank")
+        if any(ord(character) < 32 for character in normalized):
+            raise ValueError("text fields must not contain control characters")
+        return normalized
+
+    @field_validator("group")
+    @classmethod
+    def validate_console_text(cls, value: str) -> str:
+        normalized = value.strip()
+        if any(ord(character) < 32 for character in normalized):
+            raise ValueError("text fields must not contain control characters")
+        return normalized
+
+
+class ConsoleTokenStatusPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: int = Field(ge=1, le=2)
+
+
+class ConsoleBatchPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    ids: list[int] = Field(min_length=1, max_length=100)
+
+    @field_validator("ids")
+    @classmethod
+    def validate_console_ids(cls, value: list[int]) -> list[int]:
+        normalized: list[int] = []
+        for token_id in value:
+            if token_id <= 0:
+                raise ValueError("ids must contain positive integers")
+            if token_id not in normalized:
+                normalized.append(token_id)
         return normalized
 
 
@@ -512,6 +577,15 @@ class Runtime:
             "key_usage_log_limit": env_int("KEY_USAGE_LOG_LIMIT", 100),
             "key_usage_attempts_per_minute": env_int("KEY_USAGE_ATTEMPTS_PER_MINUTE", 10),
             "key_usage_quota_per_unit": float(os.getenv("KEY_USAGE_QUOTA_PER_UNIT", "500000")),
+            "console_enabled": env_bool("CONSOLE_ENABLED", True),
+            "console_min_role": os.getenv("CONSOLE_MIN_ROLE", "viewer"),
+            "console_overview_enabled": env_bool("CONSOLE_OVERVIEW_ENABLED", True),
+            "console_analytics_enabled": env_bool("CONSOLE_ANALYTICS_ENABLED", True),
+            "console_keys_enabled": env_bool("CONSOLE_KEYS_ENABLED", True),
+            "console_logs_enabled": env_bool("CONSOLE_LOGS_ENABLED", True),
+            "console_default_days": env_int("CONSOLE_DEFAULT_DAYS", 7),
+            "console_write_attempts_per_minute": env_int("CONSOLE_WRITE_ATTEMPTS_PER_MINUTE", 30),
+            "console_reveal_attempts_per_minute": env_int("CONSOLE_REVEAL_ATTEMPTS_PER_MINUTE", 6),
             "openai_status_enabled": env_bool("OPENAI_STATUS_ENABLED", True),
             "openai_status_alert_enabled": env_bool("OPENAI_STATUS_ALERT_ENABLED", True),
             "openai_status_interval_seconds": env_int("OPENAI_STATUS_INTERVAL_SECONDS", 60),
@@ -548,6 +622,9 @@ class Runtime:
 
     def remote_addr(self, request: Request) -> str:
         if self.trust_proxy_headers:
+            real_ip = request.headers.get("x-real-ip", "").strip()
+            if real_ip:
+                return real_ip[:128]
             forwarded = request.headers.get("x-forwarded-for", "").split(",", 1)[0].strip()
             if forwarded:
                 return forwarded[:128]
@@ -558,6 +635,8 @@ runtime = Runtime()
 login_limiter = LoginRateLimiter()
 setup_limiter = LoginRateLimiter(attempts=5, window_seconds=600)
 key_usage_limiter = SlidingWindowRateLimiter()
+console_write_limiter = SlidingWindowRateLimiter()
+console_reveal_limiter = SlidingWindowRateLimiter()
 
 
 @asynccontextmanager
@@ -612,8 +691,8 @@ async def security_headers(request: Request, call_next):
 @app.middleware("http")
 async def direct_monitor_prefix(request: Request, call_next):
     path = request.scope.get("path", "")
-    if path == "/monitor/api" or path.startswith("/monitor/api/"):
-        normalized = path[len("/monitor"):]
+    if path == "/monitor" or path.startswith("/monitor/"):
+        normalized = path[len("/monitor"):] or "/"
         request.scope["path"] = normalized
         request.scope["raw_path"] = normalized.encode("utf-8")
     return await call_next(request)
@@ -651,6 +730,49 @@ def require_admin(user: AuthenticatedUser) -> dict[str, Any]:
     if user["role"] != "admin":
         raise HTTPException(status_code=403, detail="administrator permission required")
     return user
+
+
+def require_console_access(
+    user: dict[str, Any],
+    values: dict[str, Any],
+    page: str,
+) -> dict[str, Any]:
+    if user.get("source") != "newapi" or int(user.get("user_id") or 0) <= 0:
+        raise HTTPException(status_code=403, detail="客户控制台必须使用 New API 会话登录")
+    if not bool(values.get("console_enabled", True)):
+        raise HTTPException(status_code=404, detail="客户控制台未启用")
+    role_order = {"viewer": 0, "operator": 1, "admin": 2}
+    role = str(user.get("role") or "viewer")
+    minimum = str(values.get("console_min_role") or "viewer")
+    if role_order.get(role, -1) < role_order.get(minimum, 0):
+        raise HTTPException(status_code=403, detail="当前账号无权访问客户控制台")
+    if page not in {"overview", "analytics", "keys", "logs"}:
+        raise HTTPException(status_code=404, detail="客户控制台页面不存在")
+    if not bool(values.get(f"console_{page}_enabled", True)):
+        raise HTTPException(status_code=404, detail="该客户控制台页面未启用")
+    return user
+
+
+def console_capabilities(user: dict[str, Any], values: dict[str, Any]) -> dict[str, Any]:
+    role_order = {"viewer": 0, "operator": 1, "admin": 2}
+    source_available = user.get("source") == "newapi" and int(user.get("user_id") or 0) > 0
+    role = str(user.get("role") or "viewer")
+    minimum = str(values.get("console_min_role") or "viewer")
+    base_available = bool(values.get("console_enabled", True)) and source_available and (
+        role_order.get(role, -1) >= role_order.get(minimum, 0)
+    )
+    pages = {
+        page: bool(values.get(f"console_{page}_enabled", True))
+        for page in ("overview", "analytics", "keys", "logs")
+    } if base_available else {}
+    available = base_available and any(pages.values())
+    if not available:
+        pages = {}
+    return {
+        "available": available,
+        "pages": pages,
+        "global_scope": available and int(user.get("source_role") or 0) >= 10,
+    }
 
 
 OperatorUser = Annotated[dict[str, Any], Depends(require_operator)]
@@ -856,7 +978,16 @@ def me(user: AuthenticatedUser) -> dict[str, Any]:
         key_usage_available = bool(values.get("key_usage_enabled", True)) and role_allows_key_lookup(
             str(user["role"]), str(values.get("key_usage_min_role", "admin"))
         )
-    return {"authenticated": True, **user, "dashboard_refresh_seconds": refresh_seconds, "key_usage_available": key_usage_available}
+    capabilities = console_capabilities(user, values if runtime.settings is not None else {})
+    return {
+        "authenticated": True,
+        **user,
+        "dashboard_refresh_seconds": refresh_seconds,
+        "key_usage_available": key_usage_available,
+        "console_available": capabilities["available"],
+        "console_pages": capabilities["pages"],
+        "console_global_scope": capabilities["global_scope"],
+    }
 
 
 @app.post("/api/key-usage/query")
@@ -887,6 +1018,407 @@ def query_key_usage(payload: KeyUsageQueryPayload, request: Request, user: Authe
     for item in result["calls"]:
         item["channel_name"] = channel_names.get(int(item["channel_id"]), "")
     return result
+
+
+def console_values() -> dict[str, Any]:
+    if runtime.settings is None:
+        raise HTTPException(status_code=503, detail="settings are unavailable")
+    return runtime.settings.runtime_values()
+
+
+def console_client(values: dict[str, Any]) -> NewAPIConsoleClient:
+    return NewAPIConsoleClient(str(values.get("new_api_base_url") or ""))
+
+
+def console_identity(
+    request: Request,
+    user: dict[str, Any],
+    values: dict[str, Any],
+    page: str,
+) -> tuple[str, int]:
+    require_console_access(user, values, page)
+    session_cookie = request.cookies.get("session", "")
+    if not session_cookie:
+        raise HTTPException(status_code=401, detail="New API session is required")
+    return session_cookie, int(user["user_id"])
+
+
+def console_time_range(
+    start_timestamp: int | None,
+    end_timestamp: int | None,
+    source_role: int,
+    default_days: int,
+) -> tuple[int, int]:
+    now = int(time.time())
+    end = end_timestamp or now
+    start = start_timestamp or end - max(1, min(default_days, 30)) * 86400
+    if start <= 0 or end <= 0 or start > end:
+        raise HTTPException(status_code=422, detail="invalid time range")
+    max_seconds = 366 * 86400 if source_role >= 10 else 30 * 86400
+    if end - start > max_seconds:
+        raise HTTPException(status_code=422, detail="time range is too large")
+    return start, end
+
+
+def console_rate_limit(
+    limiter: SlidingWindowRateLimiter,
+    request: Request,
+    user: dict[str, Any],
+    attempts: int,
+) -> None:
+    retry_after = limiter.consume(
+        f"{int(user['user_id'])}:{runtime.remote_addr(request)}",
+        max(1, attempts),
+    )
+    if retry_after:
+        raise HTTPException(status_code=429, detail=f"操作过于频繁，请 {retry_after} 秒后重试")
+
+
+def raise_console_error(error: NewAPIConsoleError) -> None:
+    raise HTTPException(status_code=error.status_code, detail=str(error)) from error
+
+
+@app.get("/api/console/capabilities")
+def get_console_capabilities(user: AuthenticatedUser) -> dict[str, Any]:
+    return console_capabilities(user, console_values())
+
+
+@app.get("/api/console/overview")
+def get_console_overview(request: Request, user: AuthenticatedUser) -> dict[str, Any]:
+    values = console_values()
+    session_cookie, user_id = console_identity(request, user, values, "overview")
+    client = console_client(values)
+    now = int(time.time())
+    try:
+        system = client.status(session_cookie, user_id)
+        self_info = client.self_info(session_cookie, user_id)
+        models = client.models(session_cookie, user_id)
+        keys = (
+            client.list_tokens(session_cookie, user_id, page=1, page_size=5)
+            if bool(values.get("console_keys_enabled", True))
+            else {"page": 1, "page_size": 5, "total": 0, "items": []}
+        )
+        usage = client.log_stat(
+            session_cookie,
+            user_id,
+            int(user.get("source_role") or 0),
+            start_timestamp=now - 86400,
+            end_timestamp=now,
+        )
+    except NewAPIConsoleError as error:
+        raise_console_error(error)
+    return {
+        "generated_at": now,
+        "system": system,
+        "user": self_info,
+        "models": {"total": len(models), "items": models[:12]},
+        "keys": keys,
+        "usage_24h": usage,
+        "scope": "global" if int(user.get("source_role") or 0) >= 10 else "self",
+    }
+
+
+@app.get("/api/console/analytics")
+def get_console_analytics(
+    request: Request,
+    user: AuthenticatedUser,
+    start_timestamp: int | None = Query(None, ge=1),
+    end_timestamp: int | None = Query(None, ge=1),
+    username: str = Query("", max_length=128),
+) -> dict[str, Any]:
+    values = console_values()
+    session_cookie, user_id = console_identity(request, user, values, "analytics")
+    source_role = int(user.get("source_role") or 0)
+    if username and source_role < 10:
+        raise HTTPException(status_code=403, detail="普通用户不能查询其他账号")
+    start, end = console_time_range(
+        start_timestamp,
+        end_timestamp,
+        source_role,
+        int(values.get("console_default_days", 7)),
+    )
+    client = console_client(values)
+    try:
+        result = client.analytics(
+            session_cookie,
+            user_id,
+            source_role,
+            start,
+            end,
+            username=username.strip(),
+        )
+        result["quota_per_unit"] = client.status(session_cookie, user_id)["quota_per_unit"]
+        return result
+    except NewAPIConsoleError as error:
+        raise_console_error(error)
+
+
+@app.get("/api/console/keys")
+def get_console_keys(
+    request: Request,
+    user: AuthenticatedUser,
+    page: int = Query(1, ge=1, le=100000),
+    page_size: int = Query(20, ge=1, le=100),
+    keyword: str = Query("", max_length=128),
+) -> dict[str, Any]:
+    values = console_values()
+    session_cookie, user_id = console_identity(request, user, values, "keys")
+    client = console_client(values)
+    try:
+        result = client.list_tokens(
+            session_cookie,
+            user_id,
+            page=page,
+            page_size=page_size,
+            keyword=keyword.strip(),
+        )
+        result["quota_per_unit"] = client.status(session_cookie, user_id)["quota_per_unit"]
+        return result
+    except NewAPIConsoleError as error:
+        raise_console_error(error)
+
+
+@app.get("/api/console/keys/options")
+def get_console_key_options(request: Request, user: AuthenticatedUser) -> dict[str, Any]:
+    values = console_values()
+    session_cookie, user_id = console_identity(request, user, values, "keys")
+    client = console_client(values)
+    try:
+        status = client.status(session_cookie, user_id)
+        return {
+            "models": client.models(session_cookie, user_id),
+            "groups": client.groups(session_cookie, user_id),
+            "quota_per_unit": status["quota_per_unit"],
+        }
+    except NewAPIConsoleError as error:
+        raise_console_error(error)
+
+
+@app.post("/api/console/keys")
+def create_console_key(
+    payload: ConsoleTokenPayload,
+    request: Request,
+    user: AuthenticatedUser,
+) -> dict[str, Any]:
+    values = console_values()
+    session_cookie, user_id = console_identity(request, user, values, "keys")
+    console_rate_limit(
+        console_write_limiter,
+        request,
+        user,
+        int(values.get("console_write_attempts_per_minute", 30)),
+    )
+    body = payload.model_dump()
+    try:
+        console_client(values).create_token(session_cookie, user_id, body)
+    except NewAPIConsoleError as error:
+        raise_console_error(error)
+    if runtime.settings is not None:
+        runtime.settings.record_audit(
+            str(user["username"]), "console.token.create", "token:new", {}, body,
+            runtime.remote_addr(request),
+        )
+    return {"created": True}
+
+
+@app.put("/api/console/keys/{token_id}")
+def update_console_key(
+    token_id: int,
+    payload: ConsoleTokenPayload,
+    request: Request,
+    user: AuthenticatedUser,
+) -> dict[str, Any]:
+    if token_id <= 0:
+        raise HTTPException(status_code=422, detail="invalid token id")
+    values = console_values()
+    session_cookie, user_id = console_identity(request, user, values, "keys")
+    console_rate_limit(
+        console_write_limiter,
+        request,
+        user,
+        int(values.get("console_write_attempts_per_minute", 30)),
+    )
+    client = console_client(values)
+    try:
+        before = client.get_token(session_cookie, user_id, token_id)
+        updated = client.update_token(session_cookie, user_id, {"id": token_id, **payload.model_dump()})
+    except NewAPIConsoleError as error:
+        raise_console_error(error)
+    if runtime.settings is not None:
+        runtime.settings.record_audit(
+            str(user["username"]), "console.token.update", f"token:{token_id}", before, updated,
+            runtime.remote_addr(request),
+        )
+    return {"item": updated}
+
+
+@app.put("/api/console/keys/{token_id}/status")
+def update_console_key_status(
+    token_id: int,
+    payload: ConsoleTokenStatusPayload,
+    request: Request,
+    user: AuthenticatedUser,
+) -> dict[str, Any]:
+    if token_id <= 0:
+        raise HTTPException(status_code=422, detail="invalid token id")
+    values = console_values()
+    session_cookie, user_id = console_identity(request, user, values, "keys")
+    console_rate_limit(
+        console_write_limiter,
+        request,
+        user,
+        int(values.get("console_write_attempts_per_minute", 30)),
+    )
+    client = console_client(values)
+    try:
+        before = client.get_token(session_cookie, user_id, token_id)
+        updated = client.set_token_status(session_cookie, user_id, token_id, payload.status)
+    except NewAPIConsoleError as error:
+        raise_console_error(error)
+    if runtime.settings is not None:
+        runtime.settings.record_audit(
+            str(user["username"]), "console.token.status", f"token:{token_id}",
+            {"status": before.get("status")}, {"status": updated.get("status")},
+            runtime.remote_addr(request),
+        )
+    return {"item": updated}
+
+
+@app.delete("/api/console/keys/{token_id}")
+def delete_console_key(token_id: int, request: Request, user: AuthenticatedUser) -> dict[str, Any]:
+    if token_id <= 0:
+        raise HTTPException(status_code=422, detail="invalid token id")
+    values = console_values()
+    session_cookie, user_id = console_identity(request, user, values, "keys")
+    console_rate_limit(
+        console_write_limiter,
+        request,
+        user,
+        int(values.get("console_write_attempts_per_minute", 30)),
+    )
+    client = console_client(values)
+    try:
+        before = client.get_token(session_cookie, user_id, token_id)
+        client.delete_token(session_cookie, user_id, token_id)
+    except NewAPIConsoleError as error:
+        raise_console_error(error)
+    if runtime.settings is not None:
+        runtime.settings.record_audit(
+            str(user["username"]), "console.token.delete", f"token:{token_id}", before, {},
+            runtime.remote_addr(request),
+        )
+    return {"deleted": True}
+
+
+@app.post("/api/console/keys/batch-delete")
+def batch_delete_console_keys(
+    payload: ConsoleBatchPayload,
+    request: Request,
+    user: AuthenticatedUser,
+) -> dict[str, Any]:
+    values = console_values()
+    session_cookie, user_id = console_identity(request, user, values, "keys")
+    console_rate_limit(
+        console_write_limiter,
+        request,
+        user,
+        int(values.get("console_write_attempts_per_minute", 30)),
+    )
+    try:
+        deleted = console_client(values).batch_delete_tokens(session_cookie, user_id, payload.ids)
+    except NewAPIConsoleError as error:
+        raise_console_error(error)
+    if runtime.settings is not None:
+        runtime.settings.record_audit(
+            str(user["username"]), "console.token.batch-delete", "tokens", {"ids": payload.ids},
+            {"deleted": deleted}, runtime.remote_addr(request),
+        )
+    return {"deleted": deleted}
+
+
+@app.post("/api/console/keys/{token_id}/reveal")
+def reveal_console_key(token_id: int, request: Request, user: AuthenticatedUser) -> dict[str, Any]:
+    if token_id <= 0:
+        raise HTTPException(status_code=422, detail="invalid token id")
+    values = console_values()
+    session_cookie, user_id = console_identity(request, user, values, "keys")
+    console_rate_limit(
+        console_reveal_limiter,
+        request,
+        user,
+        int(values.get("console_reveal_attempts_per_minute", 6)),
+    )
+    try:
+        key = console_client(values).reveal_token(session_cookie, user_id, token_id)
+    except NewAPIConsoleError as error:
+        raise_console_error(error)
+    if not key:
+        raise HTTPException(status_code=502, detail="New API did not return the key")
+    if runtime.settings is not None:
+        runtime.settings.record_audit(
+            str(user["username"]), "console.token.reveal", f"token:{token_id}", {},
+            {"revealed": True}, runtime.remote_addr(request),
+        )
+    return {"key": key}
+
+
+@app.get("/api/console/logs")
+def get_console_logs(
+    request: Request,
+    user: AuthenticatedUser,
+    page: int = Query(1, ge=1, le=100000),
+    page_size: int = Query(20, ge=1, le=100),
+    log_type: int = Query(0, ge=0, le=7),
+    start_timestamp: int | None = Query(None, ge=1),
+    end_timestamp: int | None = Query(None, ge=1),
+    username: str = Query("", max_length=128),
+    token_name: str = Query("", max_length=128),
+    model_name: str = Query("", max_length=256),
+    channel: int = Query(0, ge=0),
+    group: str = Query("", max_length=128),
+    request_id: str = Query("", max_length=128),
+    upstream_request_id: str = Query("", max_length=256),
+) -> dict[str, Any]:
+    values = console_values()
+    session_cookie, user_id = console_identity(request, user, values, "logs")
+    source_role = int(user.get("source_role") or 0)
+    if source_role < 10 and (username or channel):
+        raise HTTPException(status_code=403, detail="普通用户不能查询其他账号或渠道")
+    start, end = console_time_range(
+        start_timestamp,
+        end_timestamp,
+        source_role,
+        int(values.get("console_default_days", 7)),
+    )
+    filters = {
+        "type": log_type,
+        "start_timestamp": start,
+        "end_timestamp": end,
+        "username": username.strip(),
+        "token_name": token_name.strip(),
+        "model_name": model_name.strip(),
+        "channel": channel,
+        "group": group.strip(),
+        "request_id": request_id.strip(),
+        "upstream_request_id": upstream_request_id.strip(),
+    }
+    client = console_client(values)
+    try:
+        result = client.list_logs(
+            session_cookie, user_id, source_role, page=page, page_size=page_size, **filters,
+        )
+        stat_filters_complete = not (request_id or upstream_request_id)
+        result["stat"] = (
+            client.log_stat(session_cookie, user_id, source_role, **filters)
+            if stat_filters_complete
+            else None
+        )
+        result["stat_filters_complete"] = stat_filters_complete
+        result["quota_per_unit"] = client.status(session_cookie, user_id)["quota_per_unit"]
+        result["scope"] = "global" if source_role >= 10 else "self"
+        return result
+    except NewAPIConsoleError as error:
+        raise_console_error(error)
 
 
 @app.get("/api/dashboard/summary")

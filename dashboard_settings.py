@@ -444,9 +444,52 @@ class SettingsStore:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def record_audit(
+        self,
+        actor: str,
+        action: str,
+        target: str,
+        before: Any,
+        after: Any,
+        remote_addr: str = "",
+    ) -> None:
+        now = int(time.time())
+        with self._connect() as connection:
+            self._audit(
+                connection,
+                now,
+                actor[:128],
+                action[:128],
+                target[:256],
+                self._redact_audit_payload(before),
+                self._redact_audit_payload(after),
+                remote_addr,
+            )
+            connection.commit()
+
     @staticmethod
     def _audit_value(key: str, value: Any) -> Any:
         return "********" if key in SECRET_KEYS and value else value
+
+    @classmethod
+    def _redact_audit_payload(cls, value: Any, key: str = "") -> Any:
+        normalized_key = key.lower().replace("-", "_")
+        sensitive = any(
+            marker in normalized_key
+            for marker in ("password", "secret", "token", "api_key", "access_key", "webhook_url")
+        ) or normalized_key in {"key", "authorization", "cookie", "session"}
+        if sensitive and value is not None and value != "":
+            return "********"
+        if isinstance(value, dict):
+            return {
+                str(child_key)[:128]: cls._redact_audit_payload(child_value, str(child_key))
+                for child_key, child_value in value.items()
+            }
+        if isinstance(value, list):
+            return [cls._redact_audit_payload(item, key) for item in value[:500]]
+        if isinstance(value, str):
+            return value[:4000]
+        return value
 
     def _encode_value(self, key: str, value: Any) -> Any:
         if key not in SECRET_KEYS or self.cipher is None or value in {None, ""}:

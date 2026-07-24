@@ -9,6 +9,8 @@ from collections import Counter, deque
 from threading import Lock
 from typing import Any, Callable
 
+from dashboard_http import open_without_redirects
+
 
 ROLE_ORDER = {"viewer": 0, "operator": 1, "admin": 2}
 
@@ -45,10 +47,12 @@ class KeyUsageClient:
         self,
         base_url: str,
         timeout_seconds: int = 12,
-        opener: Callable[..., Any] = urllib.request.urlopen,
+        max_response_bytes: int = 4 * 1024 * 1024,
+        opener: Callable[..., Any] = open_without_redirects,
     ):
         self.base_url = base_url.rstrip("/")
         self.timeout_seconds = timeout_seconds
+        self.max_response_bytes = max(1, max_response_bytes)
         self.opener = opener
 
     def query(self, api_key: str, log_limit: int, quota_per_unit: float) -> dict[str, Any]:
@@ -108,13 +112,19 @@ class KeyUsageClient:
         )
         try:
             with self.opener(request, timeout=self.timeout_seconds) as response:
-                payload = json.loads(response.read().decode("utf-8"))
+                raw = response.read(self.max_response_bytes + 1)
         except urllib.error.HTTPError as error:
             if error.code in {401, 403}:
                 raise KeyUsageError("Key 无效、已过期或无权读取用量") from error
             raise KeyUsageError(f"New API 查询失败（HTTP {error.code}）") from error
-        except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError) as error:
+        except (urllib.error.URLError, TimeoutError, OSError) as error:
             raise KeyUsageError("暂时无法连接 New API，请稍后重试") from error
+        if len(raw) > self.max_response_bytes:
+            raise KeyUsageError("New API 返回的数据过大")
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise KeyUsageError("New API 返回的数据格式不受支持") from error
         if not isinstance(payload, dict):
             raise KeyUsageError("New API 返回的数据格式不受支持")
         if payload.get("success") is False or payload.get("code") is False:

@@ -33,4 +33,22 @@ describe('translations', () => {
     expect(translate('业务相关组件', 'en')).toBe('Workload-relevant components')
     expect(translate('官方状态页可见范围', 'en')).toBe('Official status page visibility')
   })
+
+  test('translates the customer console and its security boundary', () => {
+    expect(translate('客户控制台', 'en')).toBe('Customer console')
+    expect(translate('API 密钥', 'en')).toBe('API keys')
+    expect(translate('数据看板', 'en')).toBe('Analytics')
+    expect(translate('业务数据不落监控库；每次请求由 New API Session 再鉴权。', 'en')).toBe(
+      'Business data is not stored in the monitor database; every request is re-authorized by New API Session.',
+    )
+    expect(translate('错误', 'en')).toBe('Error')
+    expect(translate('全部', 'en')).toBe('All')
+    expect(translate('次调用', 'en')).toBe('calls')
+    expect(translate('首字', 'en')).toBe('First token')
+    expect(translate('调用渠道', 'en')).toBe('Channel')
+    expect(translate('账号、额度与快捷入口', 'en')).toBe('Account, quota, and quick actions')
+    expect(translate('第 {{page}}/{{pages}} 页 · {{total}} 条记录', 'en', { page: 2, pages: 5, total: 88 })).toBe(
+      'Page 2 of 5 · 88 records',
+    )
+  })
 })
