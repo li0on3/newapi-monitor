@@ -24,6 +24,10 @@ Every screenshot below is generated from the built-in synthetic demo dataset. It
 
 ![Incident investigation page generated from synthetic data](docs/screenshots/incidents-demo-zh.png)
 
+### Customer Console
+
+![Customer Console generated from synthetic data](docs/screenshots/customer-console-demo-zh.png)
+
 ## Features
 
 - Automatically synchronizes enabled New API channels and hides disabled channels.
@@ -38,6 +42,8 @@ Every screenshot below is generated from the built-in synthetic demo dataset. It
 - Reuses New API sessions for SSO, with role mapping, an emergency administrator, login throttling, and configuration auditing.
 - Automatically follows the browser language for Chinese or English, with a persistent manual switch in the page header.
 - Stores runtime configuration in the monitor database and never writes configuration back to New API.
+- Provides a standalone Customer Console for overview, analytics, API keys, and real usage logs. Business data always comes from the current user's New API session and is not copied into a second customer database.
+- Supports API key create, edit, enable/disable, delete, batch delete, and one-time plaintext reveal. Plaintext keys are not stored in the monitor database, logs, audit records, or browser storage.
 - Maintains separate channel visibility lists for administrators/operators and regular viewers.
 - Synchronizes OpenAI status, components, and incidents from the official JSON feed. A dedicated page separates workload-relevant components from global incidents, while the overview keeps only a compact contextual hint and real local probes remain authoritative.
 
@@ -76,6 +82,11 @@ Publish `/monitor/` through an HTTPS reverse proxy and forward every nested path
 /monitor/system                 System settings
 /monitor/system/notifications   Notification center
 /monitor/system/providers       Upstream provider settings
+/monitor/system/console         Customer Console settings
+/monitor/console                Customer overview
+/monitor/console/analytics      Customer analytics
+/monitor/console/keys           Customer API keys
+/monitor/console/logs           Customer usage logs
 ```
 
 Every configured notification channel can trigger a real test alert from the UI, even while the channel is disabled. Unsaved changes must be saved first so the test always uses the active configuration.
@@ -119,12 +130,16 @@ HTTP 503 is returned when SQLite is unavailable, the monitoring worker has stopp
 - Docker access is restricted through a read-only Socket Proxy; the monitor does not mount the Docker socket directly.
 - State-changing APIs require authentication, role checks, strict Pydantic schemas, and a same-origin request header.
 - Regular New API users can only see the overview by default. Operators can inspect logs, resources, incidents, and channels. Monitor administrators can manage settings and role mappings.
+- Customer Console access requires a New API session. Monitor roles only control entry visibility; global versus self-only data remains governed by the original New API role. Emergency administrators cannot access the console.
+- Deploy the Customer Console on the same browser Origin as New API (preferably under `/monitor/`) so the browser can reuse both the New API Session and `uid`.
+- The console BFF exposes only fixed New API API routes and never accepts arbitrary upstream URLs, paths, or headers. Regular users can query at most 30 days per request.
+- Customer business data is read on demand and is not persisted by the monitor. Plaintext keys exist only in the explicit one-time reveal response, and customer-data APIs are non-cacheable.
 - API key usage lookup is admin-only by default, rate-limited, and only calls New API read-only endpoints.
 - Configuration and role changes are audited, with secrets always masked.
 - Each OpenAI collection cycle only reads the fixed official `https://status.openai.com/api/v2/summary.json`, enforces response-size and timeout limits, and never accepts a configurable URL, preventing SSRF abuse.
 - Only the latest official-status snapshot is retained; incident progress is stored separately in the incident workspace, preventing unbounded SQLite growth at a 60-second polling interval.
 
-See [SECURITY_EN.md](SECURITY_EN.md) for the security boundary, [ROADMAP_EN.md](ROADMAP_EN.md) for planned work, and [GITHUB_GUIDE_EN.md](GITHUB_GUIDE_EN.md) for the protected-branch workflow.
+See [Customer Console architecture](docs/CUSTOMER_CONSOLE_EN.md) for API mapping, permission boundaries, and compatibility policy. See [SECURITY_EN.md](SECURITY_EN.md) for the wider security boundary, [ROADMAP_EN.md](ROADMAP_EN.md) for planned work, and [GITHUB_GUIDE_EN.md](GITHUB_GUIDE_EN.md) for the protected-branch workflow.
 
 ## Backup
 

@@ -31,4 +31,15 @@ Monitor administrators can change New API endpoints, probe rules, and notificati
 
 API key usage lookup is admin-only by default. It uses POST forwarding, fixed upstream paths, and per-user/source rate limits. Raw keys are not stored in the database, URLs, audits, or API responses.
 
+The Customer Console and legacy key-usage lookup are separate trust boundaries:
+
+- Only a New API session verified through `/api/user/self`, with a returned user ID matching the request header, is accepted. Emergency administrators are denied.
+- The BFF exposes only fixed overview, analytics, token, and log APIs. It has no configurable path, arbitrary headers, or generic reverse-proxy function.
+- The original New API role selects global versus self-only APIs; monitor role mappings cannot elevate upstream permissions.
+- Plaintext keys are available only through a rate-limited one-time POST response with caching disabled. They are never written to databases, logs, audit records, URLs, or browser storage.
+- Regular-user logs strip administrator metadata, audit metadata, stream status, and channel names, and regular-user time ranges are capped at 30 days.
+- Mutations require the same-origin `X-Monitor-Request: 1` header and produce redacted audit records.
+- Production must host the Customer Console on the same browser Origin as New API; Customer Console, setup, and Key-lookup requests never follow redirects with credentials.
+- A single-layer Nginx proxy should overwrite `X-Real-IP` and `X-Forwarded-For` instead of forwarding caller-supplied address chains, or source auditing and rate limits can be spoofed.
+
 An on-host monitor cannot detect a full host outage, network loss, or complete disk failure. Use an independent external heartbeat for those cases.

@@ -63,6 +63,9 @@ export type AuthUser = {
   source_role?: number;
   dashboard_refresh_seconds?: number;
   key_usage_available?: boolean;
+  console_available?: boolean;
+  console_pages?: Partial<Record<'overview' | 'analytics' | 'keys' | 'logs', boolean>>;
+  console_global_scope?: boolean;
 };
 
 export type KeyUsageCall = {

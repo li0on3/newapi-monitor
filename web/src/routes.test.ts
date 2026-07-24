@@ -6,6 +6,7 @@ describe('dashboard routes', () => {
     expect(readRoute('/monitor/upstream-status')).toEqual({
       tab: 'providerStatus',
       settingsPage: 'status',
+      consolePage: 'overview',
     })
   })
 
@@ -13,6 +14,30 @@ describe('dashboard routes', () => {
     expect(readRoute('/monitor/system/providers')).toEqual({
       tab: 'settings',
       settingsPage: 'providers',
+      consolePage: 'overview',
+    })
+  })
+
+  test('routes each customer console page to a stable deep link', () => {
+    expect(readRoute('/monitor/console')).toEqual({
+      tab: 'console',
+      settingsPage: 'status',
+      consolePage: 'overview',
+    })
+    expect(readRoute('/monitor/console/analytics')).toEqual({
+      tab: 'console',
+      settingsPage: 'status',
+      consolePage: 'analytics',
+    })
+    expect(readRoute('/monitor/console/keys')).toEqual({
+      tab: 'console',
+      settingsPage: 'status',
+      consolePage: 'keys',
+    })
+    expect(readRoute('/monitor/console/logs')).toEqual({
+      tab: 'console',
+      settingsPage: 'status',
+      consolePage: 'logs',
     })
   })
 })

@@ -4,6 +4,30 @@
 
 ## Unreleased
 
+## 1.3.0 - 2026-07-24
+
+### Added
+
+- Added a standalone Customer Console with Overview, Analytics, API Keys, and real Usage Logs, without modifying New API source code.
+- Added a fixed allowlist BFF that only uses the verified current user's New API session and user ID. It never substitutes the monitor management token for customer identity and exposes no generic proxy.
+- Added API key create, edit, enable/disable, delete, batch delete, and rate-limited one-time reveal. Plaintext keys are never persisted in the database, logs, audit records, or frontend storage.
+- Added dynamic settings for the console master switch, minimum monitor role, per-page switches, default query range, write rate limit, and reveal rate limit.
+- Added console operation auditing, New API identity-ID consistency checks, the regular-user 30-day query boundary, and source-role-based global/self data scope.
+- Added deep links for `/monitor/console`, `/monitor/console/analytics`, `/monitor/console/keys`, `/monitor/console/logs`, and `/monitor/system/console`.
+
+### Changed
+
+- The application now understands the `/monitor/*` prefix directly, so source runs and reverse-proxy deployments use the same URLs without a separate path-stripping rule.
+- Frontend CI runs Bun unit tests before the production build, and the Docker image includes the Customer Console BFF module.
+
+### Security
+
+- Emergency administrators are explicitly denied Customer Console access. Monitor roles only control entry visibility and cannot elevate upstream New API permissions.
+- Customer-data APIs use `Cache-Control: no-store`; mutations keep the same-origin verification header and enforce bounded upstream routes, fields, response sizes, and timeouts.
+- Regular-user log responses strip administrator metadata, audit metadata, stream status, and channel names. CSV export neutralizes spreadsheet formula injection.
+- Customer Console, setup, and Key-lookup requests no longer follow HTTP redirects with credentials, and their response sizes are bounded.
+- The reverse-proxy example overwrites the client address instead of trusting caller-supplied `X-Forwarded-For`, preserving audit and rate-limit integrity.
+
 ## 1.2.2 - 2026-07-23
 
 ### Fixed

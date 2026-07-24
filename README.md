@@ -24,6 +24,10 @@
 
 ![使用合成数据生成的事件调查页面](docs/screenshots/incidents-demo-zh.png)
 
+### 客户控制台
+
+![使用合成数据生成的客户控制台](docs/screenshots/customer-console-demo-zh.png)
+
 ## 核心能力
 
 - 启用渠道自动同步，禁用渠道自动隐藏；支持 OpenAI Responses、Chat Completions 和 Anthropic Messages 真实探测。
@@ -37,6 +41,8 @@
 - New API Session 单点登录、角色映射、紧急管理员、登录限速和配置审计。
 - 中英文界面自动跟随浏览器语言，也可在页面右上角手动切换并持久化偏好。
 - 页面动态配置，不写回 New API，不影响 New API 升级。
+- 独立客户控制台提供概览、数据看板、API 密钥和真实使用日志；业务数据始终来自当前用户的 New API Session，不在监控平台复制客户业务库。
+- API 密钥支持创建、编辑、启停、删除、批量删除和单次明文查看；明文 Key 不落库、不写日志、不进入审计和浏览器持久化存储。
 - 管理端与普通用户可使用独立的总览渠道清单；隐藏渠道只影响对应角色的展示和状态汇总，不停止探测、日志采集或告警。
 - 通过 OpenAI 官方 JSON 状态接口同步整体状态、组件和事件；独立页面区分“业务相关组件”和“OpenAI 全局事件”，总览只保留轻量参考提示，本地真实渠道始终是主要判断依据。
 
@@ -93,6 +99,11 @@ sudo monitorctl reset-admin
 /monitor/system                 系统配置
 /monitor/system/notifications   通知中心
 /monitor/system/providers       上游官方状态配置
+/monitor/system/console         客户控制台配置
+/monitor/console                客户概览
+/monitor/console/analytics      客户数据看板
+/monitor/console/keys           客户 API 密钥
+/monitor/console/logs           客户真实使用日志
 ```
 
 通知中心的每个已配置渠道均可单独点击“触发测试告警”；渠道无需先启用，但未保存的配置必须先保存，避免测试内容与实际生效配置不一致。
@@ -147,13 +158,17 @@ curl -fsS http://127.0.0.1:18081/api/health
 - 状态变更接口使用严格 Pydantic Schema、角色校验和同源请求校验头。
 - 公共健康接口不返回内部错误、路径和采集详情。
 - 监控数据不匿名公开：普通 New API 用户通过现有 Session 登录后默认仅能查看总览；运维员可查看日志、资源、事件与渠道配置；监控管理员可管理系统配置和角色映射。
+- 客户控制台必须通过 New API Session 登录。监控角色只决定是否显示入口，实际全局/个人数据范围继续由 New API 原始角色决定；紧急管理员不能访问客户控制台。
+- 客户控制台应与 New API 部署在同一浏览器 Origin 下（推荐挂载到 `/monitor/`），否则浏览器无法同时复用 New API Session 与 `uid`。
+- 客户控制台只转发代码内固定的 New API API 白名单，不接受任意上游 URL、路径或请求头；普通用户单次查询最多 30 天。
+- 客户控制台业务数据按请求读取，不写入监控数据库。密钥明文只在用户主动查看的单次响应中出现，接口响应禁止缓存。
 - Key 用量查询默认仅管理员可用；管理员可在“系统配置 → Key 用量查询”中启停功能、调整最低角色、单次日志数量、查询频率和额度换算单位。
 - Key 查询只调用 New API 的只读 `/api/usage/token/` 与 `/api/log/token` 接口，不持久化原始 Key，也不会修改 New API 数据。
 - 配置变更和角色变更写入审计表，秘密字段始终脱敏。
 - OpenAI Status 采集器每轮只读取固定的 `https://status.openai.com/api/v2/summary.json`，限制响应体与超时时间，不接受用户自定义目标 URL，避免形成 SSRF 能力。
 - 官方状态只保留最新快照，事件进展单独写入事件中心，避免 60 秒采集在长期运行后造成 SQLite 无界增长。
 
-详细安全边界见 [SECURITY.md](SECURITY.md)，后续计划见 [ROADMAP.md](ROADMAP.md)，GitHub 维护流程见 [GITHUB_GUIDE.md](GITHUB_GUIDE.md)。
+客户控制台的接口映射、权限边界和兼容策略见 [客户控制台架构](docs/CUSTOMER_CONSOLE.md)。详细安全边界见 [SECURITY.md](SECURITY.md)，后续计划见 [ROADMAP.md](ROADMAP.md)，GitHub 维护流程见 [GITHUB_GUIDE.md](GITHUB_GUIDE.md)。
 
 ## 备份
 

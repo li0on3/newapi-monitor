@@ -26,6 +26,8 @@ jobs:
       - working-directory: web
         run: bun install --frozen-lockfile
       - working-directory: web
+        run: bun run test
+      - working-directory: web
         run: bun run build
       - run: cp .env.example .env
       - run: docker compose --env-file .env config --quiet

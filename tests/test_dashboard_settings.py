@@ -183,6 +183,26 @@ class SettingsStoreTests(unittest.TestCase):
         self.assertNotIn("secret-key", serialized)
         self.assertNotIn("feishu-secret", serialized)
 
+    def test_operational_audit_redacts_nested_credentials_without_reloading_collectors(self):
+        before_version = self.store.version()
+
+        self.store.record_audit(
+            actor="alice",
+            action="console.token.reveal",
+            target="token:7",
+            before={"name": "Codex", "key": "sk-before-secret"},
+            after={"revealed": True, "nested": {"api_key": "sk-after-secret"}},
+            remote_addr="127.0.0.1",
+        )
+
+        self.assertEqual(before_version, self.store.version())
+        entry = self.store.audit(limit=1)[0]
+        self.assertEqual("console.token.reveal", entry["action"])
+        self.assertEqual("alice", entry["actor"])
+        self.assertEqual("********", json.loads(entry["before_json"])["key"])
+        self.assertEqual("********", json.loads(entry["after_json"])["nested"]["api_key"])
+        self.assertTrue(json.loads(entry["after_json"])["revealed"])
+
 
 if __name__ == "__main__":
     unittest.main()
