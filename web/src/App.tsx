@@ -53,6 +53,8 @@ import { ThemeSwitch } from './ThemeSwitch';
 import type { AppRoute, AppTab, ConsolePage, SettingsPage } from './routes';
 import type { AuthUser, Channel, ChannelMonitorConfig, ContainerMetric, Incident, IncidentPayload, IncidentSummary, KeyUsageCall, KeyUsageResult, LogItem, ProviderStatus, ResourceSample, Summary, SystemHealth } from './types';
 import { ConsoleShell } from './console/ConsoleShell';
+import { SECRET_SETTING_KEYS, SETTING_SECTIONS } from './settings/catalog';
+import type { SettingSectionId } from './settings/catalog';
 
 type Tab = AppTab;
 
@@ -363,43 +365,8 @@ function ChannelSettingsView() {
   </section>;
 }
 
-type SettingField = { key: string; label: string; type?: 'number' | 'text' | 'password' | 'boolean' | 'select'; options?: Array<[string, string]>; hint?: string };
-type SettingSectionId = 'connection' | 'console' | 'keyUsage' | 'collection' | 'thresholds' | 'advanced';
 type SettingsPageId = SettingsPage;
 type NotificationChannelId = 'email' | 'wecom_app' | 'wecom_webhook' | 'feishu_app' | 'feishu_webhook';
-const SECRET_SETTING_KEYS = ['new_api_access_token', 'relay_api_token', 'smtp_password', 'wecom_app_secret', 'wecom_webhook_url', 'feishu_app_secret', 'feishu_webhook_url', 'feishu_webhook_secret'];
-const SETTING_SECTIONS: Array<{ id: SettingSectionId; title: string; short: string; description: string; icon: ReactNode; fields: SettingField[] }> = [
-  { id: 'connection', title: t('New API 连接'), short: t('连接与凭据'), icon: <Network size={18} />, description: t('管理接口只读同步与真实探测凭据。敏感字段不会回显。'), fields: [
-    { key: 'new_api_base_url', label: t('New API 地址') }, { key: 'new_api_user_id', label: t('管理用户 ID'), type: 'number' }, { key: 'new_api_access_token', label: t('管理访问令牌'), type: 'password', hint: t('留空保持原值') }, { key: 'relay_api_token', label: t('真实探测令牌'), type: 'password', hint: t('留空保持原值') },
-  ] },
-  { id: 'console', title: t('New API 功能页'), short: t('页面与访问策略'), icon: <TerminalSquare size={18} />, description: t('控制概览、数据看板、API 密钥和使用日志的可见范围与敏感操作频率。所有业务权限仍由 New API Session 最终校验。'), fields: [
-    { key: 'console_enabled', label: t('启用 New API 功能页'), type: 'boolean', hint: t('关闭后入口和全部 BFF 接口同时停用') },
-    { key: 'console_min_role', label: t('最低监控角色'), type: 'select', options: [['viewer', t('所有已登录用户')], ['operator', t('运维员及管理员')], ['admin', t('仅管理员')]], hint: t('监控角色只控制入口，不会提升 New API 原始权限') },
-    { key: 'console_overview_enabled', label: t('显示账号概览'), type: 'boolean' },
-    { key: 'console_analytics_enabled', label: t('显示数据看板'), type: 'boolean' },
-    { key: 'console_keys_enabled', label: t('允许管理 API 密钥'), type: 'boolean', hint: t('密钥增删改始终使用当前用户的 New API 会话') },
-    { key: 'console_logs_enabled', label: t('显示真实使用日志'), type: 'boolean' },
-    { key: 'console_default_days', label: t('默认查询天数'), type: 'number', hint: t('1–30 天，普通用户单次最多查询 30 天') },
-    { key: 'console_write_attempts_per_minute', label: t('每分钟写操作上限'), type: 'number', hint: t('限制密钥创建、编辑、停用与删除') },
-    { key: 'console_reveal_attempts_per_minute', label: t('每分钟明文查看上限'), type: 'number', hint: t('建议保持较低，默认每分钟 6 次') },
-  ] },
-  { id: 'keyUsage', title: t('Key 用量查询'), short: t('权限与查询策略'), icon: <KeyRound size={18} />, description: t('按 Key 即时读取其额度与最近调用。Key 仅在当前请求中转发给 New API，不写入监控数据库、审计日志或浏览器地址。'), fields: [
-    { key: 'key_usage_enabled', label: t('启用 Key 用量查询'), type: 'boolean', hint: t('关闭后入口和接口同时停用') },
-    { key: 'key_usage_min_role', label: t('最低可用角色'), type: 'select', options: [['admin', t('仅管理员')], ['operator', t('运维员及管理员')]], hint: t('普通用户固定不可访问，避免 Key 信息泄露') },
-    { key: 'key_usage_log_limit', label: t('单次返回调用数'), type: 'number', hint: t('10–500，New API 最多提供最近 1000 条') },
-    { key: 'key_usage_attempts_per_minute', label: t('每用户每分钟查询次数'), type: 'number', hint: t('防止撞库、滥用与上游压力') },
-    { key: 'key_usage_quota_per_unit', label: t('额度换算单位'), type: 'number', hint: t('默认 500000，即 500000 额度显示为 $1') },
-  ] },
-  { id: 'collection', title: t('采集频率'), short: t('同步与采样'), icon: <RefreshCw size={18} />, description: t('保存后监控工作线程将在数秒内热加载。'), fields: [
-    { key: 'dashboard_refresh_seconds', label: t('页面刷新（秒）'), type: 'number' }, { key: 'channel_sync_interval_seconds', label: t('渠道同步（秒）'), type: 'number' }, { key: 'channel_interval_seconds', label: t('渠道探测（秒）'), type: 'number' }, { key: 'channel_probe_concurrency', label: t('渠道探测并发数'), type: 'number', hint: t('建议 2–3，避免探测阻塞采集器，同时限制上游瞬时压力') }, { key: 'log_interval_seconds', label: t('日志同步（秒）'), type: 'number' }, { key: 'resource_interval_seconds', label: t('资源采样（秒）'), type: 'number' }, { key: 'report_interval_seconds', label: t('周期报告（秒）'), type: 'number' }, { key: 'retention_days', label: t('数据保留（天）'), type: 'number' },
-  ] },
-  { id: 'thresholds', title: t('耗时与资源阈值'), short: t('告警策略'), icon: <CircleGauge size={18} />, description: t('总耗时或首字超过慢请求阈值，并满足 3/5 或 5/10 时告警。'), fields: [
-    { key: 'slow_request_seconds', label: t('慢请求阈值（秒）'), type: 'number' }, { key: 'latency_hard_limit_seconds', label: t('单次严重阈值（秒）'), type: 'number' }, { key: 'latency_reminder_seconds', label: t('重复提醒间隔（秒）'), type: 'number' }, { key: 'channel_slow_seconds', label: t('渠道慢探测（秒）'), type: 'number' }, { key: 'channel_failure_threshold', label: t('渠道连续失败告警次数'), type: 'number', hint: t('建议 2，单次 502 或超时不会立即告警') }, { key: 'channel_recovery_threshold', label: t('渠道连续成功恢复次数'), type: 'number', hint: t('建议 2，避免故障与恢复状态反复抖动') }, { key: 'resource_sustain_seconds', label: t('资源持续时间（秒）'), type: 'number' }, { key: 'system_cpu_threshold', label: t('CPU 阈值（%）'), type: 'number' }, { key: 'system_memory_threshold', label: t('内存阈值（%）'), type: 'number' }, { key: 'system_disk_threshold', label: t('磁盘阈值（%）'), type: 'number' },
-  ] },
-  { id: 'advanced', title: t('高级采集'), short: t('范围与排除'), icon: <SlidersHorizontal size={18} />, description: t('日志重叠窗口、容器范围及排除项。'), fields: [
-    { key: 'log_overlap_seconds', label: t('日志重叠窗口（秒）'), type: 'number' }, { key: 'log_initial_lookback_seconds', label: t('首次回溯（秒）'), type: 'number' }, { key: 'docker_container_names', label: t('容器名称（逗号分隔）') }, { key: 'disk_path', label: t('磁盘采集路径') }, { key: 'excluded_token_names', label: t('排除令牌名（逗号分隔）') }, { key: 'container_cpu_threshold', label: t('容器 CPU 阈值（%）'), type: 'number' }, { key: 'container_memory_threshold', label: t('容器内存阈值（%）'), type: 'number' },
-  ] },
-];
 
 function SettingsView({ activePage, onActivePageChange }: { activePage: SettingsPageId; onActivePageChange: (page: SettingsPageId) => void }) {
   const [values, setValues] = useState<Record<string, unknown>>({});
@@ -520,7 +487,7 @@ function SettingsView({ activePage, onActivePageChange }: { activePage: Settings
     <div className="settings-workspace">
       <aside className="settings-nav" aria-label={t("系统配置分类")}>{pages.map((page) => <button type="button" className={classNames(activePage === page.id && 'active')} key={page.id} onClick={() => onActivePageChange(page.id)}><span className="settings-nav-icon">{page.icon}</span><span><strong>{page.title}</strong><small>{page.description}</small></span>{page.count != null && <b>{page.count}</b>}<ChevronRight size={15} /></button>)}</aside>
       <div className="settings-stage">
-        {activePage === 'status' && <article className="settings-card settings-focus-card"><div className="settings-card-head settings-focus-head"><div className="settings-section-mark"><ShieldCheck size={18} /></div><div><span className="eyebrow">SELF MONITORING</span><h3>{t("采集链路状态")}</h3><p>{t("监控程序同时检查自身是否仍在持续产生新数据，避免“页面正常但采集已经停止”。")}</p></div><StatusPill tone={systemStatus?.status === 'ok' ? 'ok' : 'bad'}>{systemStatus?.status === 'ok' ? t('全部正常') : t('存在降级')}</StatusPill></div><div className="collector-health-grid"><div className="collector-health-card"><span>{t("数据库")}</span><strong>{systemStatus?.database === 'ok' ? t('正常') : t('异常')}</strong><small>{systemStatus?.database_error || t('SQLite 可读写')}</small></div><div className="collector-health-card"><span>{t("监控进程")}</span><strong>{systemStatus?.monitor_worker === 'running' ? t('运行中') : systemStatus?.monitor_worker || t('未知')}</strong><small>{systemStatus?.monitor_error || t('工作线程持续运行')}</small></div>{Object.entries(systemStatus?.collectors || {}).map(([name, collector]) => { const labels: Record<string, string> = { channel_sync: t('渠道同步'), channel_probe: t('渠道探测'), logs: t('使用日志'), resources: t('机器资源'), openai_status: t('OpenAI 官方状态') }; return <div className={classNames('collector-health-card', collector.status === 'stale' && 'collector-health-stale')} key={name}><span>{labels[name] || name}</span><strong>{collector.status === 'ok' ? t('正常') : collector.status === 'starting' ? t('启动中') : t('数据过期')}</strong><small>{t("最后成功")} {collector.age_seconds}{t("s 前 · 阈值")} {collector.stale_after_seconds}s</small>{collector.consecutive_failures > 0 && <em>{t("连续失败")} {collector.consecutive_failures} {t("次")}</em>}{collector.last_error && <code title={collector.last_error}>{collector.last_error}</code>}</div>; })}</div><div className="settings-action-bar"><div><strong>{t("最后检查")} {systemStatus ? formatFullTime(systemStatus.timestamp) : '—'}</strong><small>{t("数据超过动态失效阈值后，健康检查变为 503，并生成异常与恢复事件。")}</small></div><button className="secondary-button" onClick={() => void load()}><RefreshCw size={16} />{t("立即刷新")}</button></div></article>}
+        {activePage === 'status' && <article className="settings-card settings-focus-card"><div className="settings-card-head settings-focus-head"><div className="settings-section-mark"><ShieldCheck size={18} /></div><div><span className="eyebrow">SELF MONITORING</span><h3>{t("采集链路状态")}</h3><p>{t("监控程序同时检查自身是否仍在持续产生新数据，避免“页面正常但采集已经停止”。")}</p></div><StatusPill tone={systemStatus?.status === 'ok' ? 'ok' : 'bad'}>{systemStatus?.status === 'ok' ? t('全部正常') : t('存在降级')}</StatusPill></div><div className="collector-health-grid"><div className="collector-health-card"><span>{t("数据库")}</span><strong>{systemStatus?.database === 'ok' ? t('正常') : t('异常')}</strong><small>{systemStatus?.database_error || t('SQLite 可读写')}</small></div><div className={classNames('collector-health-card', (systemStatus?.storage?.over_capacity || (systemStatus?.storage?.outbox_dead || 0) > 0) && 'collector-health-stale')}><span>{t('存储与告警队列')}</span><strong>{systemStatus?.storage ? `${((systemStatus.storage.total_bytes || 0) / 1024 / 1024).toFixed(1)} MB` : '—'}</strong><small>{t('待投递')} {systemStatus?.storage?.outbox_pending || 0} · {t('死信')} {systemStatus?.storage?.outbox_dead || 0}</small></div><div className="collector-health-card"><span>{t("监控进程")}</span><strong>{systemStatus?.monitor_worker === 'running' ? t('运行中') : systemStatus?.monitor_worker || t('未知')}</strong><small>{systemStatus?.monitor_error || t('工作线程持续运行')}</small></div>{Object.entries(systemStatus?.collectors || {}).map(([name, collector]) => { const labels: Record<string, string> = { channel_sync: t('渠道同步'), channel_probe: t('渠道探测'), logs: t('使用日志'), resources: t('机器资源'), openai_status: t('OpenAI 官方状态') }; return <div className={classNames('collector-health-card', collector.status === 'stale' && 'collector-health-stale')} key={name}><span>{labels[name] || name}</span><strong>{collector.status === 'ok' ? t('正常') : collector.status === 'starting' ? t('启动中') : t('数据过期')}</strong><small>{t("最后成功")} {collector.age_seconds}{t("s 前 · 阈值")} {collector.stale_after_seconds}s</small>{collector.consecutive_failures > 0 && <em>{t("连续失败")} {collector.consecutive_failures} {t("次")}</em>}{collector.last_error && <code title={collector.last_error}>{collector.last_error}</code>}</div>; })}</div><div className="settings-action-bar"><div><strong>{t("最后检查")} {systemStatus ? formatFullTime(systemStatus.timestamp) : '—'}</strong><small>{t("数据超过动态失效阈值后，健康检查变为 503，并生成异常与恢复事件。")}</small></div><button className="secondary-button" onClick={() => void load()}><RefreshCw size={16} />{t("立即刷新")}</button></div></article>}
         {activePage === 'overview' && <article className="settings-card settings-focus-card overview-settings-card">
           <div className="settings-card-head settings-focus-head"><div className="settings-section-mark"><Eye size={18} /></div><div><span className="eyebrow">MONITOR OVERVIEW</span><h3>{t("总览渠道展示")}</h3><p>{t("分别控制管理端与普通用户看到的渠道卡片和状态汇总。")}</p></div><span className="settings-field-count">{overviewChannels.length} {t("个渠道")}</span></div>
           <div className="overview-audience-summary">

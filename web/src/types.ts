@@ -286,5 +286,15 @@ export type SystemHealth = {
   monitor_worker: string;
   monitor_error?: string;
   collectors: Record<string, CollectorHealth>;
+  storage?: {
+    database_bytes: number;
+    wal_bytes: number;
+    total_bytes: number;
+    max_bytes: number;
+    over_capacity: boolean;
+    outbox_pending: number;
+    outbox_dead: number;
+    oldest_pending_age_seconds: number;
+  };
   timestamp: number;
 };

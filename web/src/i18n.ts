@@ -3,6 +3,17 @@ export type Language = 'zh-CN' | 'en'
 const STORAGE_KEY = 'newapi-monitor-language'
 
 const ENGLISH: Record<string, string> = {
+  "原始采样保留（天）": "Raw sample retention (days)",
+  "延迟、渠道探测和资源原始数据的保留时间": "Retention period for raw latency, channel probe, and resource samples",
+  "已恢复事件保留（天）": "Resolved incident retention (days)",
+  "投递记录保留（天）": "Delivery record retention (days)",
+  "数据库维护间隔（秒）": "Database maintenance interval (seconds)",
+  "数据库容量告警（MB）": "Database capacity alert (MB)",
+  "告警投递最大尝试次数": "Maximum alert delivery attempts",
+  "存储与告警队列": "Storage and alert queue",
+  "待投递": "Pending delivery",
+  "死信": "Dead letters",
+  "失败后使用指数退避，达到上限后进入死信状态": "Failures use exponential backoff and enter dead-letter state after the limit",
   "1–30 天，普通用户单次最多查询 30 天": "1–30 days; regular users can query at most 30 days at a time",
   "1–31 天，普通用户单次最多查询 31 天": "1–31 days; regular users can query at most 31 days at a time",
   "24 小时用量": "24-hour usage",

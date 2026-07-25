@@ -4,6 +4,25 @@
 
 ## Unreleased
 
+## 1.8.0 - 2026-07-25
+
+### Added
+
+- Added a durable SQLite notification outbox. Incidents are persisted before independent email, WeCom, and Feishu delivery; failures use exponential backoff, survive restarts, and become dead letters after the configured attempt limit.
+- Added database, WAL, pending-delivery, and dead-letter health signals, with independent retention for raw samples, resolved incidents, and delivery records.
+- Added Playwright browser E2E coverage for administrator deep links, viewer authorization boundaries, and persistent sign-out behavior.
+
+### Changed
+
+- Split monitor state machines, protocol validation, persistence, and delivery into focused core modules, and moved the system-settings catalog out of the main React component.
+- Latency windows and reminders now advance only on new log samples. Five newest healthy samples recover an incident even when an older critical sample remains in retained history.
+- Resource trends are bucketed across the full requested range, so the 24-hour view no longer truncates to a fixed number of newest rows.
+
+### Fixed
+
+- Prevented malformed channel-sync responses from becoming an empty snapshot, kept slow but valid real probes available, and corrected first-restart and OOM transition alerting.
+- Disabled, deleted, maintenance, or alert-disabled channels now reconcile open incidents, while restart history no longer leaves overall health permanently degraded.
+
 ## 1.7.0 - 2026-07-25
 
 ### Added
