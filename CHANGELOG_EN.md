@@ -4,6 +4,24 @@
 
 ## Unreleased
 
+## 1.4.0 - 2026-07-25
+
+### Added
+
+- Added independent key groups to the Customer Console API Keys page. Users can create, rename, color, delete, and bulk-assign their own keys without touching native New API model routing or billing groups.
+- Added 1-day, 7-day, and 30-day per-key usage plus group totals, joined to real `/api/data/flow/self` data by immutable New API `token_id`, including requests, quota, tokens, and called models.
+- Added local group-membership tables, per-user isolation constraints, group-operation audits, key-ownership revalidation, and contract/regression coverage.
+
+### Changed
+
+- Reworked the API Keys page into account totals, grouped usage, and per-key detail, with an explicit visual distinction between monitor key groups and native New API routing/billing groups.
+- Group totals use current membership: after moving a key, the selected period is recalculated under its current group instead of presenting historical membership that New API cannot reconstruct.
+
+### Security
+
+- Groups and memberships are isolated by the current New API `user_id`. Assignment re-fetches the full key list through the current Session so another user's token ID cannot be inserted into the caller's groups.
+- Usage always calls the self-scoped `/api/data/flow/self` endpoint, even for New API administrators, because this page reports personal key usage rather than global administrator analytics.
+
 ## 1.3.0 - 2026-07-24
 
 ### Added

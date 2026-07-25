@@ -192,6 +192,52 @@ class NewAPIConsoleClient:
         query = {"p": page, "page_size": page_size, "keyword": keyword, "token": token}
         return self._page(self._request(session_cookie, user_id, "GET", path, query=query), self._token)
 
+    def list_all_tokens(
+        self,
+        session_cookie: str,
+        user_id: int,
+        page_size: int = 100,
+        max_items: int = 2000,
+    ) -> list[dict[str, Any]]:
+        page_size = max(1, min(int(page_size), 100))
+        max_items = max(1, min(int(max_items), 10000))
+        page = 1
+        result: list[dict[str, Any]] = []
+        seen: set[int] = set()
+        while True:
+            current = self.list_tokens(session_cookie, user_id, page=page, page_size=page_size)
+            total = int(current["total"])
+            if total > max_items:
+                raise NewAPIConsoleError(400, f"too many API keys; maximum supported is {max_items}")
+            items = current["items"]
+            result_size = len(result)
+            for item in items:
+                token_id = int(item.get("id") or 0)
+                if token_id > 0 and token_id not in seen:
+                    seen.add(token_id)
+                    result.append(item)
+            if not items or len(result) >= total:
+                return result
+            if len(result) == result_size:
+                raise NewAPIConsoleError(502, "New API token pagination is inconsistent")
+            page += 1
+
+    def self_flow(
+        self,
+        session_cookie: str,
+        user_id: int,
+        start_timestamp: int,
+        end_timestamp: int,
+    ) -> list[dict[str, Any]]:
+        data = self._request(
+            session_cookie,
+            user_id,
+            "GET",
+            "/api/data/flow/self",
+            query={"start_timestamp": start_timestamp, "end_timestamp": end_timestamp},
+        )
+        return [self._flow_item(item) for item in data] if isinstance(data, list) else []
+
     def get_token(self, session_cookie: str, user_id: int, token_id: int) -> dict[str, Any]:
         return self._token(self._request(session_cookie, user_id, "GET", f"/api/token/{token_id}"))
 

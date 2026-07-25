@@ -1,6 +1,9 @@
 import { api } from '../api'
 import type {
   ConsoleAnalytics,
+  ConsoleKeyGroupColor,
+  ConsoleKeyGroupRecord,
+  ConsoleKeyGroupWorkspace,
   ConsoleLogPage,
   ConsoleOverview,
   ConsoleToken,
@@ -23,6 +26,17 @@ export const consoleApi = {
   keys: (filters: Record<string, string | number | undefined>) =>
     api<ConsoleTokenPage>(`console/keys?${queryString(filters)}`),
   keyOptions: () => api<{ models: string[]; groups: string[]; quota_per_unit: number }>('console/keys/options'),
+  keyGroups: (days: number) => api<ConsoleKeyGroupWorkspace>(`console/key-groups?days=${days}`),
+  createKeyGroup: (payload: { name: string; color: ConsoleKeyGroupColor }) =>
+    api<{ item: ConsoleKeyGroupRecord }>('console/key-groups', { method: 'POST', body: JSON.stringify(payload) }),
+  updateKeyGroup: (id: number, payload: { name: string; color: ConsoleKeyGroupColor }) =>
+    api<{ item: ConsoleKeyGroupRecord }>(`console/key-groups/${id}`, { method: 'PUT', body: JSON.stringify(payload) }),
+  deleteKeyGroup: (id: number) => api<{ deleted: boolean }>(`console/key-groups/${id}`, { method: 'DELETE' }),
+  assignKeyGroup: (token_ids: number[], group_id: number | null) =>
+    api<{ assigned: number }>('console/key-groups/assignments', {
+      method: 'PUT',
+      body: JSON.stringify({ token_ids, group_id }),
+    }),
   createKey: (payload: ConsoleTokenDraft) =>
     api<{ created: boolean }>('console/keys', { method: 'POST', body: JSON.stringify(payload) }),
   updateKey: (id: number, payload: ConsoleTokenDraft) =>

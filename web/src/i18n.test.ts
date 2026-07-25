@@ -51,4 +51,13 @@ describe('translations', () => {
       'Page 2 of 5 · 88 records',
     )
   })
+
+  test('distinguishes monitor key groups from New API routing groups', () => {
+    expect(translate('密钥分组', 'en')).toBe('Key groups')
+    expect(translate('New API 路由/计费分组', 'en')).toBe('New API routing/billing group')
+    expect(translate('{{days}} 天用量', 'en', { days: 7 })).toBe('7-day usage')
+    expect(translate('自定义分组只用于监控平台的组织和统计，不会改变 New API 的路由、计费或密钥权限。', 'en')).toBe(
+      'Custom groups organize monitor statistics only; they do not change New API routing, billing, or key permissions.',
+    )
+  })
 })

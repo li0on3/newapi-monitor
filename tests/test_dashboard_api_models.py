@@ -8,6 +8,8 @@ from pydantic import ValidationError
 from dashboard_app import (
     ChannelSettingsPayload,
     ConsoleBatchPayload,
+    ConsoleKeyGroupAssignmentPayload,
+    ConsoleKeyGroupPayload,
     ConsoleTokenPayload,
     ConsoleTokenStatusPayload,
     KeyUsageQueryPayload,
@@ -111,6 +113,15 @@ class DashboardApiModelTests(unittest.TestCase):
             KeyUsageQueryPayload.model_validate({"api_key": "bad key"})
         with self.assertRaises(ValidationError):
             KeyUsageQueryPayload.model_validate({"api_key": "sk-" + "x" * 600})
+
+    def test_console_key_group_payloads_are_bounded(self):
+        group = ConsoleKeyGroupPayload.model_validate({"name": "  Customer A  ", "color": "blue"})
+        assignment = ConsoleKeyGroupAssignmentPayload.model_validate({"token_ids": [7, 7, 8], "group_id": None})
+
+        self.assertEqual("Customer A", group.name)
+        self.assertEqual([7, 8], assignment.token_ids)
+        with self.assertRaises(ValidationError):
+            ConsoleKeyGroupPayload.model_validate({"name": "x", "color": "#fff"})
 
     def test_notification_settings_validate_official_webhook_hosts(self):
         settings = SettingsUpdatePayload.model_validate(

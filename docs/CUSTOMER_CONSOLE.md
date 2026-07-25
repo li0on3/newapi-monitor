@@ -26,7 +26,7 @@
 | --- | --- | --- |
 | 概览 | `/monitor/console` | `/api/status`、`/api/user/self`、`/api/user/models`、`/api/token/`、日志统计 |
 | 数据看板 | `/monitor/console/analytics` | `/api/data[/self]`、`/api/data/flow[/self]`、日志统计 |
-| API 密钥 | `/monitor/console/keys` | `/api/token/*`、`/api/user/models`、`/api/user/self/groups` |
+| API 密钥 | `/monitor/console/keys` | `/api/token/*`、`/api/user/models`、`/api/user/self/groups`、`/api/data/flow/self` |
 | 使用日志 | `/monitor/console/logs` | `/api/log/` 或 `/api/log/self`、对应统计接口 |
 
 源角色为 New API 管理员时调用全局接口；普通用户只调用 `self` 接口。普通用户单次查询最多 30 天。
@@ -38,6 +38,11 @@
 - 明文 Key 只能由用户主动执行一次性查看，使用 POST、单独限速和 `Cache-Control: no-store`。
 - 明文 Key 不进入配置、审计、应用日志、URL、localStorage 或 sessionStorage；关闭弹窗后从 React 状态清除。
 - 所有 Token 写操作由 New API 再次校验所有权和业务规则，监控平台只记录脱敏操作审计。
+- 监控平台只额外保存自定义密钥分组名称、颜色和 `user_id + token_id` 成员关系，不复制额度、日志或明文 Key。
+- 自定义密钥分组与 New API Token 的原生 `group` 字段相互独立；后者仍用于 New API 路由/计费，前者只用于监控页面组织和统计。
+- 个人密钥和分组用量固定读取 `/api/data/flow/self`，按不可变 `token_id` 关联当前账号的现有密钥。即使账号是 New API 管理员，该页面也不读取全局 Flow。
+- 分组汇总采用“当前归属”口径。New API Flow 没有历史自定义分组快照，因此移动密钥后，所选 1/7/30 天用量会按新的当前分组重新汇总；页面会明确提示这一口径。
+- 创建、修改、删除和移动分组均写入监控配置审计；移动前再次读取当前用户完整 Token 清单，拒绝不存在或不属于当前用户的 Token ID。
 
 ## 兼容与故障边界
 
