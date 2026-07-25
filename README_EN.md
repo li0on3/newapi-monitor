@@ -44,6 +44,7 @@ Every screenshot below is generated from the built-in synthetic demo dataset. It
 - Stores runtime configuration in the monitor database and never writes configuration back to New API.
 - Provides a standalone Customer Console for overview, analytics, API keys, and real usage logs. Business data always comes from the current user's New API session and is not copied into a second customer database.
 - Supports API key create, edit, enable/disable, delete, batch delete, and one-time plaintext reveal. Plaintext keys are not stored in the monitor database, logs, audit records, or browser storage.
+- Supports monitor-local key groups plus 1/7/30-day real usage for each personal key and group. Custom key groups never change New API model routing, billing, or permissions.
 - Maintains separate channel visibility lists for administrators/operators and regular viewers.
 - Synchronizes OpenAI status, components, and incidents from the official JSON feed. A dedicated page separates workload-relevant components from global incidents, while the overview keeps only a compact contextual hint and real local probes remain authoritative.
 

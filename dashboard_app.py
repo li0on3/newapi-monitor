@@ -20,6 +20,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from dashboard_auth import AuthStore
 from dashboard_data import DashboardRepository
+from dashboard_key_groups import KeyGroupError, KeyGroupStore, build_key_usage_workspace
 from dashboard_key_usage import KeyUsageClient, KeyUsageError, SlidingWindowRateLimiter, role_allows_key_lookup
 from dashboard_newapi_console import NewAPIConsoleClient, NewAPIConsoleError
 from dashboard_settings import SECRET_KEYS, SettingsStore
@@ -304,6 +305,39 @@ class ConsoleBatchPayload(BaseModel):
         return normalized
 
 
+class ConsoleKeyGroupPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=48)
+    color: str = Field("slate", pattern="^(slate|emerald|blue|amber|violet|rose)$")
+
+    @field_validator("name")
+    @classmethod
+    def validate_group_name(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized or any(ord(character) < 32 for character in normalized):
+            raise ValueError("name must not be blank or contain control characters")
+        return normalized
+
+
+class ConsoleKeyGroupAssignmentPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    token_ids: list[int] = Field(min_length=1, max_length=100)
+    group_id: int | None = Field(None, ge=1)
+
+    @field_validator("token_ids")
+    @classmethod
+    def validate_token_ids(cls, value: list[int]) -> list[int]:
+        normalized: list[int] = []
+        for token_id in value:
+            if token_id <= 0:
+                raise ValueError("token_ids must contain positive integers")
+            if token_id not in normalized:
+                normalized.append(token_id)
+        return normalized
+
+
 class ChannelSettingsPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -392,6 +426,7 @@ class Runtime:
         self.settings: SettingsStore | None = None
         self.sso: NewAPISessionVerifier | None = None
         self.repository: DashboardRepository | None = None
+        self.key_groups: KeyGroupStore | None = None
         self.monitor_thread: threading.Thread | None = None
         self.monitor_stop = threading.Event()
         self.monitor_error = ""
@@ -416,6 +451,7 @@ class Runtime:
             self._bootstrap_settings(),
             secret_key=os.getenv("MONITOR_SECRET_KEY", ""),
         )
+        self.key_groups = KeyGroupStore(self.state_db)
         if not os.getenv("MONITOR_SECRET_KEY", ""):
             LOGGER.warning("MONITOR_SECRET_KEY is not configured; sensitive settings are stored without application-level encryption")
         values = self.settings.runtime_values()
@@ -785,6 +821,12 @@ def repository() -> DashboardRepository:
     return runtime.repository
 
 
+def key_group_store() -> KeyGroupStore:
+    if runtime.key_groups is None:
+        raise HTTPException(status_code=503, detail="key grouping is unavailable")
+    return runtime.key_groups
+
+
 @app.get("/api/health")
 def health() -> JSONResponse:
     details = system_health_snapshot()
@@ -1078,6 +1120,12 @@ def raise_console_error(error: NewAPIConsoleError) -> None:
     raise HTTPException(status_code=error.status_code, detail=str(error)) from error
 
 
+def raise_key_group_error(error: KeyGroupError) -> None:
+    message = str(error)
+    status_code = 409 if message == "group already exists" else 404 if message == "group not found" else 400
+    raise HTTPException(status_code=status_code, detail=message) from error
+
+
 @app.get("/api/console/capabilities")
 def get_console_capabilities(user: AuthenticatedUser) -> dict[str, Any]:
     return console_capabilities(user, console_values())
@@ -1194,6 +1242,156 @@ def get_console_key_options(request: Request, user: AuthenticatedUser) -> dict[s
         raise_console_error(error)
 
 
+@app.get("/api/console/key-groups")
+def get_console_key_groups(
+    request: Request,
+    user: AuthenticatedUser,
+    days: int = Query(7, ge=1, le=30),
+) -> dict[str, Any]:
+    values = console_values()
+    session_cookie, user_id = console_identity(request, user, values, "keys")
+    end_timestamp = int(time.time())
+    start_timestamp = end_timestamp - days * 86400
+    client = console_client(values)
+    try:
+        tokens = client.list_all_tokens(session_cookie, user_id)
+        flow_items = client.self_flow(session_cookie, user_id, start_timestamp, end_timestamp)
+        quota_per_unit = client.status(session_cookie, user_id)["quota_per_unit"]
+    except NewAPIConsoleError as error:
+        raise_console_error(error)
+    store = key_group_store()
+    result = build_key_usage_workspace(
+        tokens=tokens,
+        flow_items=flow_items,
+        groups=store.list_groups(user_id),
+        memberships=store.membership_map(user_id),
+        start_timestamp=start_timestamp,
+        end_timestamp=end_timestamp,
+    )
+    result["days"] = days
+    result["quota_per_unit"] = quota_per_unit
+    return result
+
+
+@app.post("/api/console/key-groups")
+def create_console_key_group(
+    payload: ConsoleKeyGroupPayload,
+    request: Request,
+    user: AuthenticatedUser,
+) -> dict[str, Any]:
+    values = console_values()
+    _, user_id = console_identity(request, user, values, "keys")
+    console_rate_limit(
+        console_write_limiter,
+        request,
+        user,
+        int(values.get("console_write_attempts_per_minute", 30)),
+    )
+    try:
+        group = key_group_store().create_group(user_id, payload.name, payload.color)
+    except KeyGroupError as error:
+        raise_key_group_error(error)
+    if runtime.settings is not None:
+        runtime.settings.record_audit(
+            str(user["username"]), "console.key-group.create", f"key-group:{group['id']}", {}, group,
+            runtime.remote_addr(request),
+        )
+    return {"item": group}
+
+
+@app.put("/api/console/key-groups/assignments")
+def assign_console_key_group(
+    payload: ConsoleKeyGroupAssignmentPayload,
+    request: Request,
+    user: AuthenticatedUser,
+) -> dict[str, Any]:
+    values = console_values()
+    session_cookie, user_id = console_identity(request, user, values, "keys")
+    console_rate_limit(
+        console_write_limiter,
+        request,
+        user,
+        int(values.get("console_write_attempts_per_minute", 30)),
+    )
+    try:
+        owned_ids = {int(item["id"]) for item in console_client(values).list_all_tokens(session_cookie, user_id)}
+    except NewAPIConsoleError as error:
+        raise_console_error(error)
+    missing_ids = [token_id for token_id in payload.token_ids if token_id not in owned_ids]
+    if missing_ids:
+        raise HTTPException(status_code=404, detail="one or more API keys do not exist")
+    try:
+        assigned = key_group_store().assign_tokens(user_id, payload.token_ids, payload.group_id)
+    except KeyGroupError as error:
+        raise_key_group_error(error)
+    if runtime.settings is not None:
+        runtime.settings.record_audit(
+            str(user["username"]), "console.key-group.assign", "tokens",
+            {"token_ids": payload.token_ids}, {"group_id": payload.group_id, "assigned": assigned},
+            runtime.remote_addr(request),
+        )
+    return {"assigned": assigned}
+
+
+@app.put("/api/console/key-groups/{group_id}")
+def update_console_key_group(
+    group_id: int,
+    payload: ConsoleKeyGroupPayload,
+    request: Request,
+    user: AuthenticatedUser,
+) -> dict[str, Any]:
+    if group_id <= 0:
+        raise HTTPException(status_code=422, detail="invalid group id")
+    values = console_values()
+    _, user_id = console_identity(request, user, values, "keys")
+    console_rate_limit(
+        console_write_limiter,
+        request,
+        user,
+        int(values.get("console_write_attempts_per_minute", 30)),
+    )
+    store = key_group_store()
+    try:
+        before = store.get_group(user_id, group_id)
+        group = store.update_group(user_id, group_id, payload.name, payload.color)
+    except KeyGroupError as error:
+        raise_key_group_error(error)
+    if runtime.settings is not None:
+        runtime.settings.record_audit(
+            str(user["username"]), "console.key-group.update", f"key-group:{group_id}", before, group,
+            runtime.remote_addr(request),
+        )
+    return {"item": group}
+
+
+@app.delete("/api/console/key-groups/{group_id}")
+def delete_console_key_group(
+    group_id: int,
+    request: Request,
+    user: AuthenticatedUser,
+) -> dict[str, Any]:
+    if group_id <= 0:
+        raise HTTPException(status_code=422, detail="invalid group id")
+    values = console_values()
+    _, user_id = console_identity(request, user, values, "keys")
+    console_rate_limit(
+        console_write_limiter,
+        request,
+        user,
+        int(values.get("console_write_attempts_per_minute", 30)),
+    )
+    try:
+        before = key_group_store().delete_group(user_id, group_id)
+    except KeyGroupError as error:
+        raise_key_group_error(error)
+    if runtime.settings is not None:
+        runtime.settings.record_audit(
+            str(user["username"]), "console.key-group.delete", f"key-group:{group_id}", before, {},
+            runtime.remote_addr(request),
+        )
+    return {"deleted": True}
+
+
 @app.post("/api/console/keys")
 def create_console_key(
     payload: ConsoleTokenPayload,
@@ -1302,6 +1500,10 @@ def delete_console_key(token_id: int, request: Request, user: AuthenticatedUser)
         client.delete_token(session_cookie, user_id, token_id)
     except NewAPIConsoleError as error:
         raise_console_error(error)
+    try:
+        key_group_store().remove_tokens(user_id, [token_id])
+    except Exception:
+        LOGGER.exception("failed to remove deleted token %s from monitor key groups", token_id)
     if runtime.settings is not None:
         runtime.settings.record_audit(
             str(user["username"]), "console.token.delete", f"token:{token_id}", before, {},
@@ -1328,6 +1530,10 @@ def batch_delete_console_keys(
         deleted = console_client(values).batch_delete_tokens(session_cookie, user_id, payload.ids)
     except NewAPIConsoleError as error:
         raise_console_error(error)
+    try:
+        key_group_store().remove_tokens(user_id, payload.ids)
+    except Exception:
+        LOGGER.exception("failed to remove deleted tokens from monitor key groups")
     if runtime.settings is not None:
         runtime.settings.record_audit(
             str(user["username"]), "console.token.batch-delete", "tokens", {"ids": payload.ids},

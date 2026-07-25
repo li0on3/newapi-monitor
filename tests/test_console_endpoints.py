@@ -3,6 +3,7 @@ from unittest.mock import patch
 
 from fastapi import HTTPException
 from starlette.requests import Request
+from starlette.routing import Match
 
 import dashboard_app
 
@@ -56,6 +57,22 @@ class FakeConsoleClient:
         self.calls.append(("tokens", session, user_id, page, page_size))
         return {"page": 1, "page_size": 5, "total": 0, "items": []}
 
+    def list_all_tokens(self, session, user_id):
+        self.calls.append(("all_tokens", session, user_id))
+        return [{"id": 7, "name": "personal"}, {"id": 8, "name": "customer"}]
+
+    def self_flow(self, session, user_id, start, end):
+        self.calls.append(("self_flow", session, user_id, start, end))
+        return [{
+            "token_id": 8,
+            "token_name": "customer",
+            "use_group": "default",
+            "model_name": "gpt-5.4",
+            "count": 3,
+            "quota": 50,
+            "token_used": 20,
+        }]
+
     def log_stat(self, session, user_id, source_role, **filters):
         self.calls.append(("stat", session, user_id, source_role, filters))
         return {"quota": 0, "rpm": 0, "tpm": 0}
@@ -81,6 +98,27 @@ class FakeConsoleClient:
         return "sk-one-time-secret"
 
 
+class FakeKeyGroupStore:
+    def __init__(self):
+        self.assignments = []
+
+    def list_groups(self, user_id):
+        return [{
+            "id": 3,
+            "owner_user_id": user_id,
+            "name": "客户项目",
+            "color": "blue",
+            "key_count": 1,
+        }]
+
+    def membership_map(self, user_id):
+        return {8: 3}
+
+    def assign_tokens(self, user_id, token_ids, group_id):
+        self.assignments.append((user_id, token_ids, group_id))
+        return len(token_ids)
+
+
 def request(path: str, method: str = "GET") -> Request:
     return Request({
         "type": "http",
@@ -98,6 +136,7 @@ class ConsoleEndpointTests(unittest.TestCase):
     def setUp(self):
         self.settings = FakeSettings()
         self.client = FakeConsoleClient()
+        self.key_groups = FakeKeyGroupStore()
         self.user = {
             "username": "alice",
             "role": "viewer",
@@ -106,6 +145,48 @@ class ConsoleEndpointTests(unittest.TestCase):
             "user_id": 9,
         }
         dashboard_app.console_reveal_limiter.buckets.clear()
+
+    def test_key_group_assignment_route_is_not_shadowed_by_group_id_route(self):
+        scope = request("/api/console/key-groups/assignments", "PUT").scope
+
+        matching_path = next(
+            route.path
+            for route in dashboard_app.app.routes
+            if route.matches(scope)[0] is Match.FULL
+        )
+
+        self.assertEqual("/api/console/key-groups/assignments", matching_path)
+
+    def test_key_group_workspace_uses_current_account_tokens_and_self_usage(self):
+        with patch.object(dashboard_app.runtime, "settings", self.settings), patch(
+            "dashboard_app.console_client", return_value=self.client
+        ), patch("dashboard_app.key_group_store", return_value=self.key_groups), patch(
+            "dashboard_app.time.time", return_value=1_000_000
+        ):
+            result = dashboard_app.get_console_key_groups(
+                request("/api/console/key-groups"), self.user, days=7
+            )
+
+        self.assertEqual(3, result["groups"][0]["id"])
+        self.assertEqual(3, result["groups"][0]["usage"]["requests"])
+        self.assertEqual(7, result["days"])
+        self.assertIn(("all_tokens", "newapi-session", 9), self.client.calls)
+        self.assertTrue(any(call[0] == "self_flow" for call in self.client.calls))
+
+    def test_key_assignment_rejects_token_ids_not_owned_by_current_user(self):
+        payload = dashboard_app.ConsoleKeyGroupAssignmentPayload(token_ids=[7, 99], group_id=3)
+        with patch.object(dashboard_app.runtime, "settings", self.settings), patch(
+            "dashboard_app.console_client", return_value=self.client
+        ), patch("dashboard_app.key_group_store", return_value=self.key_groups):
+            with self.assertRaises(HTTPException) as raised:
+                dashboard_app.assign_console_key_group(
+                    payload,
+                    request("/api/console/key-groups/assignments", "PUT"),
+                    self.user,
+                )
+
+        self.assertEqual(404, raised.exception.status_code)
+        self.assertEqual([], self.key_groups.assignments)
 
     def test_overview_uses_the_current_newapi_session_for_every_source_call(self):
         with patch.object(dashboard_app.runtime, "settings", self.settings), patch(

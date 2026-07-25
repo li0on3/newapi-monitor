@@ -34,6 +34,50 @@ export type ConsoleTokenPage = {
   quota_per_unit?: number
 }
 
+export type ConsoleKeyUsage = {
+  token_id: number
+  token_name: string
+  key_group_id: number | null
+  key_group_name: string
+  key_group_color: ConsoleKeyGroupColor
+  requests: number
+  quota: number
+  tokens: number
+  models: string[]
+}
+
+export type ConsoleKeyGroupColor = 'slate' | 'emerald' | 'blue' | 'amber' | 'violet' | 'rose'
+
+export type ConsoleKeyGroupRecord = {
+  id: number
+  owner_user_id: number
+  name: string
+  color: ConsoleKeyGroupColor
+  sort_order: number
+  created_at: number
+  updated_at: number
+  key_count: number
+}
+
+export type ConsoleKeyGroup = ConsoleKeyGroupRecord & {
+  usage: { requests: number; quota: number; tokens: number; models: number }
+}
+
+export type ConsoleKeyGroupWorkspace = {
+  start_timestamp: number
+  end_timestamp: number
+  days: number
+  quota_per_unit: number
+  usage_attribution: 'current_membership'
+  summary: { requests: number; quota: number; tokens: number; models: number; keys: number; groups: number }
+  groups: ConsoleKeyGroup[]
+  ungrouped: {
+    key_count: number
+    usage: { requests: number; quota: number; tokens: number; models: number }
+  }
+  token_usage: Record<string, ConsoleKeyUsage>
+}
+
 export type ConsoleOverview = {
   generated_at: number
   scope: 'self' | 'global'

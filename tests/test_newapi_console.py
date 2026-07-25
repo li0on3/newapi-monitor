@@ -37,6 +37,31 @@ class RecordingOpener:
 
 
 class NewAPIConsoleClientTests(unittest.TestCase):
+    def test_list_all_tokens_paginates_and_self_flow_never_uses_admin_scope(self):
+        opener = RecordingOpener([
+            FakeResponse({"success": True, "data": {"page": 1, "page_size": 2, "total": 3, "items": [
+                {"id": 7, "name": "one"}, {"id": 8, "name": "two"},
+            ]}}),
+            FakeResponse({"success": True, "data": {"page": 2, "page_size": 2, "total": 3, "items": [
+                {"id": 9, "name": "three"},
+            ]}}),
+            FakeResponse({"success": True, "data": [
+                {"token_id": 7, "token_name": "one", "use_group": "default", "model_name": "gpt-5.4", "count": 2, "quota": 50, "token_used": 20},
+            ]}),
+        ])
+        client = NewAPIConsoleClient("https://newapi.example", opener=opener)
+
+        tokens = client.list_all_tokens("session", 9, page_size=2)
+        flow = client.self_flow("session", 9, 100, 200)
+
+        self.assertEqual([7, 8, 9], [item["id"] for item in tokens])
+        self.assertEqual(7, flow[0]["token_id"])
+        urls = [request.full_url for request, _ in opener.requests]
+        self.assertEqual("https://newapi.example/api/token/?p=1&page_size=2", urls[0])
+        self.assertEqual("https://newapi.example/api/token/?p=2&page_size=2", urls[1])
+        self.assertIn("/api/data/flow/self?", urls[2])
+        self.assertNotIn("username=", urls[2])
+
     def test_redirects_are_never_followed_with_the_session_cookie(self):
         handler = NoRedirectHandler()
 

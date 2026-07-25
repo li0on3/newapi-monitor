@@ -26,7 +26,7 @@ The emergency monitor administrator has no New API identity and cannot enter the
 | --- | --- | --- |
 | Overview | `/monitor/console` | `/api/status`, `/api/user/self`, `/api/user/models`, `/api/token/`, log statistics |
 | Analytics | `/monitor/console/analytics` | `/api/data[/self]`, `/api/data/flow[/self]`, log statistics |
-| API Keys | `/monitor/console/keys` | `/api/token/*`, `/api/user/models`, `/api/user/self/groups` |
+| API Keys | `/monitor/console/keys` | `/api/token/*`, `/api/user/models`, `/api/user/self/groups`, `/api/data/flow/self` |
 | Usage Logs | `/monitor/console/logs` | `/api/log/` or `/api/log/self`, plus the matching statistics endpoint |
 
 New API administrators use global endpoints; regular users use only self endpoints. A regular-user query is capped at 30 days.
@@ -38,6 +38,11 @@ New API administrators use global endpoints; regular users use only self endpoin
 - Plaintext keys require an explicit one-time POST reveal with a separate rate limit and `Cache-Control: no-store`.
 - Plaintext keys never enter settings, audit records, application logs, URLs, localStorage, or sessionStorage, and React state is cleared when the reveal dialog closes.
 - New API revalidates ownership and business rules for every token mutation. The monitor records only redacted operation audits.
+- The monitor additionally stores only custom key-group names, colors, and `user_id + token_id` membership. It does not duplicate quotas, logs, or plaintext keys.
+- Custom key groups are independent from the native New API Token `group` field. The native field still controls New API routing/billing; the custom field organizes monitor statistics only.
+- Per-key and grouped usage always reads `/api/data/flow/self` and joins current keys by immutable `token_id`. Even a New API administrator does not receive global Flow data on this personal-key page.
+- Group totals use current membership. New API Flow has no historical snapshot of custom groups, so moving a key recalculates the selected 1/7/30-day period under the key's new current group; the UI states this attribution explicitly.
+- Group create, update, delete, and assignment operations enter the monitor configuration audit. Assignment re-fetches the caller's complete token list and rejects unknown or foreign token IDs.
 
 ## Compatibility and failure boundary
 
