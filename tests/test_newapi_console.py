@@ -252,10 +252,12 @@ class NewAPIConsoleClientTests(unittest.TestCase):
     def test_upstream_business_errors_invalid_json_and_large_responses_are_rejected(self):
         business = NewAPIConsoleClient(
             "https://newapi.example",
-            opener=RecordingOpener([FakeResponse({"success": False, "message": "permission denied"})]),
+            opener=RecordingOpener([FakeResponse({"success": False, "message": "New API permission denied"})]),
         )
-        with self.assertRaisesRegex(NewAPIConsoleError, "permission denied"):
+        with self.assertRaises(NewAPIConsoleError) as business_error:
             business.self_info("session", 9)
+        self.assertIn("permission denied", str(business_error.exception))
+        self.assertNotIn("New API", str(business_error.exception))
 
         invalid = NewAPIConsoleClient(
             "https://newapi.example",

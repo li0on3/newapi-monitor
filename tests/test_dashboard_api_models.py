@@ -9,6 +9,7 @@ from dashboard_app import (
     ChannelSettingsPayload,
     ConsoleBatchPayload,
     ConsoleKeyGroupAssignmentPayload,
+    ConsoleKeyGroupMembersPayload,
     ConsoleKeyGroupPayload,
     ConsoleTokenPayload,
     ConsoleTokenStatusPayload,
@@ -119,11 +120,24 @@ class DashboardApiModelTests(unittest.TestCase):
     def test_console_key_group_payloads_are_bounded(self):
         group = ConsoleKeyGroupPayload.model_validate({"name": "  Customer A  ", "color": "blue"})
         assignment = ConsoleKeyGroupAssignmentPayload.model_validate({"token_ids": [7, 7, 8], "group_id": None})
+        legacy_assignment = ConsoleKeyGroupAssignmentPayload.model_validate({"token_ids": [7], "group_id": 3})
 
         self.assertEqual("Customer A", group.name)
         self.assertEqual([7, 8], assignment.token_ids)
+        self.assertEqual([], assignment.group_ids)
+        self.assertEqual([3], legacy_assignment.group_ids)
         with self.assertRaises(ValidationError):
             ConsoleKeyGroupPayload.model_validate({"name": "x", "color": "#fff"})
+        with self.assertRaises(ValidationError):
+            ConsoleKeyGroupAssignmentPayload.model_validate(
+                {"token_ids": [7], "group_ids": list(range(1, 51)), "group_id": 51}
+            )
+        self.assertEqual(
+            2000,
+            len(ConsoleKeyGroupMembersPayload.model_validate({"token_ids": list(range(1, 2001))}).token_ids),
+        )
+        with self.assertRaises(ValidationError):
+            ConsoleKeyGroupMembersPayload.model_validate({"token_ids": list(range(1, 2002))})
 
     def test_notification_settings_validate_official_webhook_hosts(self):
         settings = SettingsUpdatePayload.model_validate(

@@ -1,5 +1,7 @@
 import type { ConsoleLog, ConsoleSeriesItem } from './types'
 
+export type AnalyticsMetric = 'requests' | 'tokens' | 'quota'
+
 export function buildAnalyticsTimeline(series: ConsoleSeriesItem[]) {
   const buckets = new Map<number, { timestamp: number; requests: number; quota: number; tokens: number }>()
   for (const item of series) {
@@ -15,6 +17,63 @@ export function buildAnalyticsTimeline(series: ConsoleSeriesItem[]) {
     buckets.set(item.created_at, current)
   }
   return [...buckets.values()].sort((left, right) => left.timestamp - right.timestamp)
+}
+
+export function buildAnalyticsModelTimeline(
+  series: ConsoleSeriesItem[],
+  metric: AnalyticsMetric,
+  modelLimit = 5,
+) {
+  const valueOf = (item: ConsoleSeriesItem) => {
+    if (metric === 'tokens') return item.token_used
+    if (metric === 'quota') return item.quota
+    return item.count
+  }
+  const modelTotals = new Map<string, number>()
+  const buckets = new Map<number, Map<string, number>>()
+  for (const item of series) {
+    const model = item.model_name || '未知模型'
+    const value = Math.max(0, Number(valueOf(item)) || 0)
+    modelTotals.set(model, (modelTotals.get(model) || 0) + value)
+    const bucket = buckets.get(item.created_at) || new Map<string, number>()
+    bucket.set(model, (bucket.get(model) || 0) + value)
+    buckets.set(item.created_at, bucket)
+  }
+  const primaryModels = [...modelTotals.entries()]
+    .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))
+    .slice(0, Math.max(1, modelLimit))
+    .map(([model]) => model)
+  const primarySet = new Set(primaryModels)
+  const hasOverflow = modelTotals.size > primaryModels.length
+  let otherModelKey: string | null = null
+  if (hasOverflow) {
+    otherModelKey = '\u0000other-models'
+    while (modelTotals.has(otherModelKey)) otherModelKey += '\u0000'
+  }
+  const models = otherModelKey ? [...primaryModels, otherModelKey] : primaryModels
+  const points = [...buckets.entries()]
+    .sort((left, right) => left[0] - right[0])
+    .map(([timestamp, bucket]) => {
+      const values: Record<string, number> = Object.fromEntries(
+        primaryModels.map((model) => [model, bucket.get(model) || 0]),
+      )
+      if (otherModelKey) {
+        values[otherModelKey] = [...bucket.entries()].reduce(
+          (total, [model, value]) => total + (primarySet.has(model) ? 0 : value),
+          0,
+        )
+      }
+      return {
+        timestamp,
+        total: [...bucket.values()].reduce((total, value) => total + value, 0),
+        values,
+      }
+    })
+  const peak = points.reduce((maximum, point) => Math.max(maximum, point.total), 0)
+  const average = points.length
+    ? points.reduce((total, point) => total + point.total, 0) / points.length
+    : 0
+  return { models, points, peak, average, otherModelKey }
 }
 
 function csvCell(value: unknown): string {

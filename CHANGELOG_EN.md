@@ -4,6 +4,31 @@
 
 ## Unreleased
 
+## 1.7.0 - 2026-07-25
+
+### Added
+
+- Added an interactive model-stacked request trend to Analytics, with Requests, Tokens, and Spend metrics, top-model grouping, peak and average summaries, a model legend, and hover details.
+- Upgraded custom key groups to many-to-many membership. One API key can belong to multiple reporting groups, and clicking a group card opens a searchable bulk member editor.
+- Added Monitor Overview to the regular-user business navigation, backed by the separately configurable viewer channel scope.
+
+### Changed
+
+- Today, Last 7 Days, and Last 30 Days presets now query immediately, with request sequencing so a slower stale response cannot overwrite the latest filter.
+- The displayed data range now always comes from the timestamps returned by the API. Single-bucket trends render a visible point, and the chart supports keyboard, touch, and an accessible data table.
+- Regular-user screens now use a neutral API Service Center identity and no longer expose New API branding, module labels, or sign-in copy. Administrators and operators retain the full technical view.
+- Group analytics now state their current multi-membership attribution: overlapping groups each include the key, while account totals remain deduplicated and group totals must not be added together.
+- Existing single-group membership tables migrate automatically to the many-to-many composite key on startup. Existing memberships need no manual work, and legacy `group_id` requests remain compatible.
+- The browser title and account-service errors visible to regular users now use neutral wording. The “Other models” bucket uses a collision-proof internal key and cannot merge with a real model of the same name.
+- When the browser has no existing account session, the neutral service-center login stays in place and asks the user to complete account sign-in instead of automatically redirecting to a branded upstream page.
+
+### Security
+
+- Regular users can read only channel cards and summary status enabled for the viewer audience. Monitor logs, machine resources, incidents, key lookup, and system settings still require an operator or administrator on the server.
+- Viewer channel APIs use a strict field allowlist and never return internal probe configuration, original channel names, recent request logs, or raw upstream error bodies.
+- Group-member updates continue to revalidate complete key ownership through the current session and remain isolated by `user_id`. Deleting a group never deletes keys or their other memberships.
+- The single-group to multi-group database migration runs inside an explicit transaction, rolls back completely on failure, and can be retried safely after data repair.
+
 ## 1.6.1 - 2026-07-25
 
 ### Changed

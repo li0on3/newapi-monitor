@@ -32,17 +32,58 @@ class KeyGroupStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_console_key_groups_owner
                     ON console_key_groups(owner_user_id, sort_order, name);
+                """
+            )
+            table_exists = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'console_key_group_memberships'"
+            ).fetchone()
+            if table_exists is not None:
+                columns = connection.execute(
+                    "PRAGMA table_info(console_key_group_memberships)"
+                ).fetchall()
+                primary_key = [
+                    str(row["name"])
+                    for row in sorted(columns, key=lambda row: int(row["pk"]) or 99)
+                    if int(row["pk"]) > 0
+                ]
+                if primary_key != ["owner_user_id", "token_id", "group_id"]:
+                    connection.executescript(
+                        """
+                        BEGIN IMMEDIATE;
+                        DROP INDEX IF EXISTS idx_console_key_group_memberships_group;
+                        ALTER TABLE console_key_group_memberships
+                            RENAME TO console_key_group_memberships_legacy;
+                        CREATE TABLE console_key_group_memberships (
+                            owner_user_id INTEGER NOT NULL,
+                            token_id INTEGER NOT NULL,
+                            group_id INTEGER NOT NULL,
+                            assigned_at INTEGER NOT NULL,
+                            PRIMARY KEY(owner_user_id, token_id, group_id),
+                            FOREIGN KEY(owner_user_id, group_id)
+                                REFERENCES console_key_groups(owner_user_id, id) ON DELETE CASCADE
+                        );
+                        INSERT OR IGNORE INTO console_key_group_memberships(
+                            owner_user_id, token_id, group_id, assigned_at
+                        )
+                        SELECT owner_user_id, token_id, group_id, assigned_at
+                        FROM console_key_group_memberships_legacy;
+                        DROP TABLE console_key_group_memberships_legacy;
+                        COMMIT;
+                        """
+                    )
+            connection.executescript(
+                """
                 CREATE TABLE IF NOT EXISTS console_key_group_memberships (
                     owner_user_id INTEGER NOT NULL,
                     token_id INTEGER NOT NULL,
                     group_id INTEGER NOT NULL,
                     assigned_at INTEGER NOT NULL,
-                    PRIMARY KEY(owner_user_id, token_id),
+                    PRIMARY KEY(owner_user_id, token_id, group_id),
                     FOREIGN KEY(owner_user_id, group_id)
                         REFERENCES console_key_groups(owner_user_id, id) ON DELETE CASCADE
                 );
                 CREATE INDEX IF NOT EXISTS idx_console_key_group_memberships_group
-                    ON console_key_group_memberships(owner_user_id, group_id);
+                    ON console_key_group_memberships(owner_user_id, group_id, token_id);
                 """
             )
             connection.commit()
@@ -187,59 +228,122 @@ class KeyGroupStore:
             connection.commit()
         return group
 
-    def membership_map(self, owner_user_id: int) -> dict[int, int]:
+    def membership_map(self, owner_user_id: int) -> dict[int, list[int]]:
         with self._connect() as connection:
             rows = connection.execute(
                 """
                 SELECT token_id, group_id
                 FROM console_key_group_memberships
                 WHERE owner_user_id = ?
+                ORDER BY token_id, group_id
                 """,
                 (owner_user_id,),
             ).fetchall()
-        return {int(row["token_id"]): int(row["group_id"]) for row in rows}
+        memberships: dict[int, list[int]] = {}
+        for row in rows:
+            memberships.setdefault(int(row["token_id"]), []).append(int(row["group_id"]))
+        return memberships
 
     def assign_tokens(
         self,
         owner_user_id: int,
         token_ids: list[int],
-        group_id: int | None,
+        group_ids: list[int],
     ) -> int:
         normalized = list(dict.fromkeys(int(token_id) for token_id in token_ids if int(token_id) > 0))
         if not normalized or len(normalized) > 100:
             raise KeyGroupError("token_ids must contain 1 to 100 positive integers")
+        normalized_groups = list(
+            dict.fromkeys(int(group_id) for group_id in group_ids if int(group_id) > 0)
+        )
+        if len(normalized_groups) > 50:
+            raise KeyGroupError("group_ids must contain at most 50 positive integers")
         now = int(time.time())
         with self._connect() as connection:
-            if group_id is None:
-                placeholders = ",".join("?" for _ in normalized)
-                cursor = connection.execute(
+            if normalized_groups:
+                placeholders = ",".join("?" for _ in normalized_groups)
+                rows = connection.execute(
                     f"""
-                    DELETE FROM console_key_group_memberships
-                    WHERE owner_user_id = ? AND token_id IN ({placeholders})
+                    SELECT id FROM console_key_groups
+                    WHERE owner_user_id = ? AND id IN ({placeholders})
                     """,
-                    (owner_user_id, *normalized),
+                    (owner_user_id, *normalized_groups),
+                ).fetchall()
+                if {int(row["id"]) for row in rows} != set(normalized_groups):
+                    raise KeyGroupError("group not found")
+            token_placeholders = ",".join("?" for _ in normalized)
+            connection.execute(
+                f"""
+                DELETE FROM console_key_group_memberships
+                WHERE owner_user_id = ? AND token_id IN ({token_placeholders})
+                """,
+                (owner_user_id, *normalized),
+            )
+            if normalized_groups:
+                connection.executemany(
+                    """
+                    INSERT INTO console_key_group_memberships(
+                        owner_user_id, token_id, group_id, assigned_at
+                    ) VALUES (?, ?, ?, ?)
+                    """,
+                    [
+                        (owner_user_id, token_id, group_id, now)
+                        for token_id in normalized
+                        for group_id in normalized_groups
+                    ],
                 )
-                connection.commit()
-                return max(cursor.rowcount, 0)
+            connection.commit()
+        return len(normalized)
+
+    def set_group_members(
+        self,
+        owner_user_id: int,
+        group_id: int,
+        token_ids: list[int],
+    ) -> int:
+        normalized = list(dict.fromkeys(int(token_id) for token_id in token_ids if int(token_id) > 0))
+        if len(normalized) > 2000:
+            raise KeyGroupError("token_ids must contain at most 2000 positive integers")
+        now = int(time.time())
+        with self._connect() as connection:
             exists = connection.execute(
                 "SELECT 1 FROM console_key_groups WHERE owner_user_id = ? AND id = ?",
                 (owner_user_id, group_id),
             ).fetchone()
             if exists is None:
                 raise KeyGroupError("group not found")
-            connection.executemany(
+            current_rows = connection.execute(
                 """
-                INSERT INTO console_key_group_memberships(
-                    owner_user_id, token_id, group_id, assigned_at
-                ) VALUES (?, ?, ?, ?)
-                ON CONFLICT(owner_user_id, token_id) DO UPDATE SET
-                    group_id = excluded.group_id,
-                    assigned_at = excluded.assigned_at
+                SELECT token_id FROM console_key_group_memberships
+                WHERE owner_user_id = ? AND group_id = ?
                 """,
-                [(owner_user_id, token_id, group_id, now) for token_id in normalized],
-            )
+                (owner_user_id, group_id),
+            ).fetchall()
+            current = {int(row["token_id"]) for row in current_rows}
+            desired = set(normalized)
+            removed = current - desired
+            added = desired - current
+            if removed:
+                placeholders = ",".join("?" for _ in removed)
+                connection.execute(
+                    f"""
+                    DELETE FROM console_key_group_memberships
+                    WHERE owner_user_id = ? AND group_id = ?
+                      AND token_id IN ({placeholders})
+                    """,
+                    (owner_user_id, group_id, *sorted(removed)),
+                )
+            if added:
+                connection.executemany(
+                    """
+                    INSERT INTO console_key_group_memberships(
+                        owner_user_id, token_id, group_id, assigned_at
+                    ) VALUES (?, ?, ?, ?)
+                    """,
+                    [(owner_user_id, token_id, group_id, now) for token_id in sorted(added)],
+                )
             connection.commit()
-        return len(normalized)
+        return len(removed) + len(added)
 
     def remove_tokens(self, owner_user_id: int, token_ids: list[int]) -> int:
         normalized = list(dict.fromkeys(int(token_id) for token_id in token_ids if int(token_id) > 0))
@@ -262,7 +366,7 @@ def build_key_usage_workspace(
     tokens: list[dict[str, Any]],
     flow_items: list[dict[str, Any]],
     groups: list[dict[str, Any]],
-    memberships: dict[int, int],
+    memberships: dict[int, list[int]],
     start_timestamp: int,
     end_timestamp: int,
 ) -> dict[str, Any]:
@@ -276,14 +380,27 @@ def build_key_usage_workspace(
 
     def usage_for(token_id: int) -> dict[str, Any]:
         if token_id not in token_usage:
-            group_id = memberships.get(token_id)
-            group = group_by_id.get(group_id) if group_id is not None else None
+            groups_for_token = [
+                group_by_id[group_id]
+                for group_id in memberships.get(token_id, [])
+                if group_id in group_by_id
+            ]
+            first_group = groups_for_token[0] if groups_for_token else None
             token_usage[token_id] = {
                 "token_id": token_id,
                 "token_name": token_names.get(token_id, ""),
-                "key_group_id": int(group["id"]) if group else None,
-                "key_group_name": str(group["name"]) if group else "",
-                "key_group_color": str(group["color"]) if group else "slate",
+                "key_group_ids": [int(group["id"]) for group in groups_for_token],
+                "key_groups": [
+                    {
+                        "id": int(group["id"]),
+                        "name": str(group["name"]),
+                        "color": str(group["color"]),
+                    }
+                    for group in groups_for_token
+                ],
+                "key_group_id": int(first_group["id"]) if first_group else None,
+                "key_group_name": str(first_group["name"]) if first_group else "",
+                "key_group_color": str(first_group["color"]) if first_group else "slate",
                 "requests": 0,
                 "quota": 0,
                 "tokens": 0,
@@ -313,11 +430,13 @@ def build_key_usage_workspace(
     }
     ungrouped_usage = {"requests": 0, "quota": 0, "tokens": 0, "models": set()}
     for usage in token_usage.values():
-        bucket = group_usage.get(usage["key_group_id"], ungrouped_usage)
-        bucket["requests"] += usage["requests"]
-        bucket["quota"] += usage["quota"]
-        bucket["tokens"] += usage["tokens"]
-        bucket["models"].update(usage["models"])
+        group_ids = usage["key_group_ids"]
+        buckets = [group_usage[group_id] for group_id in group_ids] if group_ids else [ungrouped_usage]
+        for bucket in buckets:
+            bucket["requests"] += usage["requests"]
+            bucket["quota"] += usage["quota"]
+            bucket["tokens"] += usage["tokens"]
+            bucket["models"].update(usage["models"])
 
     def serialize_usage(value: dict[str, Any]) -> dict[str, int]:
         return {
@@ -335,9 +454,9 @@ def build_key_usage_workspace(
         }
     current_group_counts = {group_id: 0 for group_id in group_by_id}
     for token_id in token_names:
-        group_id = memberships.get(token_id)
-        if group_id in current_group_counts:
-            current_group_counts[group_id] += 1
+        for group_id in memberships.get(token_id, []):
+            if group_id in current_group_counts:
+                current_group_counts[group_id] += 1
     serialized_groups = [
         {
             **group,
@@ -354,12 +473,14 @@ def build_key_usage_workspace(
         summary_source["models"].update(usage["models"])
     active_group_ids = set(group_by_id)
     ungrouped_count = sum(
-        1 for token_id in token_names if memberships.get(token_id) not in active_group_ids
+        1
+        for token_id in token_names
+        if not any(group_id in active_group_ids for group_id in memberships.get(token_id, []))
     )
     return {
         "start_timestamp": int(start_timestamp),
         "end_timestamp": int(end_timestamp),
-        "usage_attribution": "current_membership",
+        "usage_attribution": "current_multi_membership",
         "summary": {
             **serialize_usage(summary_source),
             "keys": len(token_names),

@@ -176,12 +176,20 @@ class DashboardSessionBoundaryTests(unittest.TestCase):
 
 
 class DashboardRoleBoundaryTests(unittest.TestCase):
-    def test_regular_new_api_user_cannot_access_monitor_modules(self):
+    def test_regular_user_can_access_monitor_overview_but_not_operator_modules(self):
         for endpoint, parameter in (
             (dashboard_app.dashboard_summary, "user"),
-            (dashboard_app.openai_provider_status, "user"),
             (dashboard_app.channels, "user"),
             (dashboard_app.channel, "user"),
+        ):
+            with self.subTest(endpoint=endpoint.__name__):
+                self.assertEqual(
+                    dashboard_app.AuthenticatedUser,
+                    get_type_hints(endpoint, include_extras=True)[parameter],
+                )
+
+        for endpoint, parameter in (
+            (dashboard_app.openai_provider_status, "user"),
             (dashboard_app.query_key_usage, "user"),
         ):
             with self.subTest(endpoint=endpoint.__name__):
@@ -201,6 +209,98 @@ class DashboardRoleBoundaryTests(unittest.TestCase):
         with self.assertRaises(HTTPException) as denied:
             dashboard_app.require_operator(viewer)
         self.assertEqual(403, denied.exception.status_code)
+
+    def test_viewer_overview_fails_closed_when_visibility_settings_are_unavailable(self):
+        viewer = {
+            "username": "alice",
+            "display_name": "Alice",
+            "role": "viewer",
+            "source": "newapi",
+            "source_role": 1,
+            "user_id": 9,
+        }
+        repository = mock.Mock()
+        repository.summary.return_value = {"channels": {"total": 1}}
+        repository.channels.return_value = [{"channel_id": 1}]
+        repository.channel.return_value = {"channel_id": 1}
+        with mock.patch.object(dashboard_app.runtime, "settings", None), mock.patch(
+            "dashboard_app.repository", return_value=repository
+        ):
+            for call in (
+                lambda: dashboard_app.dashboard_summary(viewer),
+                lambda: dashboard_app.channels(viewer),
+                lambda: dashboard_app.channel(1, viewer),
+            ):
+                with self.subTest(call=call):
+                    with self.assertRaises(HTTPException) as denied:
+                        call()
+                    self.assertEqual(503, denied.exception.status_code)
+
+    def test_viewer_channel_payload_omits_operator_only_metadata(self):
+        viewer = {
+            "username": "alice",
+            "display_name": "Alice",
+            "role": "viewer",
+            "source": "newapi",
+            "source_role": 1,
+            "user_id": 9,
+        }
+        item = {
+            "channel_id": 1,
+            "name": "Customer channel",
+            "channel_type": 1,
+            "enabled": True,
+            "raw_status": 1,
+            "models": ["model-a"],
+            "group": "default",
+            "synced_at": 100,
+            "latest": {
+                "observed_at": 100,
+                "success": False,
+                "elapsed_ms": 900,
+                "frt_ms": None,
+                "message": "upstream response body with private details",
+                "source": "real",
+            },
+            "history": [{
+                "observed_at": 99,
+                "success": False,
+                "elapsed_ms": 800,
+                "frt_ms": None,
+                "message": "another private error",
+                "source": "real",
+            }],
+            "availability": {"total": 1, "successes": 0, "percentage": 0},
+            "usage_24h": {"requests": 1, "slow": 0, "p95_seconds": 0.8},
+            "source_name": "Internal upstream name",
+            "monitor_config": {"probe_model": "internal-model"},
+            "recent_logs": [{"username": "another-user", "request_id": "req-secret"}],
+        }
+        repository = mock.Mock()
+        repository.channels.return_value = [item]
+        repository.channel.return_value = item
+        settings = mock.Mock()
+        settings.decorate_channels.side_effect = lambda items, **_: items
+
+        with mock.patch.object(dashboard_app.runtime, "settings", settings), mock.patch(
+            "dashboard_app.repository", return_value=repository
+        ):
+            listing = dashboard_app.channels(viewer)["items"][0]
+            detail = dashboard_app.channel(1, viewer)
+
+        for payload in (listing, detail):
+            self.assertNotIn("source_name", payload)
+            self.assertNotIn("monitor_config", payload)
+            self.assertNotIn("recent_logs", payload)
+            self.assertEqual("", payload["latest"]["message"])
+            self.assertEqual("", payload["history"][0]["message"])
+            self.assertEqual(
+                {
+                    "channel_id", "name", "channel_type", "enabled", "raw_status", "models",
+                    "group", "synced_at", "latest", "history", "availability", "usage_24h",
+                },
+                set(payload),
+            )
 
 if __name__ == "__main__":
     unittest.main()

@@ -50,7 +50,7 @@ export function ConsoleOverview({
         <div className="console-account-identity"><span>{(data.user.display_name || data.user.username).slice(0, 2).toUpperCase()}</span><div><strong>{data.user.display_name || data.user.username}</strong><small>@{data.user.username} · {data.user.group || t('默认分组')}</small></div></div>
         <dl className="console-detail-list">
           <div><dt>{t('数据范围')}</dt><dd>{data.scope === 'global' ? t('全局管理视图') : t('仅当前账号')}</dd></div>
-          <div><dt>{t('New API 版本')}</dt><dd>{data.system.version || '—'}</dd></div>
+          <div><dt>{t('服务版本')}</dt><dd>{data.system.version || '—'}</dd></div>
           <div><dt>{t('24 小时用量')}</dt><dd>{quotaText(data.usage_24h.quota, unit)}</dd></div>
           <div><dt>{t('最后同步')}</dt><dd>{dateTime(data.generated_at)}</dd></div>
         </dl>
@@ -74,7 +74,7 @@ export function ConsoleOverview({
       </article>}
       <article className="console-panel">
         <div className="console-panel-head"><div><span className="eyebrow">MODEL ACCESS</span><h3>{t('可用模型')}</h3></div><ConsoleBadge tone="blue">{data.models.total}</ConsoleBadge></div>
-        {data.models.items.length ? <div className="console-model-cloud">{data.models.items.map((model) => <span key={model}>{model}</span>)}</div> : <ConsoleEmpty title={t('暂无模型')} detail={t('New API 当前没有向该账号暴露模型。')} />}
+        {data.models.items.length ? <div className="console-model-cloud">{data.models.items.map((model) => <span key={model}>{model}</span>)}</div> : <ConsoleEmpty title={t('暂无模型')} detail={t('当前没有向该账号开放模型。')} />}
       </article>
     </section>
   </div>

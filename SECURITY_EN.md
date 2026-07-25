@@ -36,8 +36,11 @@ The New API pages and legacy key-usage lookup are separate trust boundaries:
 - Only a New API session verified through `/api/user/self`, with a returned user ID matching the request header, is accepted. Emergency administrators are denied.
 - The BFF exposes only fixed overview, analytics, token, and log APIs. It has no configurable path, arbitrary headers, or generic reverse-proxy function.
 - The original New API role selects global versus self-only APIs; monitor role mappings cannot elevate upstream permissions.
-- New API Admin and Root accounts map to monitor administrators by default. Regular accounts can access only the four personal New API pages; Monitor Overview, channels, official status, logs, resources, incidents, key lookup, and configuration APIs require an operator or administrator on the server.
+- New API Admin and Root accounts map to monitor administrators by default. Regular accounts can access only the viewer-filtered Monitor Overview plus the four personal New API pages. The standalone official-status page, monitor logs, resources, incidents, key lookup, channel settings, and system settings still require an operator or administrator on the server.
+- Viewer channel APIs use a field allowlist: original channel names, probe configuration, recent request logs, and raw upstream error bodies are excluded, and future administrative fields are not exposed by default.
 - Plaintext keys are available only through a rate-limited one-time POST response with caching disabled. They are never written to databases, logs, audit records, URLs, or browser storage.
+- Custom key-group membership is isolated by `user_id + token_id + group_id`. Every member write revalidates key ownership through the current session, and deleting a group cannot delete keys or their other memberships.
+- The single-group membership migration to a composite multi-group key runs inside an explicit SQLite transaction. Any error restores the old table so the migration can be retried safely after repair.
 - Regular-user logs strip administrator metadata, audit metadata, stream status, and channel names, and regular-user time ranges are capped at 30 days.
 - Mutations require the same-origin `X-Monitor-Request: 1` header and produce redacted audit records.
 - Production must host the New API pages on the same browser Origin as New API; page, setup, and Key-lookup requests never follow redirects with credentials.
