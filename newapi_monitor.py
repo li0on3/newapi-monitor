@@ -10,7 +10,6 @@ import math
 import os
 import queue
 import smtplib
-import sqlite3
 import ssl
 import threading
 import time
@@ -21,8 +20,32 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime
 from email.message import EmailMessage
-from pathlib import Path
 from typing import Any, Callable, Iterable
+
+from monitoring_core.alerting import (
+    AlertEvent,
+    ChannelObservation,
+    ChannelStateTracker,
+    CollectorFreshnessTracker,
+    ContainerStateTracker,
+    LatencyStateTracker,
+    LatencySummary,
+    LatencyWindowDecision,
+    ProbeCredentialStateTracker,
+    RealProbeResult,
+    RealProbeRule,
+    ResourceStateTracker,
+    ServiceStateTracker,
+    _parse_other,
+    build_auth_headers,
+    evaluate_latency_window,
+    is_channel_test_log,
+    parse_real_probe_rules,
+    summarize_logs,
+)
+from monitoring_core.delivery import AlertPublisher, NotificationOutboxWorker
+from monitoring_core.probe_protocol import ProbeProtocolValidator, validate_probe_json
+from monitoring_core.state_store import StateStore
 
 
 LOGGER = logging.getLogger("newapi-monitor")
@@ -78,571 +101,6 @@ def env_int(name: str, default: int) -> int:
     if value is None or value.strip() == "":
         return default
     return int(value)
-
-
-@dataclass(frozen=True)
-class AlertEvent:
-    kind: str
-    title: str
-    body: str
-    key: str = ""
-    severity: str = "warning"
-    recovery: bool = False
-    metadata: dict[str, Any] = field(default_factory=dict)
-    notify: bool = True
-
-
-@dataclass(frozen=True)
-class ChannelObservation:
-    channel_id: int
-    name: str
-    success: bool
-    elapsed_seconds: float
-    message: str
-    source: str = "builtin"
-    first_response_ms: float | None = None
-
-
-@dataclass(frozen=True)
-class LatencySummary:
-    channel_id: int
-    channel_name: str
-    model_name: str
-    count: int
-    average_seconds: float
-    p95_seconds: float
-    average_frt_ms: float | None
-    slow_count: int
-
-
-@dataclass(frozen=True)
-class LatencyWindowDecision:
-    triggered: bool
-    critical: bool
-    sample_count: int
-    bad_last5: int
-    bad_last10: int
-    max_total_seconds: float
-    max_frt_ms: float
-    reason: str
-
-
-@dataclass(frozen=True)
-class RealProbeRule:
-    channel_id: int
-    model: str
-    path: str
-    request_format: str
-    prompt: str = "1"
-    max_output_tokens: int = 1
-
-
-@dataclass(frozen=True)
-class RealProbeResult:
-    success: bool
-    elapsed_seconds: float
-    first_response_ms: float | None
-    message: str
-
-
-def build_auth_headers(access_token: str, user_id: int) -> dict[str, str]:
-    return {
-        "Authorization": f"Bearer {access_token}",
-        "New-Api-User": str(user_id),
-    }
-
-
-def _parse_other(other: Any) -> dict[str, Any]:
-    if isinstance(other, dict):
-        return other
-    if not isinstance(other, str) or not other.strip():
-        return {}
-    try:
-        parsed = json.loads(other)
-    except json.JSONDecodeError:
-        return {}
-    return parsed if isinstance(parsed, dict) else {}
-
-
-def is_channel_test_log(log: dict[str, Any]) -> bool:
-    return str(log.get("token_name") or "").strip() == "模型测试" or str(
-        log.get("content") or ""
-    ).strip() == "模型测试"
-
-
-def parse_real_probe_rules(raw: str) -> dict[int, RealProbeRule]:
-    if not raw.strip():
-        return {}
-    payload = json.loads(raw)
-    if not isinstance(payload, dict):
-        raise ValueError("REAL_PROBE_RULES must be a JSON object")
-    rules: dict[int, RealProbeRule] = {}
-    for channel_key, item in payload.items():
-        if not isinstance(item, dict):
-            raise ValueError(f"invalid real probe rule for channel {channel_key}")
-        channel_id = int(channel_key)
-        model = str(item.get("model") or "").strip()
-        if channel_id <= 0 or not model:
-            raise ValueError(f"invalid real probe rule for channel {channel_key}")
-        request_format = str(item.get("format") or "responses").strip().lower()
-        default_paths = {
-            "responses": "/v1/responses",
-            "chat": "/v1/chat/completions",
-            "anthropic": "/v1/messages",
-        }
-        default_path = default_paths.get(request_format, "/v1/responses")
-        rules[channel_id] = RealProbeRule(
-            channel_id=channel_id,
-            model=model,
-            path=str(item.get("path") or default_path),
-            request_format=request_format,
-            prompt=str(item.get("prompt") or "1"),
-            max_output_tokens=max(1, int(item.get("max_output_tokens") or 1)),
-        )
-    return rules
-
-
-def _percentile(values: list[float], percentile: float) -> float:
-    if not values:
-        return 0.0
-    ordered = sorted(values)
-    rank = max(1, math.ceil(percentile * len(ordered)))
-    return ordered[min(rank - 1, len(ordered) - 1)]
-
-
-def summarize_logs(logs: Iterable[dict[str, Any]], slow_seconds: float) -> list[LatencySummary]:
-    grouped: dict[tuple[int, str, str], dict[str, list[float] | int]] = {}
-    for log in logs:
-        channel_id = int(log.get("channel") or 0)
-        channel_name = str(log.get("channel_name") or f"channel-{channel_id}")
-        model_name = str(log.get("model_name") or "unknown")
-        use_time = float(log.get("use_time") or 0)
-        other = _parse_other(log.get("other"))
-        frt = other.get("frt")
-
-        key = (channel_id, channel_name, model_name)
-        bucket = grouped.setdefault(key, {"durations": [], "frt": [], "slow": 0})
-        durations = bucket["durations"]
-        assert isinstance(durations, list)
-        durations.append(use_time)
-        if use_time > slow_seconds:
-            bucket["slow"] = int(bucket["slow"]) + 1
-        if isinstance(frt, (int, float)) and frt > 0:
-            frt_values = bucket["frt"]
-            assert isinstance(frt_values, list)
-            frt_values.append(float(frt))
-
-    result: list[LatencySummary] = []
-    for (channel_id, channel_name, model_name), bucket in grouped.items():
-        durations = list(bucket["durations"])
-        frt_values = list(bucket["frt"])
-        result.append(
-            LatencySummary(
-                channel_id=channel_id,
-                channel_name=channel_name,
-                model_name=model_name,
-                count=len(durations),
-                average_seconds=round(sum(durations) / len(durations), 3),
-                p95_seconds=round(_percentile(durations, 0.95), 3),
-                average_frt_ms=(round(sum(frt_values) / len(frt_values), 1) if frt_values else None),
-                slow_count=int(bucket["slow"]),
-            )
-        )
-    return sorted(result, key=lambda item: (-item.count, item.channel_name, item.model_name))
-
-
-def evaluate_latency_window(
-    samples: Iterable[dict[str, Any]],
-    slow_seconds: float = 60.0,
-    hard_limit_seconds: float = 180.0,
-) -> LatencyWindowDecision:
-    recent = list(samples)[:10]
-    slow_limit_ms = slow_seconds * 1000.0
-    hard_limit_ms = hard_limit_seconds * 1000.0
-
-    def is_bad(sample: dict[str, Any]) -> bool:
-        use_time = float(sample.get("use_time") or 0)
-        frt_ms = float(sample.get("frt_ms") or 0)
-        return use_time > slow_seconds or frt_ms > slow_limit_ms
-
-    bad_flags = [is_bad(sample) for sample in recent]
-    bad_last5 = sum(bad_flags[:5])
-    bad_last10 = sum(bad_flags[:10])
-    max_total = max((float(sample.get("use_time") or 0) for sample in recent), default=0.0)
-    max_frt = max((float(sample.get("frt_ms") or 0) for sample in recent), default=0.0)
-    critical = max_total > hard_limit_seconds or max_frt > hard_limit_ms
-    three_of_five = len(recent) >= 5 and bad_last5 >= 3
-    five_of_ten = len(recent) >= 10 and bad_last10 >= 5
-    triggered = critical or three_of_five or five_of_ten
-
-    reasons: list[str] = []
-    if critical:
-        reasons.append(f"单次超过 {hard_limit_seconds:.0f}s")
-    if three_of_five:
-        reasons.append(f"近5次有{bad_last5}次超过 {slow_seconds:.0f}s")
-    if five_of_ten:
-        reasons.append(f"近10次有{bad_last10}次超过 {slow_seconds:.0f}s")
-    return LatencyWindowDecision(
-        triggered=triggered,
-        critical=critical,
-        sample_count=len(recent),
-        bad_last5=bad_last5,
-        bad_last10=bad_last10,
-        max_total_seconds=max_total,
-        max_frt_ms=max_frt,
-        reason="；".join(reasons),
-    )
-
-
-class LatencyStateTracker:
-    def __init__(
-        self,
-        states: dict[str, dict[str, Any]] | None = None,
-        slow_seconds: float = 60.0,
-        hard_limit_seconds: float = 180.0,
-        reminder_seconds: int = 1800,
-    ):
-        self.states = dict(states or {})
-        self.slow_seconds = slow_seconds
-        self.hard_limit_seconds = hard_limit_seconds
-        self.reminder_seconds = reminder_seconds
-
-    def evaluate(
-        self,
-        key: str,
-        label: str,
-        samples: Iterable[dict[str, Any]],
-        now: float | None = None,
-    ) -> list[AlertEvent]:
-        current_time = time.time() if now is None else now
-        recent = list(samples)[:10]
-        decision = evaluate_latency_window(recent, self.slow_seconds, self.hard_limit_seconds)
-        state = dict(self.states.get(key) or {"active": False, "last_notified": 0.0})
-        events: list[AlertEvent] = []
-
-        if decision.triggered:
-            should_notify = not state["active"] or current_time - float(state["last_notified"]) >= self.reminder_seconds
-            if should_notify:
-                state["active"] = True
-                state["last_notified"] = current_time
-                values = ", ".join(
-                    f"{float(sample.get('use_time') or 0):.0f}s/"
-                    f"{float(sample.get('frt_ms') or 0) / 1000.0:.1f}s"
-                    for sample in recent
-                )
-                events.append(
-                    AlertEvent(
-                        kind="latency_high" if not state.get("notified_before") else "latency_reminder",
-                        title=f"耗时异常：{label}",
-                        body=(
-                            f"规则：{decision.reason}\n"
-                            f"最大总耗时：{decision.max_total_seconds:.0f}s\n"
-                            f"最大首字耗时：{decision.max_frt_ms / 1000.0:.1f}s\n"
-                            f"最近请求（总耗时/首字）：{values}"
-                        ),
-                        key=f"latency:{key}",
-                        severity="critical" if decision.critical else "warning",
-                    )
-                )
-                state["notified_before"] = True
-        elif state["active"] and len(recent) >= 5:
-            last_five = evaluate_latency_window(recent[:5], self.slow_seconds, self.hard_limit_seconds)
-            if last_five.bad_last5 == 0:
-                events.append(
-                    AlertEvent(
-                        kind="latency_recovered",
-                        title=f"耗时恢复：{label}",
-                        body="最近连续5次请求均未超过耗时阈值。",
-                        key=f"latency:{key}",
-                        severity="info",
-                        recovery=True,
-                    )
-                )
-                state = {"active": False, "last_notified": current_time, "notified_before": False}
-
-        self.states[key] = state
-        return events
-
-
-class ChannelStateTracker:
-    def __init__(
-        self,
-        states: dict[str, Any] | None = None,
-        failure_threshold: int = 2,
-        recovery_threshold: int = 2,
-    ):
-        self.states = dict(states or {})
-        self.failure_threshold = max(1, failure_threshold)
-        self.recovery_threshold = max(1, recovery_threshold)
-
-    @staticmethod
-    def failure_class(message: str) -> str:
-        normalized = message.lower()
-        if any(marker in normalized for marker in (
-            "http 401", "http 403", "unauthorized", "forbidden", "无权访问", "权限",
-        )):
-            return "auth"
-        if any(marker in normalized for marker in (
-            "http 429", "http 500", "http 502", "http 503", "http 504",
-            "upstream 429", "upstream 500", "upstream 502", "upstream 503", "upstream 504",
-            "timeout", "timed out", "temporarily unavailable", "connection reset",
-            "connection refused", "临时不可用", "超时",
-        )):
-            return "transient"
-        return "persistent"
-
-    @staticmethod
-    def _normalize_state(raw: Any) -> dict[str, Any]:
-        if isinstance(raw, dict):
-            return {
-                "status": str(raw.get("status") or "unknown"),
-                "failures": max(0, int(raw.get("failures") or 0)),
-                "successes": max(0, int(raw.get("successes") or 0)),
-                "failure_class": str(raw.get("failure_class") or ""),
-            }
-        if raw in {"ok", "failed"}:
-            return {"status": raw, "failures": 0, "successes": 0, "failure_class": ""}
-        return {"status": "unknown", "failures": 0, "successes": 0, "failure_class": ""}
-
-    def evaluate(self, observations: Iterable[ChannelObservation]) -> list[AlertEvent]:
-        events: list[AlertEvent] = []
-        for observation in observations:
-            key = str(observation.channel_id)
-            state = self._normalize_state(self.states.get(key))
-            if observation.success:
-                state["failures"] = 0
-                state["failure_class"] = ""
-                if state["status"] == "failed":
-                    state["successes"] += 1
-                    if state["successes"] >= self.recovery_threshold:
-                        state = {"status": "ok", "failures": 0, "successes": 0, "failure_class": ""}
-                        events.append(
-                            AlertEvent(
-                                kind="channel_recovered",
-                                title=f"渠道恢复：{observation.name}",
-                                body=(
-                                    f"渠道ID：{observation.channel_id}\n"
-                                    f"已连续成功 {self.recovery_threshold} 次\n"
-                                    f"探测耗时：{observation.elapsed_seconds:.3f}s"
-                                ),
-                                key=f"channel:{observation.channel_id}",
-                                severity="info",
-                                recovery=True,
-                            )
-                        )
-                else:
-                    state = {"status": "ok", "failures": 0, "successes": 0, "failure_class": ""}
-                self.states[key] = state
-                continue
-
-            state["successes"] = 0
-            state["failures"] += 1
-            state["failure_class"] = self.failure_class(observation.message)
-            if state["status"] != "failed" and state["failures"] >= self.failure_threshold:
-                state["status"] = "failed"
-                events.append(
-                    AlertEvent(
-                        kind="channel_failed",
-                        title=f"渠道异常：{observation.name}",
-                        body=(
-                            f"渠道ID：{observation.channel_id}\n"
-                            f"已连续失败 {state['failures']} 次\n"
-                            f"探测耗时：{observation.elapsed_seconds:.3f}s\n"
-                            f"错误：{observation.message or '未知错误'}"
-                        ),
-                        key=f"channel:{observation.channel_id}",
-                        severity="warning" if state["failure_class"] == "transient" else "critical",
-                    )
-                )
-            self.states[key] = state
-        return events
-
-
-class ProbeCredentialStateTracker:
-    def __init__(self, state: dict[str, Any] | None = None, recovery_threshold: int = 2):
-        self.state = dict(state or {})
-        self.recovery_threshold = max(1, recovery_threshold)
-
-    def evaluate(self, observations: Iterable[ChannelObservation]) -> tuple[list[AlertEvent], set[int]]:
-        items = list(observations)
-        auth_failures = [
-            item for item in items
-            if not item.success and ChannelStateTracker.failure_class(item.message) == "auth"
-        ]
-        enabled_count = len(items)
-        common_failure = enabled_count >= 2 and len(auth_failures) >= max(2, math.ceil(enabled_count / 2))
-        active = bool(self.state.get("active", False))
-        events: list[AlertEvent] = []
-        suppressed: set[int] = set()
-        if common_failure:
-            suppressed = {item.channel_id for item in auth_failures}
-            self.state = {"active": True, "successes": 0}
-            if not active:
-                sample = auth_failures[0].message or "New API拒绝了渠道探测请求"
-                events.append(
-                    AlertEvent(
-                        kind="probe_auth_failed",
-                        title="监控探测凭证或分组权限异常",
-                        body=(
-                            f"同一轮有 {len(auth_failures)}/{enabled_count} 个渠道返回相同类型的认证或分组错误。\n"
-                            "已抑制对应渠道故障，避免将监控凭证问题误报为多个上游故障。\n"
-                            f"示例错误：{sample}"
-                        ),
-                        key="probe:credential",
-                        severity="critical",
-                    )
-                )
-            return events, suppressed
-
-        if active:
-            successes = int(self.state.get("successes") or 0) + 1
-            if successes >= self.recovery_threshold:
-                self.state = {"active": False, "successes": 0}
-                events.append(
-                    AlertEvent(
-                        kind="probe_auth_recovered",
-                        title="监控探测凭证与分组权限恢复",
-                        body=f"连续 {self.recovery_threshold} 轮未再出现多渠道共同认证错误。",
-                        key="probe:credential",
-                        severity="info",
-                        recovery=True,
-                    )
-                )
-            else:
-                self.state = {"active": True, "successes": successes}
-        return events, suppressed
-
-
-class ServiceStateTracker:
-    def __init__(self, state: str = "unknown"):
-        self.state = state
-
-    def evaluate(self, success: bool, message: str = "") -> list[AlertEvent]:
-        new_state = "ok" if success else "failed"
-        old_state = self.state
-        self.state = new_state
-        if old_state == new_state or (old_state == "unknown" and success):
-            return []
-        if success:
-            return [
-                AlertEvent(
-                    kind="service_recovered",
-                    title="New API服务恢复",
-                    body="管理接口已恢复访问",
-                    key="service:newapi",
-                    severity="info",
-                    recovery=True,
-                )
-            ]
-        return [
-            AlertEvent(
-                kind="service_failed",
-                title="New API服务异常",
-                body=f"管理接口访问失败：{message or '未知错误'}",
-                key="service:newapi",
-                severity="critical",
-            )
-        ]
-
-
-class CollectorFreshnessTracker:
-    def __init__(self, states: dict[str, str] | None = None):
-        self.states = dict(states or {})
-
-    def evaluate(self, collectors: dict[str, dict[str, Any]]) -> list[AlertEvent]:
-        events: list[AlertEvent] = []
-        labels = {
-            "channel_sync": "渠道同步",
-            "channel_probe": "渠道探测",
-            "logs": "使用日志",
-            "resources": "机器资源",
-        }
-        for name, detail in collectors.items():
-            current = str(detail.get("status") or "starting")
-            previous = self.states.get(name, "starting")
-            if current == "stale" and previous != "stale":
-                age = int(detail.get("age_seconds") or 0)
-                threshold = int(detail.get("stale_after_seconds") or 0)
-                error = str(detail.get("last_error") or "")
-                body = f"最后成功采集距今 {age}s，失效阈值 {threshold}s。"
-                if error:
-                    body += f"\n最近错误：{error}"
-                events.append(
-                    AlertEvent(
-                        "collector_stale",
-                        f"采集器异常：{labels.get(name, name)}",
-                        body,
-                        key=f"collector:{name}",
-                        severity="critical" if name in {"channel_sync", "channel_probe"} else "warning",
-                    )
-                )
-            elif current == "ok" and previous == "stale":
-                events.append(
-                    AlertEvent(
-                        "collector_recovered",
-                        f"采集器恢复：{labels.get(name, name)}",
-                        f"{labels.get(name, name)}采集已恢复，最新数据距今 {int(detail.get('age_seconds') or 0)}s。",
-                        key=f"collector:{name}",
-                        severity="info",
-                        recovery=True,
-                    )
-                )
-            self.states[name] = current
-        return events
-
-
-class ResourceStateTracker:
-    def __init__(
-        self,
-        thresholds: dict[str, float],
-        sustain_seconds: int,
-        states: dict[str, dict[str, Any]] | None = None,
-        recovery_ratio: float = 0.9,
-    ):
-        self.thresholds = thresholds
-        self.sustain_seconds = sustain_seconds
-        self.states = dict(states or {})
-        self.recovery_ratio = recovery_ratio
-
-    def evaluate(self, metrics: dict[str, float], now: float | None = None) -> list[AlertEvent]:
-        current_time = time.time() if now is None else now
-        events: list[AlertEvent] = []
-        for name, threshold in self.thresholds.items():
-            if name not in metrics:
-                continue
-            value = float(metrics[name])
-            state = dict(self.states.get(name) or {"since": None, "alerted": False})
-            if value > threshold:
-                if state["since"] is None:
-                    state["since"] = current_time
-                if not state["alerted"] and current_time - float(state["since"]) >= self.sustain_seconds:
-                    state["alerted"] = True
-                    events.append(
-                        AlertEvent(
-                            kind="resource_high",
-                            title=f"资源告警：{name}",
-                            body=f"当前值：{value:.1f}%\n阈值：{threshold:.1f}%",
-                            key=f"resource:{name}",
-                            severity="critical",
-                        )
-                    )
-            elif state["alerted"]:
-                if value <= threshold * self.recovery_ratio:
-                    events.append(
-                        AlertEvent(
-                            kind="resource_recovered",
-                            title=f"资源恢复：{name}",
-                            body=f"当前值：{value:.1f}%\n恢复阈值：{threshold * self.recovery_ratio:.1f}%",
-                            key=f"resource:{name}",
-                            severity="info",
-                            recovery=True,
-                        )
-                    )
-                    state = {"since": None, "alerted": False}
-            else:
-                state["since"] = None
-            self.states[name] = state
-        return events
 
 
 OPENAI_STATUS_SUMMARY_URL = "https://status.openai.com/api/v2/summary.json"
@@ -1127,6 +585,11 @@ class Config:
     channel_settings: dict[int, dict[str, Any]]
     excluded_token_names: tuple[str, ...]
     retention_days: int
+    incident_retention_days: int
+    notification_retention_days: int
+    database_maintenance_interval_seconds: int
+    database_max_mb: int
+    notification_max_attempts: int
     smtp_host: str
     smtp_port: int
     smtp_user: str
@@ -1260,6 +723,14 @@ class Config:
                 if item.strip()
             ),
             retention_days=max(8, int(value("retention_days", "RETENTION_DAYS", 90))),
+            incident_retention_days=max(30, int(value("incident_retention_days", "INCIDENT_RETENTION_DAYS", 365))),
+            notification_retention_days=max(7, int(value("notification_retention_days", "NOTIFICATION_RETENTION_DAYS", 30))),
+            database_maintenance_interval_seconds=max(
+                3600,
+                int(value("database_maintenance_interval_seconds", "DATABASE_MAINTENANCE_INTERVAL_SECONDS", 21600)),
+            ),
+            database_max_mb=max(128, int(value("database_max_mb", "DATABASE_MAX_MB", 2048))),
+            notification_max_attempts=max(1, min(20, int(value("notification_max_attempts", "NOTIFICATION_MAX_ATTEMPTS", 8)))),
             smtp_host=str(value("smtp_host", "SMTP_HOST", "")),
             smtp_port=int(value("smtp_port", "SMTP_PORT", 25)),
             smtp_user=str(value("smtp_user", "SMTP_USER", "")),
@@ -1374,9 +845,27 @@ class NewAPIClient:
 
     def get_channels(self) -> list[dict[str, Any]]:
         payload = self._request("/api/channel/?page=1&page_size=1000")
-        data = payload.get("data") or {}
-        items = data.get("items") if isinstance(data, dict) else None
-        return items if isinstance(items, list) else []
+        data = payload.get("data")
+        if not isinstance(data, dict):
+            raise RuntimeError("New API channel response has no data object")
+        items = data.get("items")
+        if not isinstance(items, list):
+            raise RuntimeError("New API channel response has no items list")
+        try:
+            total = int(data.get("total") if data.get("total") is not None else len(items))
+        except (TypeError, ValueError) as error:
+            raise RuntimeError("New API channel response has an invalid total") from error
+        if not items and total != 0:
+            raise RuntimeError("New API channel response is incomplete: total is non-zero but items is empty")
+        normalized: list[dict[str, Any]] = []
+        for item in items:
+            if not isinstance(item, dict):
+                raise RuntimeError("New API channel response contains a non-object item")
+            channel_id = int(item.get("id") or 0)
+            if channel_id <= 0 or "status" not in item:
+                raise RuntimeError("New API channel response contains an invalid channel item")
+            normalized.append(item)
+        return normalized
 
     def test_channel(self, channel_id: int) -> dict[str, Any]:
         return self._request(f"/api/channel/test/{channel_id}", allow_failure=True)
@@ -1461,8 +950,9 @@ class RelayProbeClient:
         try:
             with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
                 content_type = str(response.headers.get("Content-Type") or "").lower()
-                received_payload = False
                 if "text/event-stream" in content_type:
+                    validator = ProbeProtocolValidator(rule.request_format)
+                    event_name = ""
                     while True:
                         line = response.readline()
                         if not line:
@@ -1470,606 +960,39 @@ class RelayProbeClient:
                         stripped = line.strip()
                         if not stripped or stripped.startswith(b":"):
                             continue
-                        if stripped.startswith(b"data:") and stripped != b"data: [DONE]":
-                            received_payload = True
-                            if first_response_ms is None:
+                        if stripped.startswith(b"event:"):
+                            event_name = stripped[6:].decode("utf-8", errors="replace").strip()
+                            continue
+                        if stripped.startswith(b"data:"):
+                            was_valid = validator.valid_payload_seen
+                            validator.feed(
+                                event_name,
+                                stripped[5:].decode("utf-8", errors="replace").strip(),
+                            )
+                            if not was_valid and validator.valid_payload_seen and first_response_ms is None:
                                 first_response_ms = (time.monotonic() - started) * 1000.0
+                    success, message = validator.result()
                 else:
                     body = response.read()
-                    received_payload = bool(body.strip())
-                    if received_payload:
-                        first_response_ms = (time.monotonic() - started) * 1000.0
+                    if not body.strip():
+                        success, message = False, "upstream returned an empty response"
+                    else:
+                        try:
+                            payload = json.loads(body.decode("utf-8", errors="replace"))
+                        except json.JSONDecodeError:
+                            success, message = False, "upstream returned invalid JSON"
+                        else:
+                            success, message = validate_probe_json(rule.request_format, payload)
+                        if success:
+                            first_response_ms = (time.monotonic() - started) * 1000.0
                 elapsed = time.monotonic() - started
-                if not received_payload:
-                    return RealProbeResult(False, elapsed, first_response_ms, "upstream returned an empty response")
-                return RealProbeResult(True, elapsed, first_response_ms, "")
+                return RealProbeResult(success, elapsed, first_response_ms, message)
         except urllib.error.HTTPError as error:
             elapsed = time.monotonic() - started
             body = error.read().decode("utf-8", errors="replace")[:500]
             return RealProbeResult(False, elapsed, first_response_ms, f"HTTP {error.code}: {body}")
         except (urllib.error.URLError, TimeoutError, OSError) as error:
             return RealProbeResult(False, time.monotonic() - started, first_response_ms, str(error))
-
-
-class StateStore:
-    def __init__(self, path: str):
-        Path(path).parent.mkdir(parents=True, exist_ok=True)
-        self.connection = sqlite3.connect(path, timeout=30)
-        self.connection.row_factory = sqlite3.Row
-        self.connection.execute("PRAGMA journal_mode=WAL")
-        self.connection.execute("PRAGMA busy_timeout=30000")
-        self.connection.execute("CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
-        self.connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS latency_samples (
-                sample_key TEXT PRIMARY KEY,
-                created_at INTEGER NOT NULL,
-                channel_id INTEGER NOT NULL,
-                channel_name TEXT NOT NULL,
-                model_name TEXT NOT NULL,
-                use_time REAL NOT NULL,
-                frt_ms REAL
-            )
-            """
-        )
-        for column, declaration in (
-            ("username", "TEXT NOT NULL DEFAULT ''"),
-            ("token_name", "TEXT NOT NULL DEFAULT ''"),
-            ("token_id", "INTEGER NOT NULL DEFAULT 0"),
-            ("is_stream", "INTEGER NOT NULL DEFAULT 0"),
-            ("request_id", "TEXT NOT NULL DEFAULT ''"),
-            ("upstream_request_id", "TEXT NOT NULL DEFAULT ''"),
-            ("group_name", "TEXT NOT NULL DEFAULT ''"),
-        ):
-            existing = {
-                str(row["name"])
-                for row in self.connection.execute("PRAGMA table_info(latency_samples)").fetchall()
-            }
-            if column not in existing:
-                self.connection.execute(f"ALTER TABLE latency_samples ADD COLUMN {column} {declaration}")
-        self.connection.executescript(
-            """
-            CREATE INDEX IF NOT EXISTS idx_latency_created_at ON latency_samples(created_at);
-            CREATE INDEX IF NOT EXISTS idx_latency_channel_model ON latency_samples(channel_id, model_name, created_at);
-
-            CREATE TABLE IF NOT EXISTS channels (
-                channel_id INTEGER PRIMARY KEY,
-                name TEXT NOT NULL,
-                channel_type INTEGER NOT NULL,
-                status INTEGER NOT NULL,
-                models TEXT NOT NULL,
-                channel_group TEXT NOT NULL,
-                base_url TEXT NOT NULL,
-                updated_at INTEGER NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS channel_observations (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                observed_at INTEGER NOT NULL,
-                channel_id INTEGER NOT NULL,
-                channel_name TEXT NOT NULL,
-                success INTEGER NOT NULL,
-                elapsed_ms REAL NOT NULL,
-                frt_ms REAL,
-                message TEXT NOT NULL,
-                source TEXT NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_channel_observation_time
-                ON channel_observations(channel_id, observed_at);
-
-            CREATE TABLE IF NOT EXISTS resource_samples (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                created_at INTEGER NOT NULL,
-                system_cpu REAL,
-                system_memory REAL,
-                system_disk REAL,
-                system_available_mb REAL,
-                system_swap REAL,
-                containers_json TEXT NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_resource_created_at ON resource_samples(created_at);
-
-            CREATE TABLE IF NOT EXISTS incidents (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                incident_key TEXT NOT NULL,
-                kind TEXT NOT NULL,
-                severity TEXT NOT NULL,
-                title TEXT NOT NULL,
-                body TEXT NOT NULL,
-                resolution_body TEXT NOT NULL DEFAULT '',
-                legacy_cause_missing INTEGER NOT NULL DEFAULT 0,
-                status TEXT NOT NULL,
-                started_at INTEGER NOT NULL,
-                updated_at INTEGER NOT NULL,
-                resolved_at INTEGER,
-                last_notified_at INTEGER NOT NULL,
-                metadata_json TEXT NOT NULL DEFAULT '{}'
-            );
-            CREATE INDEX IF NOT EXISTS idx_incident_status_time ON incidents(status, updated_at);
-            CREATE INDEX IF NOT EXISTS idx_incident_key ON incidents(incident_key, id);
-
-            CREATE TABLE IF NOT EXISTS provider_status_samples (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                provider TEXT NOT NULL,
-                observed_at INTEGER NOT NULL,
-                payload_json TEXT NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_provider_status_time
-                ON provider_status_samples(provider, observed_at DESC, id DESC);
-            """
-        )
-        incident_columns = {
-            str(row["name"])
-            for row in self.connection.execute("PRAGMA table_info(incidents)").fetchall()
-        }
-        added_resolution_body = "resolution_body" not in incident_columns
-        if "resolution_body" not in incident_columns:
-            self.connection.execute(
-                "ALTER TABLE incidents ADD COLUMN resolution_body TEXT NOT NULL DEFAULT ''"
-            )
-        added_legacy_marker = "legacy_cause_missing" not in incident_columns
-        if added_legacy_marker:
-            self.connection.execute(
-                "ALTER TABLE incidents ADD COLUMN legacy_cause_missing INTEGER NOT NULL DEFAULT 0"
-            )
-        if added_resolution_body:
-            self.connection.execute(
-                """
-                UPDATE incidents
-                SET resolution_body = body, legacy_cause_missing = 1
-                WHERE status = 'resolved'
-                """
-            )
-        elif added_legacy_marker:
-            self.connection.execute(
-                """
-                UPDATE incidents
-                SET legacy_cause_missing = 1
-                WHERE status = 'resolved' AND resolution_body = body AND body != ''
-                """
-            )
-        if "metadata_json" not in incident_columns:
-            self.connection.execute(
-                "ALTER TABLE incidents ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}'"
-            )
-        self.connection.commit()
-
-    def get_json(self, key: str, default: Any) -> Any:
-        row = self.connection.execute("SELECT value FROM kv WHERE key = ?", (key,)).fetchone()
-        if row is None:
-            return default
-        try:
-            return json.loads(row[0])
-        except json.JSONDecodeError:
-            return default
-
-    def set_json(self, key: str, value: Any) -> None:
-        self.connection.execute(
-            "INSERT INTO kv(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            (key, json.dumps(value, ensure_ascii=False)),
-        )
-        self.connection.commit()
-
-    def record_collector_result(
-        self,
-        name: str,
-        success: bool,
-        error: str = "",
-        stale_after_seconds: int = 300,
-        now: int | None = None,
-    ) -> None:
-        timestamp = int(time.time()) if now is None else int(now)
-        statuses = self.get_json("collector_health", {})
-        current = dict(statuses.get(name) or {})
-        current.setdefault("first_attempt_at", timestamp)
-        current["last_attempt_at"] = timestamp
-        current["stale_after_seconds"] = max(1, int(stale_after_seconds))
-        if success:
-            current["last_success_at"] = timestamp
-            current["consecutive_failures"] = 0
-            current["last_error"] = ""
-        else:
-            current["consecutive_failures"] = int(current.get("consecutive_failures") or 0) + 1
-            current["last_error"] = str(error).strip()[:1000]
-        statuses[name] = current
-        self.set_json("collector_health", statuses)
-
-    def ensure_collector(
-        self,
-        name: str,
-        stale_after_seconds: int,
-        now: int | None = None,
-    ) -> None:
-        timestamp = int(time.time()) if now is None else int(now)
-        statuses = self.get_json("collector_health", {})
-        current = dict(statuses.get(name) or {})
-        current.setdefault("first_attempt_at", timestamp)
-        current["stale_after_seconds"] = max(1, int(stale_after_seconds))
-        current.setdefault("consecutive_failures", 0)
-        current.setdefault("last_error", "")
-        statuses[name] = current
-        self.set_json("collector_health", statuses)
-
-    def collector_health(self, now: int | None = None) -> dict[str, dict[str, Any]]:
-        timestamp = int(time.time()) if now is None else int(now)
-        result: dict[str, dict[str, Any]] = {}
-        for name, raw in dict(self.get_json("collector_health", {})).items():
-            detail = dict(raw or {})
-            last_success = int(detail.get("last_success_at") or 0)
-            first_attempt = int(detail.get("first_attempt_at") or timestamp)
-            stale_after = max(1, int(detail.get("stale_after_seconds") or 300))
-            reference = last_success or first_attempt
-            age = max(0, timestamp - reference)
-            detail["age_seconds"] = age
-            detail["status"] = "stale" if age > stale_after else ("ok" if last_success else "starting")
-            result[str(name)] = detail
-        return result
-
-    def upsert_channels(self, channels: Iterable[dict[str, Any]], now: int | None = None) -> None:
-        updated_at = int(time.time()) if now is None else now
-        channel_ids: list[int] = []
-        for channel in channels:
-            channel_id = int(channel.get("id") or 0)
-            if channel_id <= 0:
-                continue
-            channel_ids.append(channel_id)
-            self.connection.execute(
-                """
-                INSERT INTO channels(
-                    channel_id, name, channel_type, status, models, channel_group, base_url, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(channel_id) DO UPDATE SET
-                    name = excluded.name,
-                    channel_type = excluded.channel_type,
-                    status = excluded.status,
-                    models = excluded.models,
-                    channel_group = excluded.channel_group,
-                    base_url = excluded.base_url,
-                    updated_at = excluded.updated_at
-                """,
-                (
-                    channel_id,
-                    str(channel.get("name") or f"channel-{channel_id}"),
-                    int(channel.get("type") or 0),
-                    int(channel.get("status") or 0),
-                    str(channel.get("models") or ""),
-                    str(channel.get("group") or ""),
-                    str(channel.get("base_url") or ""),
-                    updated_at,
-                ),
-            )
-        if channel_ids:
-            placeholders = ",".join("?" for _ in channel_ids)
-            self.connection.execute(
-                f"DELETE FROM channels WHERE channel_id NOT IN ({placeholders})",
-                channel_ids,
-            )
-        else:
-            self.connection.execute("DELETE FROM channels")
-        self.connection.commit()
-
-    def insert_channel_observations(
-        self,
-        observations: Iterable[ChannelObservation],
-        observed_at: int | None = None,
-    ) -> None:
-        timestamp = int(time.time()) if observed_at is None else observed_at
-        self.connection.executemany(
-            """
-            INSERT INTO channel_observations(
-                observed_at, channel_id, channel_name, success, elapsed_ms, frt_ms, message, source
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            [
-                (
-                    timestamp,
-                    item.channel_id,
-                    item.name,
-                    int(item.success),
-                    item.elapsed_seconds * 1000.0,
-                    item.first_response_ms,
-                    item.message,
-                    item.source,
-                )
-                for item in observations
-            ],
-        )
-        self.connection.commit()
-
-    def insert_resource_sample(
-        self,
-        metrics: dict[str, float],
-        details: dict[str, Any],
-        created_at: int | None = None,
-    ) -> None:
-        timestamp = int(time.time()) if created_at is None else created_at
-        self.connection.execute(
-            """
-            INSERT INTO resource_samples(
-                created_at, system_cpu, system_memory, system_disk,
-                system_available_mb, system_swap, containers_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                timestamp,
-                metrics.get("system_cpu"),
-                metrics.get("system_memory"),
-                metrics.get("system_disk"),
-                metrics.get("system_available_mb"),
-                metrics.get("system_swap"),
-                json.dumps(details.get("containers") or {}, ensure_ascii=False),
-            ),
-        )
-        self.connection.commit()
-
-    def record_provider_status(
-        self,
-        provider: str,
-        payload: dict[str, Any],
-        observed_at: int | None = None,
-    ) -> None:
-        timestamp = int(time.time()) if observed_at is None else int(observed_at)
-        normalized = dict(payload)
-        normalized["provider"] = str(provider)
-        normalized["observed_at"] = timestamp
-        self.connection.execute(
-            "DELETE FROM provider_status_samples WHERE provider = ?",
-            (str(provider),),
-        )
-        self.connection.execute(
-            "INSERT INTO provider_status_samples(provider, observed_at, payload_json) VALUES (?, ?, ?)",
-            (str(provider), timestamp, json.dumps(normalized, ensure_ascii=False)),
-        )
-        self.connection.commit()
-
-    def provider_local_impact(
-        self,
-        provider: str,
-        now: int | None = None,
-        stale_after_seconds: int = 900,
-    ) -> dict[str, int]:
-        if provider != "openai":
-            return {"total": 0, "healthy": 0, "failed": 0, "unknown": 0}
-        timestamp = int(time.time()) if now is None else int(now)
-        rows = self.connection.execute(
-            """
-            SELECT c.channel_id, c.models, latest.success, latest.observed_at
-            FROM channels c
-            LEFT JOIN channel_observations latest ON latest.id = (
-                SELECT id FROM channel_observations
-                WHERE channel_id = c.channel_id
-                ORDER BY observed_at DESC, id DESC LIMIT 1
-            )
-            WHERE c.status = 1
-            """
-        ).fetchall()
-        prefixes = ("gpt-", "o1", "o3", "o4", "codex", "text-embedding", "dall-e")
-        related = [
-            row for row in rows
-            if any(
-                model.strip().lower().startswith(prefixes)
-                for model in str(row["models"] or "").split(",")
-                if model.strip()
-            )
-        ]
-        healthy = 0
-        failed = 0
-        for row in related:
-            if not row["observed_at"] or int(row["observed_at"]) < timestamp - stale_after_seconds:
-                continue
-            if int(row["success"] or 0) == 1:
-                healthy += 1
-            else:
-                failed += 1
-        return {
-            "total": len(related),
-            "healthy": healthy,
-            "failed": failed,
-            "unknown": len(related) - healthy - failed,
-        }
-
-    def record_alert_events(self, events: Iterable[AlertEvent], now: int | None = None) -> None:
-        timestamp = int(time.time()) if now is None else now
-        for event in events:
-            incident_key = event.key or event.kind
-            open_row = self.connection.execute(
-                """
-                SELECT id FROM incidents
-                WHERE incident_key = ? AND status = 'open'
-                ORDER BY id DESC LIMIT 1
-                """,
-                (incident_key,),
-            ).fetchone()
-            if event.recovery:
-                if open_row is not None:
-                    self.connection.execute(
-                        """
-                        UPDATE incidents
-                        SET status = 'resolved', updated_at = ?, resolved_at = ?, resolution_body = ?,
-                            metadata_json = ?
-                        WHERE id = ?
-                        """,
-                        (
-                            timestamp,
-                            timestamp,
-                            event.body,
-                            json.dumps(event.metadata, ensure_ascii=False),
-                            int(open_row["id"]),
-                        ),
-                    )
-                continue
-            if open_row is None:
-                self.connection.execute(
-                    """
-                    INSERT INTO incidents(
-                        incident_key, kind, severity, title, body, status,
-                        started_at, updated_at, resolved_at, last_notified_at, metadata_json
-                    ) VALUES (?, ?, ?, ?, ?, 'open', ?, ?, NULL, ?, ?)
-                    """,
-                    (
-                        incident_key,
-                        event.kind,
-                        event.severity,
-                        event.title,
-                        event.body,
-                        timestamp,
-                        timestamp,
-                        timestamp,
-                        json.dumps(event.metadata, ensure_ascii=False),
-                    ),
-                )
-            else:
-                self.connection.execute(
-                    """
-                    UPDATE incidents
-                    SET kind = ?, severity = ?, title = ?, body = ?,
-                        updated_at = ?, last_notified_at = ?, metadata_json = ?
-                    WHERE id = ?
-                    """,
-                    (
-                        event.kind,
-                        event.severity,
-                        event.title,
-                        event.body,
-                        timestamp,
-                        timestamp,
-                        json.dumps(event.metadata, ensure_ascii=False),
-                        int(open_row["id"]),
-                    ),
-                )
-        self.connection.commit()
-
-    def resolve_open_incidents(
-        self,
-        incident_prefix: str,
-        resolution_body: str,
-        now: int | None = None,
-    ) -> int:
-        timestamp = int(time.time()) if now is None else int(now)
-        cursor = self.connection.execute(
-            """
-            UPDATE incidents
-            SET status = 'resolved', updated_at = ?, resolved_at = ?, resolution_body = ?
-            WHERE status = 'open' AND incident_key LIKE ?
-            """,
-            (timestamp, timestamp, resolution_body, f"{incident_prefix}%"),
-        )
-        self.connection.commit()
-        return int(cursor.rowcount)
-
-    def has_open_incident(self, incident_key: str) -> bool:
-        row = self.connection.execute(
-            "SELECT 1 FROM incidents WHERE incident_key = ? AND status = 'open' LIMIT 1",
-            (incident_key,),
-        ).fetchone()
-        return row is not None
-
-    def ingest_logs(
-        self,
-        logs: Iterable[dict[str, Any]],
-        excluded_token_names: Iterable[str] = (),
-    ) -> int:
-        inserted = 0
-        excluded_tokens = {item.strip() for item in excluded_token_names if item.strip()}
-        for log in logs:
-            if is_channel_test_log(log) or str(log.get("token_name") or "").strip() in excluded_tokens:
-                continue
-            created_at = int(log.get("created_at") or 0)
-            request_id = str(log.get("request_id") or "")
-            if request_id:
-                sample_key = request_id
-            else:
-                raw_key = "|".join(
-                    str(log.get(field) or "")
-                    for field in ("id", "created_at", "channel", "model_name", "use_time")
-                )
-                sample_key = hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
-            other = _parse_other(log.get("other"))
-            frt = other.get("frt")
-            cursor = self.connection.execute(
-                """
-                INSERT OR IGNORE INTO latency_samples(
-                    sample_key, created_at, channel_id, channel_name, model_name, use_time, frt_ms,
-                    username, token_name, token_id, is_stream, request_id, upstream_request_id, group_name
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    sample_key,
-                    created_at,
-                    int(log.get("channel") or 0),
-                    str(log.get("channel_name") or ""),
-                    str(log.get("model_name") or "unknown"),
-                    float(log.get("use_time") or 0),
-                    float(frt) if isinstance(frt, (int, float)) and frt > 0 else None,
-                    str(log.get("username") or ""),
-                    str(log.get("token_name") or ""),
-                    int(log.get("token_id") or 0),
-                    int(bool(log.get("is_stream"))),
-                    request_id,
-                    str(log.get("upstream_request_id") or ""),
-                    str(log.get("group") or ""),
-                ),
-            )
-            inserted += cursor.rowcount
-        self.connection.commit()
-        return inserted
-
-    def recent_latency_groups(self, since_timestamp: int) -> list[tuple[int, str, str]]:
-        rows = self.connection.execute(
-            """
-            SELECT DISTINCT channel_id, channel_name, model_name
-            FROM latency_samples
-            WHERE created_at >= ?
-            """,
-            (since_timestamp,),
-        ).fetchall()
-        return [(int(row[0]), str(row[1]), str(row[2])) for row in rows]
-
-    def recent_latency_samples(
-        self,
-        channel_id: int,
-        model_name: str,
-        limit: int = 10,
-    ) -> list[dict[str, Any]]:
-        rows = self.connection.execute(
-            """
-            SELECT use_time, frt_ms, created_at, request_id
-            FROM latency_samples
-            WHERE channel_id = ? AND model_name = ?
-            ORDER BY created_at DESC, sample_key DESC
-            LIMIT ?
-            """,
-            (channel_id, model_name, limit),
-        ).fetchall()
-        return [dict(row) for row in rows]
-
-    def latency_summary(self, since_timestamp: int, slow_seconds: float) -> list[LatencySummary]:
-        rows = self.connection.execute(
-            """
-            SELECT channel_id, channel_name, model_name, use_time, frt_ms
-            FROM latency_samples
-            WHERE created_at >= ?
-            """,
-            (since_timestamp,),
-        ).fetchall()
-        logs = [
-            {
-                "channel": row[0],
-                "channel_name": row[1],
-                "model_name": row[2],
-                "use_time": row[3],
-                "other": {"frt": row[4]} if row[4] is not None else {},
-            }
-            for row in rows
-        ]
-        return summarize_logs(logs, slow_seconds)
-
-    def prune(self, before_timestamp: int) -> None:
-        self.connection.execute("DELETE FROM latency_samples WHERE created_at < ?", (before_timestamp,))
-        self.connection.execute("DELETE FROM channel_observations WHERE observed_at < ?", (before_timestamp,))
-        self.connection.execute("DELETE FROM resource_samples WHERE created_at < ?", (before_timestamp,))
-        self.connection.execute("DELETE FROM provider_status_samples WHERE observed_at < ?", (before_timestamp,))
-        self.connection.commit()
 
 
 class ResourceCollector:
@@ -2604,6 +1527,10 @@ class NotificationDispatcher:
             raise RuntimeError("; ".join(errors))
         return {"succeeded": succeeded, "failed": failed}
 
+    @property
+    def destinations(self) -> tuple[str, ...]:
+        return tuple(str(sender.name) for sender in self.senders)
+
 
 class ChannelSyncWorker:
     def __init__(
@@ -2613,16 +1540,21 @@ class ChannelSyncWorker:
         on_snapshot: Callable[[list[dict[str, Any]]], None],
         on_result: Callable[[bool, str], None] | None = None,
         stale_after_seconds: int = 60,
+        channel_settings: dict[int, dict[str, Any]] | None = None,
     ):
         self.client = client
         self.store = store
         self.on_snapshot = on_snapshot
         self.on_result = on_result
         self.stale_after_seconds = stale_after_seconds
+        self.channel_settings = channel_settings or {}
 
     def sync_once(self) -> list[dict[str, Any]]:
         channels = self.client.get_channels()
         self.store.upsert_channels(channels)
+        resolved = self.store.reconcile_channel_incidents(channels, self.channel_settings)
+        if isinstance(resolved, int) and resolved > 0:
+            LOGGER.info("resolved %d channel incidents after scope reconciliation", resolved)
         self.on_snapshot(channels)
         return channels
 
@@ -2668,7 +1600,7 @@ class ChannelProbeWorker:
         client: NewAPIClient,
         relay_probe_client: RelayProbeClient | None,
         store: StateStore,
-        notifier: NotificationDispatcher,
+        alert_publisher: AlertPublisher,
         snapshot_provider: Callable[[], list[dict[str, Any]]],
         on_observations: Callable[[list[ChannelObservation]], None],
         stale_after_seconds: int,
@@ -2677,7 +1609,7 @@ class ChannelProbeWorker:
         self.client = client
         self.relay_probe_client = relay_probe_client
         self.store = store
-        self.notifier = notifier
+        self.alert_publisher = alert_publisher
         self.snapshot_provider = snapshot_provider
         self.on_observations = on_observations
         self.stale_after_seconds = stale_after_seconds
@@ -2708,7 +1640,6 @@ class ChannelProbeWorker:
                     elapsed > self.config.channel_slow_seconds
                     or (first_response_ms or 0) > self.config.channel_slow_seconds * 1000.0
                 ):
-                    success = False
                     message = (
                         f"真实请求耗时超过阈值 {self.config.channel_slow_seconds:.0f}s："
                         f"总耗时 {elapsed:.3f}s，首字 {(first_response_ms or 0) / 1000.0:.3f}s"
@@ -2721,7 +1652,6 @@ class ChannelProbeWorker:
                 message = str(result.get("message") or "")
                 source = "builtin"
                 if success and elapsed > self.config.channel_slow_seconds:
-                    success = False
                     message = f"探测耗时 {elapsed:.3f}s 超过阈值 {self.config.channel_slow_seconds:.3f}s"
         except Exception as error:
             elapsed = time.monotonic() - started
@@ -2742,16 +1672,8 @@ class ChannelProbeWorker:
     def _send_events(self, events: list[AlertEvent]) -> None:
         if not events:
             return
-        self.store.record_alert_events(events)
-        subject = "；".join(event.title for event in events)
-        body = "\n\n".join(f"[{event.title}]\n{event.body}" for event in events)
-        result = self.notifier.send(subject, body)
-        LOGGER.info(
-            "sent %d channel alert events through %s; failed=%s",
-            len(events),
-            ",".join(result["succeeded"]) or "none",
-            ",".join(result["failed"]) or "none",
-        )
+        queued = self.alert_publisher.publish(events)
+        LOGGER.info("recorded %d channel alert events; queued=%d", len(events), len(queued))
 
     def check_once(self) -> list[ChannelObservation]:
         channels = []
@@ -2765,11 +1687,19 @@ class ChannelProbeWorker:
             channels.append(channel)
 
         if not channels:
+            self.channel_tracker.states = {}
+            self.store.set_json("channel_states", self.channel_tracker.states)
             self.on_observations([])
             self.store.record_collector_result(
                 "channel_probe", True, "", stale_after_seconds=self.stale_after_seconds
             )
             return []
+        active_channel_ids = {int(channel.get("id") or 0) for channel in channels}
+        self.channel_tracker.states = {
+            key: state
+            for key, state in self.channel_tracker.states.items()
+            if str(key).isdigit() and int(key) in active_channel_ids
+        }
         with ThreadPoolExecutor(
             max_workers=min(self.config.channel_probe_concurrency, len(channels)),
             thread_name_prefix="newapi-channel-probe-request",
@@ -2834,6 +1764,18 @@ class MonitorApp:
             )
             self.store.set_json("openai_status_state", {})
         self.notifier = NotificationDispatcher(config)
+        self.alert_publisher = AlertPublisher(self.store, self.notifier.destinations)
+        cancelled_notifications = self.store.cancel_disabled_notifications(self.notifier.destinations)
+        if cancelled_notifications:
+            LOGGER.info(
+                "cancelled %d pending notifications for disabled destinations",
+                cancelled_notifications,
+            )
+        self.outbox_worker = NotificationOutboxWorker(
+            self.store,
+            self.notifier,
+            max_attempts=config.notification_max_attempts,
+        )
         self.openai_status_client = OpenAIStatusClient()
         self.openai_status_tracker = OpenAIStatusTracker(
             self.store.get_json("openai_status_state", {}),
@@ -2890,23 +1832,39 @@ class MonitorApp:
             saved_container_states = {config.docker_container_name: legacy_state} if config.docker_container_name else {}
         self.container_states = dict(saved_container_states)
         self.container_restarts = dict(self.store.get_json("container_restarts", {}))
+        saved_container_health = self.store.get_json("container_health_states", {})
+        if not saved_container_health:
+            saved_container_health = {
+                name: {
+                    "status": status,
+                    "restarts": int(self.container_restarts.get(name) or 0),
+                    "oom_killed": False,
+                }
+                for name, status in self.container_states.items()
+            }
+        self.container_tracker = ContainerStateTracker(saved_container_health)
 
     def _send_events(self, events: list[AlertEvent]) -> None:
         if not events:
             return
-        self.store.record_alert_events(events)
-        notifiable = [event for event in events if event.notify]
-        if not notifiable:
-            LOGGER.info("recorded %d alert events with delivery disabled", len(events))
-            return
-        subject = "；".join(event.title for event in notifiable)
-        body = "\n\n".join(f"[{event.title}]\n{event.body}" for event in notifiable)
-        result = self.notifier.send(subject, body)
+        queued = self.alert_publisher.publish(events)
+        result = self.outbox_worker.run_once()
         LOGGER.info(
-            "sent %d alert events through %s; failed=%s",
-            len(notifiable),
-            ",".join(result["succeeded"]) or "none",
-            ",".join(result["failed"]) or "none",
+            "recorded %d alert events; queued=%d delivered=%d failed=%d",
+            len(events),
+            len(queued),
+            result["delivered"],
+            result["failed"],
+        )
+
+    def _send_message(self, subject: str, body: str) -> None:
+        queued = self.alert_publisher.publish_message(subject, body)
+        result = self.outbox_worker.run_once()
+        LOGGER.info(
+            "queued notification message: queued=%d delivered=%d failed=%d",
+            len(queued),
+            result["delivered"],
+            result["failed"],
         )
 
     def _record_collector_result(self, name: str, success: bool, error: str = "") -> None:
@@ -2962,6 +1920,7 @@ class MonitorApp:
                 self._publish_channel_snapshot,
                 self._queue_channel_sync_result,
                 stale_after_seconds=self.collector_thresholds["channel_sync"],
+                channel_settings=self.config.channel_settings,
             )
             worker.run(stop_event, self.config.channel_sync_interval_seconds)
         except Exception:
@@ -2972,12 +1931,13 @@ class MonitorApp:
 
     def _run_channel_probe_worker(self, stop_event: threading.Event) -> None:
         try:
+            worker_store = StateStore(self.config.state_db)
             worker = ChannelProbeWorker(
                 self.config,
                 NewAPIClient(self.config),
                 RelayProbeClient(self.config) if self.config.real_probe_rules else None,
-                StateStore(self.config.state_db),
-                NotificationDispatcher(self.config),
+                worker_store,
+                AlertPublisher(worker_store, self.notifier.destinations),
                 lambda: list(self.channel_snapshot or []),
                 self._publish_channel_observations,
                 stale_after_seconds=self.collector_thresholds["channel_probe"],
@@ -2993,12 +1953,20 @@ class MonitorApp:
         )
         start_timestamp = max(0, last_cursor - self.config.log_overlap_seconds)
         logs = self.client.get_logs(start_timestamp, now)
-        inserted = self.store.ingest_logs(logs, self.config.excluded_token_names)
+        inserted, touched_groups = self.store.ingest_logs_with_groups(
+            logs,
+            self.config.excluded_token_names,
+        )
         previous_latency_states = dict(self.latency_tracker.states)
+        active_channel_ids = self.store.active_channel_ids(self.config.channel_settings)
+        self.latency_tracker.states = {
+            key: state
+            for key, state in self.latency_tracker.states.items()
+            if key.partition(":")[0].isdigit()
+            and int(key.partition(":")[0]) in active_channel_ids
+        }
         latency_events: list[AlertEvent] = []
-        for channel_id, channel_name, model_name in self.store.recent_latency_groups(
-            now - self.config.retention_days * 86400
-        ):
+        for channel_id, channel_name, model_name in touched_groups:
             samples = self.store.recent_latency_samples(channel_id, model_name, 10)
             latency_events.extend(
                 self.latency_tracker.evaluate(
@@ -3015,8 +1983,49 @@ class MonitorApp:
             raise
         self.store.set_json("latency_states", self.latency_tracker.states)
         self.store.set_json("log_cursor", now)
-        self.store.prune(now - self.config.retention_days * 86400)
         LOGGER.info("log collection complete: fetched=%d inserted=%d", len(logs), inserted)
+
+    def maintain_database(self, now: int | None = None, force: bool = False) -> dict[str, Any] | None:
+        timestamp = int(time.time()) if now is None else int(now)
+        last_maintenance = int(self.store.get_json("last_database_maintenance_at", 0))
+        if not force and timestamp - last_maintenance < self.config.database_maintenance_interval_seconds:
+            return None
+        stats = self.store.maintain(
+            timestamp - self.config.retention_days * 86400,
+            timestamp - self.config.incident_retention_days * 86400,
+            timestamp - self.config.notification_retention_days * 86400,
+        )
+        self.store.set_json("last_database_maintenance_at", timestamp)
+        self.store.set_json("database_stats", stats)
+        database_bytes = int(stats.get("database_bytes") or 0) + int(stats.get("wal_bytes") or 0)
+        database_limit = self.config.database_max_mb * 1024 * 1024
+        capacity_key = "resource:monitor_database"
+        if database_bytes > database_limit and not self.store.has_open_incident(capacity_key):
+            self._send_events(
+                [
+                    AlertEvent(
+                        "database_capacity_high",
+                        "监控数据库容量超限",
+                        f"当前占用：{database_bytes / 1024 / 1024:.1f} MB\n配置上限：{self.config.database_max_mb} MB",
+                        key=capacity_key,
+                        severity="critical",
+                    )
+                ]
+            )
+        elif database_bytes <= database_limit * 0.9 and self.store.has_open_incident(capacity_key):
+            self._send_events(
+                [
+                    AlertEvent(
+                        "database_capacity_recovered",
+                        "监控数据库容量恢复",
+                        f"当前占用：{database_bytes / 1024 / 1024:.1f} MB",
+                        key=capacity_key,
+                        severity="info",
+                        recovery=True,
+                    )
+                ]
+            )
+        return stats
 
     def collect_resources(self) -> None:
         metrics, details = self.resource_collector.collect()
@@ -3025,59 +2034,30 @@ class MonitorApp:
         self.store.insert_resource_sample(metrics, details)
         events = self.resource_tracker.evaluate(metrics)
 
-        for container_name, container in (details.get("containers") or {}).items():
-            new_container_state = str(container.get("status") or "unknown")
-            previous_state = str(self.container_states.get(container_name) or "unknown")
-            previous_restarts = int(self.container_restarts.get(container_name) or 0)
-            new_restarts = int(container.get("restarts") or 0)
+        containers = dict(details.get("containers") or {})
+        container_events = self.container_tracker.evaluate(containers)
+        recovered_keys = {event.key for event in container_events if event.recovery}
+        for container_name, container in containers.items():
             incident_key = f"container:{container_name}"
-            if new_container_state == "running" and self.store.has_open_incident(incident_key):
-                events.append(
+            if (
+                str(container.get("status") or "unknown") == "running"
+                and incident_key not in recovered_keys
+                and self.store.has_open_incident(incident_key)
+            ):
+                container_events.append(
                     AlertEvent(
                         "container_recovered",
                         f"容器恢复：{container_name}",
-                        f"容器状态：{new_container_state}",
+                        "容器状态：running",
                         key=incident_key,
                         severity="info",
                         recovery=True,
                     )
                 )
-            elif new_container_state != previous_state and new_container_state != "running":
-                events.append(
-                    AlertEvent(
-                        "container_failed",
-                        f"容器异常：{container_name}",
-                        f"容器状态：{new_container_state}\n{container.get('error', '')}",
-                        key=incident_key,
-                        severity="critical",
-                    )
-                )
-            if new_restarts > previous_restarts and previous_restarts > 0:
-                events.append(
-                    AlertEvent(
-                        "container_restarted",
-                        f"容器发生重启：{container_name}",
-                        f"重启次数从 {previous_restarts} 增加到 {new_restarts}",
-                        key=f"container-restart:{container_name}",
-                        severity="warning",
-                    )
-                )
-            if bool(container.get("oom_killed")):
-                events.append(
-                    AlertEvent(
-                        "container_oom",
-                        f"容器 OOM：{container_name}",
-                        "容器因内存不足被系统终止。",
-                        key=f"container-oom:{container_name}",
-                        severity="critical",
-                    )
-                )
-            self.container_states[container_name] = new_container_state
-            self.container_restarts[container_name] = new_restarts
+        events.extend(container_events)
 
         self.store.set_json("resource_states", self.resource_tracker.states)
-        self.store.set_json("container_states", self.container_states)
-        self.store.set_json("container_restarts", self.container_restarts)
+        self.store.set_json("container_health_states", self.container_tracker.states)
         self._send_events(events)
         LOGGER.info("resource collection complete: %s", json.dumps(metrics, ensure_ascii=False))
 
@@ -3127,15 +2107,19 @@ class MonitorApp:
             },
             generated_at=now,
         )
-        self.notifier.send(subject, body)
-        LOGGER.info("periodic report sent")
+        self._send_message(subject, body)
+        LOGGER.info("periodic report queued")
 
-    def run_forever(self, stop_event: Any | None = None) -> None:
-        if self.config.send_startup_email:
+    def run_forever(
+        self,
+        stop_event: Any | None = None,
+        send_startup_notification: bool = True,
+    ) -> None:
+        if self.config.send_startup_email and send_startup_notification:
             try:
-                self.notifier.send("监控程序启动", f"监控目标：{self.config.base_url}")
+                self._send_message("监控程序启动", f"监控目标：{self.config.base_url}")
             except Exception:
-                LOGGER.exception("startup email failed")
+                LOGGER.exception("startup notification enqueue failed")
 
         channel_sync_stop = threading.Event()
         channel_probe_stop = threading.Event()
@@ -3157,10 +2141,23 @@ class MonitorApp:
         next_resource = 0.0
         next_openai_status = 0.0
         next_report = time.monotonic() + self.config.report_interval_seconds
+        next_database_maintenance = 0.0
         try:
             while stop_event is None or not stop_event.is_set():
                 self._drain_channel_sync_results()
+                try:
+                    delivery_result = self.outbox_worker.run_once()
+                    if delivery_result["delivered"] or delivery_result["failed"]:
+                        LOGGER.info("outbox processed: %s", delivery_result)
+                except Exception:
+                    LOGGER.exception("notification outbox processing failed")
                 now = time.monotonic()
+                if now >= next_database_maintenance:
+                    try:
+                        self.maintain_database()
+                    except Exception:
+                        LOGGER.exception("database maintenance failed")
+                    next_database_maintenance = now + self.config.database_maintenance_interval_seconds
                 if now >= next_log:
                     try:
                         self.collect_logs()

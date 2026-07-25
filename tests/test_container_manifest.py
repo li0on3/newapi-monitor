@@ -23,6 +23,11 @@ class ContainerManifestTests(unittest.TestCase):
 
         self.assertIn("dashboard_http.py", dockerfile)
 
+    def test_runtime_image_includes_monitoring_core_package(self):
+        dockerfile = Path("Dockerfile").read_text(encoding="utf-8")
+
+        self.assertIn("monitoring_core/", dockerfile)
+
 
 if __name__ == "__main__":
     unittest.main()

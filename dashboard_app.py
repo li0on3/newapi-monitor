@@ -114,6 +114,11 @@ class SettingsUpdatePayload(BaseModel):
     disk_path: str | None = Field(None, min_length=1, max_length=1024)
     excluded_token_names: str | None = Field(None, max_length=4096)
     retention_days: int | None = Field(None, ge=8, le=3650)
+    incident_retention_days: int | None = Field(None, ge=30, le=3650)
+    notification_retention_days: int | None = Field(None, ge=7, le=3650)
+    database_maintenance_interval_seconds: int | None = Field(None, ge=3600, le=604800)
+    database_max_mb: int | None = Field(None, ge=128, le=102400)
+    notification_max_attempts: int | None = Field(None, ge=1, le=20)
     smtp_host: str | None = Field(None, max_length=512)
     smtp_port: int | None = Field(None, ge=1, le=65535)
     smtp_user: str | None = Field(None, max_length=512)
@@ -558,31 +563,45 @@ class Runtime:
             self.monitor_thread.join(timeout=10)
 
     def _run_monitor(self) -> None:
+        first_cycle = True
         while not self.monitor_stop.is_set():
             try:
                 self.monitor_error = ""
                 if self.settings is None:
                     raise RuntimeError("settings store is unavailable")
-                loaded_version = self.settings.version()
+                loaded_version = self.settings.worker_version()
                 cycle_stop = threading.Event()
                 cycle_error: list[BaseException] = []
+                cycle_startup_notification = first_cycle
 
                 def run_cycle() -> None:
                     try:
-                        MonitorApp(self.monitor_config()).run_forever(cycle_stop)
+                        MonitorApp(self.monitor_config()).run_forever(
+                            cycle_stop,
+                            send_startup_notification=cycle_startup_notification,
+                        )
                     except BaseException as error:
                         cycle_error.append(error)
 
                 worker = threading.Thread(target=run_cycle, name="newapi-monitor-cycle", daemon=True)
                 worker.start()
+                first_cycle = False
                 while worker.is_alive() and not self.monitor_stop.wait(2):
-                    if self.settings.version() != loaded_version:
+                    if self.settings.worker_version() != loaded_version:
                         LOGGER.info("monitor configuration changed; reloading worker")
                         cycle_stop.set()
                         break
                 if self.monitor_stop.is_set():
                     cycle_stop.set()
-                worker.join(timeout=15)
+                shutdown_started = time.monotonic()
+                while worker.is_alive():
+                    worker.join(timeout=2)
+                    if worker.is_alive() and time.monotonic() - shutdown_started >= 120:
+                        self.monitor_error = "previous monitor generation is still stopping"
+                        LOGGER.error(
+                            "previous monitor generation has not stopped after 120 seconds; refusing overlap"
+                        )
+                        shutdown_started = time.monotonic()
                 if cycle_error:
                     raise cycle_error[0]
                 if self.monitor_stop.is_set():
@@ -625,6 +644,11 @@ class Runtime:
             "disk_path": os.getenv("DISK_PATH", "/"),
             "excluded_token_names": os.getenv("EXCLUDED_TOKEN_NAMES", "模型测试,newapi-monitor-probe"),
             "retention_days": env_int("RETENTION_DAYS", 90),
+            "incident_retention_days": env_int("INCIDENT_RETENTION_DAYS", 365),
+            "notification_retention_days": env_int("NOTIFICATION_RETENTION_DAYS", 30),
+            "database_maintenance_interval_seconds": env_int("DATABASE_MAINTENANCE_INTERVAL_SECONDS", 21600),
+            "database_max_mb": env_int("DATABASE_MAX_MB", 2048),
+            "notification_max_attempts": env_int("NOTIFICATION_MAX_ATTEMPTS", 8),
             "smtp_host": os.getenv("SMTP_HOST", ""),
             "smtp_port": env_int("SMTP_PORT", 25),
             "smtp_user": os.getenv("SMTP_USER", ""),
@@ -902,16 +926,30 @@ def system_health_snapshot() -> dict[str, Any]:
     )
     monitor_ok = monitor_alive and not runtime.monitor_error
     collectors: dict[str, dict[str, Any]] = {}
+    storage: dict[str, Any] = {}
     if runtime.monitor_enabled and database_ok:
+        state_store: StateStore | None = None
         try:
             state_store = StateStore(runtime.state_db)
             collectors = state_store.collector_health()
-            state_store.connection.close()
+            try:
+                max_mb = int(runtime.settings.runtime_values().get("database_max_mb", 2048)) if runtime.settings else 2048
+            except (TypeError, ValueError):
+                max_mb = 2048
+            storage = state_store.storage_health(max_bytes=max_mb * 1024 * 1024)
         except Exception as error:
             database_ok = False
             database_error = str(error)
+        finally:
+            if state_store is not None:
+                state_store.connection.close()
     collectors_ok = runtime.setup_required or all(item.get("status") != "stale" for item in collectors.values())
-    healthy = database_ok and monitor_ok and collectors_ok
+    storage_ok = (
+        not storage.get("over_capacity", False)
+        and int(storage.get("outbox_dead") or 0) == 0
+        and int(storage.get("oldest_pending_age_seconds") or 0) < 900
+    )
+    healthy = database_ok and monitor_ok and collectors_ok and storage_ok
     return {
         "status": "setup_required" if runtime.setup_required and database_ok else ("ok" if healthy else "degraded"),
         "database": "ok" if database_ok else "degraded",
@@ -919,6 +957,7 @@ def system_health_snapshot() -> dict[str, Any]:
         "monitor_worker": "disabled" if not runtime.monitor_enabled else ("running" if monitor_ok else "degraded"),
         "monitor_error": runtime.monitor_error,
         "collectors": collectors,
+        "storage": storage,
         "timestamp": int(time.time()),
     }
 
@@ -971,9 +1010,12 @@ async def complete_setup(payload: SetupCompletePayload, request: Request) -> dic
                 payload.password,
             )
         else:
-            assert payload.new_api_access_token is not None
-            assert payload.new_api_user_id is not None
-            assert payload.relay_api_token is not None
+            if (
+                payload.new_api_access_token is None
+                or payload.new_api_user_id is None
+                or payload.relay_api_token is None
+            ):
+                raise HTTPException(status_code=422, detail="management and relay tokens are required")
             await asyncio.to_thread(
                 provisioner.validate_management_token,
                 payload.new_api_base_url,
@@ -1979,6 +2021,9 @@ def update_settings(payload: SettingsUpdatePayload, request: Request, user: Admi
             "log_interval_seconds", "resource_interval_seconds", "report_interval_seconds",
             "log_overlap_seconds", "log_initial_lookback_seconds", "latency_reminder_seconds",
             "resource_sustain_seconds", "retention_days", "smtp_port",
+            "incident_retention_days", "notification_retention_days",
+            "database_maintenance_interval_seconds", "database_max_mb",
+            "notification_max_attempts",
             "openai_status_interval_seconds", "openai_status_timeout_seconds",
             "openai_status_failure_threshold", "openai_status_recovery_threshold",
         ):

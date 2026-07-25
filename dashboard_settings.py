@@ -22,6 +22,34 @@ SECRET_KEYS = {
     "feishu_webhook_secret",
 }
 MONITOR_ROLES = {"viewer", "operator", "admin"}
+WORKER_SETTING_KEYS = {
+    "new_api_base_url", "new_api_access_token", "new_api_user_id", "relay_api_token",
+    "channel_sync_interval_seconds", "channel_interval_seconds", "channel_probe_concurrency",
+    "channel_failure_threshold", "channel_recovery_threshold", "log_interval_seconds",
+    "resource_interval_seconds", "report_interval_seconds", "log_overlap_seconds",
+    "log_initial_lookback_seconds", "slow_request_seconds", "latency_hard_limit_seconds",
+    "latency_reminder_seconds", "channel_slow_seconds", "resource_sustain_seconds",
+    "system_cpu_threshold", "system_memory_threshold", "system_disk_threshold",
+    "container_cpu_threshold", "container_memory_threshold", "docker_container_name",
+    "docker_container_names", "disk_path", "excluded_token_names", "retention_days",
+    "incident_retention_days", "notification_retention_days",
+    "database_maintenance_interval_seconds", "database_max_mb", "notification_max_attempts",
+    "smtp_host", "smtp_port", "smtp_user", "smtp_password", "smtp_from", "smtp_to",
+    "smtp_starttls", "smtp_ssl", "email_enabled", "wecom_app_enabled", "wecom_corp_id",
+    "wecom_agent_id", "wecom_app_secret", "wecom_to_user", "wecom_to_party",
+    "wecom_to_tag", "wecom_webhook_enabled", "wecom_webhook_url", "feishu_app_enabled",
+    "feishu_app_id", "feishu_app_secret", "feishu_receive_id_type", "feishu_receive_id",
+    "feishu_webhook_enabled", "feishu_webhook_url", "feishu_webhook_secret",
+    "send_startup_email", "subject_prefix", "openai_status_enabled",
+    "openai_status_alert_enabled", "openai_status_interval_seconds",
+    "openai_status_timeout_seconds", "openai_status_min_impact",
+    "openai_status_component_ids", "openai_status_failure_threshold",
+    "openai_status_recovery_threshold",
+}
+WORKER_CHANNEL_KEYS = {
+    "probe_enabled", "probe_model", "probe_path", "probe_format", "probe_prompt",
+    "max_output_tokens", "alert_enabled", "maintenance_mode",
+}
 
 
 class SettingsStore:
@@ -75,6 +103,7 @@ class SettingsStore:
                     value INTEGER NOT NULL
                 );
                 INSERT OR IGNORE INTO monitor_metadata(key, value) VALUES ('config_version', 1);
+                INSERT OR IGNORE INTO monitor_metadata(key, value) VALUES ('worker_version', 1);
                 """
             )
             now = int(time.time())
@@ -131,6 +160,13 @@ class SettingsStore:
             ).fetchone()
         return int(row["value"] if row else 1)
 
+    def worker_version(self) -> int:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT value FROM monitor_metadata WHERE key = 'worker_version'"
+            ).fetchone()
+        return int(row["value"] if row else 1)
+
     def is_setup_complete(self) -> bool:
         with self._connect() as connection:
             row = connection.execute(
@@ -157,7 +193,7 @@ class SettingsStore:
                 {"completed": True},
                 "",
             )
-            self._bump_version(connection)
+            self._bump_version(connection, worker=True)
             connection.commit()
 
     def update_settings(
@@ -194,7 +230,10 @@ class SettingsStore:
                     (key, json.dumps(self._encode_value(key, value), ensure_ascii=False), now, actor),
                 )
             self._audit(connection, now, actor, "settings.update", "system", before, after, remote_addr)
-            self._bump_version(connection)
+            self._bump_version(
+                connection,
+                worker=bool(set(effective_updates) & WORKER_SETTING_KEYS),
+            )
             connection.commit()
         return self.public_values()
 
@@ -221,7 +260,7 @@ class SettingsStore:
                 )
                 changed = changed or cursor.rowcount == 1
             if changed:
-                self._bump_version(connection)
+                self._bump_version(connection, worker=True)
             connection.commit()
 
     def update_channel(
@@ -274,7 +313,7 @@ class SettingsStore:
                 (channel_id, json.dumps(merged, ensure_ascii=False), now, actor),
             )
             self._audit(connection, now, actor, "channel.update", str(channel_id), current, merged, remote_addr)
-            self._bump_version(connection)
+            self._bump_version(connection, worker=bool(set(updates) & WORKER_CHANNEL_KEYS))
             connection.commit()
         return merged
 
@@ -508,10 +547,14 @@ class SettingsStore:
             raise RuntimeError("MONITOR_SECRET_KEY cannot decrypt stored settings") from error
 
     @staticmethod
-    def _bump_version(connection: sqlite3.Connection) -> None:
+    def _bump_version(connection: sqlite3.Connection, worker: bool = False) -> None:
         connection.execute(
             "UPDATE monitor_metadata SET value = value + 1 WHERE key = 'config_version'"
         )
+        if worker:
+            connection.execute(
+                "UPDATE monitor_metadata SET value = value + 1 WHERE key = 'worker_version'"
+            )
 
     @staticmethod
     def _audit(
