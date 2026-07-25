@@ -24,9 +24,9 @@ Every screenshot below is generated from the built-in synthetic demo dataset. It
 
 ![Incident investigation page generated from synthetic data](docs/screenshots/incidents-demo-zh.png)
 
-### Customer Console
+### New API pages
 
-![Customer Console generated from synthetic data](docs/screenshots/customer-console-demo-zh.png)
+![New API pages generated from synthetic data](docs/screenshots/customer-console-demo-zh.png)
 
 ## Features
 
@@ -43,7 +43,7 @@ Every screenshot below is generated from the built-in synthetic demo dataset. It
 - Automatically follows the browser language for Chinese or English, with a persistent manual switch in the page header.
 - Aligns the overall visual system with the New API default frontend and supports persistent System, Light, and Dark theme modes.
 - Stores runtime configuration in the monitor database and never writes configuration back to New API.
-- Provides a standalone Customer Console for overview, analytics, API keys, and real usage logs. Business data always comes from the current user's New API session and is not copied into a second customer database.
+- Presents Overview, Analytics, API Keys, and real Usage Logs as independent top-level modules. Business data always comes from the current user's New API session and is not copied into a second customer database.
 - Supports API key create, edit, enable/disable, delete, batch delete, and one-time plaintext reveal. Plaintext keys are not stored in the monitor database, logs, audit records, or browser storage.
 - Supports monitor-local key groups plus 1/7/30-day real usage for each personal key and group. Custom key groups never change New API model routing, billing, or permissions.
 - Maintains separate channel visibility lists for administrators/operators and regular viewers.
@@ -84,11 +84,11 @@ Publish `/monitor/` through an HTTPS reverse proxy and forward every nested path
 /monitor/system                 System settings
 /monitor/system/notifications   Notification center
 /monitor/system/providers       Upstream provider settings
-/monitor/system/console         Customer Console settings
-/monitor/console                Customer overview
-/monitor/console/analytics      Customer analytics
-/monitor/console/keys           Customer API keys
-/monitor/console/logs           Customer usage logs
+/monitor/system/console         New API page settings
+/monitor/console                Overview
+/monitor/console/analytics      Analytics
+/monitor/console/keys           API keys
+/monitor/console/logs           Usage logs
 ```
 
 Every configured notification channel can trigger a real test alert from the UI, even while the channel is disabled. Unsaved changes must be saved first so the test always uses the active configuration.
@@ -132,8 +132,9 @@ HTTP 503 is returned when SQLite is unavailable, the monitoring worker has stopp
 - Docker access is restricted through a read-only Socket Proxy; the monitor does not mount the Docker socket directly.
 - State-changing APIs require authentication, role checks, strict Pydantic schemas, and a same-origin request header.
 - Regular New API users can only see the overview by default. Operators can inspect logs, resources, incidents, and channels. Monitor administrators can manage settings and role mappings.
-- Customer Console access requires a New API session. Monitor roles only control entry visibility; global versus self-only data remains governed by the original New API role. Emergency administrators cannot access the console.
-- Deploy the Customer Console on the same browser Origin as New API (preferably under `/monitor/`) so the browser can reuse both the New API Session and `uid`.
+- New API page access requires a New API session. Monitor roles only control entry visibility; global versus self-only data remains governed by the original New API role. Emergency administrators cannot access these business pages.
+- Deploy the New API pages on the same browser Origin as New API (preferably under `/monitor/`) so the browser can reuse both the New API Session and `uid`.
+- After monitor sign-out, refresh does not silently reuse a remaining New API session. The user must explicitly choose “Sign in with New API”; this affects only monitor authentication and never signs out of or modifies New API.
 - The console BFF exposes only fixed New API API routes and never accepts arbitrary upstream URLs, paths, or headers. Regular users can query at most 30 days per request.
 - Customer business data is read on demand and is not persisted by the monitor. Plaintext keys exist only in the explicit one-time reveal response, and customer-data APIs are non-cacheable.
 - API key usage lookup is admin-only by default, rate-limited, and only calls New API read-only endpoints.
@@ -141,7 +142,7 @@ HTTP 503 is returned when SQLite is unavailable, the monitoring worker has stopp
 - Each OpenAI collection cycle only reads the fixed official `https://status.openai.com/api/v2/summary.json`, enforces response-size and timeout limits, and never accepts a configurable URL, preventing SSRF abuse.
 - Only the latest official-status snapshot is retained; incident progress is stored separately in the incident workspace, preventing unbounded SQLite growth at a 60-second polling interval.
 
-See [Customer Console architecture](docs/CUSTOMER_CONSOLE_EN.md) for API mapping, permission boundaries, and compatibility policy. See [SECURITY_EN.md](SECURITY_EN.md) for the wider security boundary, [ROADMAP_EN.md](ROADMAP_EN.md) for planned work, and [GITHUB_GUIDE_EN.md](GITHUB_GUIDE_EN.md) for the protected-branch workflow.
+See [New API pages architecture](docs/CUSTOMER_CONSOLE_EN.md) for API mapping, permission boundaries, and compatibility policy. See [SECURITY_EN.md](SECURITY_EN.md) for the wider security boundary, [ROADMAP_EN.md](ROADMAP_EN.md) for planned work, and [GITHUB_GUIDE_EN.md](GITHUB_GUIDE_EN.md) for the protected-branch workflow.
 
 ## Backup
 

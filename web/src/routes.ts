@@ -43,6 +43,11 @@ const CONSOLE_PATHS: Record<ConsolePage, string> = {
   logs: 'logs',
 };
 const PATH_CONSOLE = Object.fromEntries(Object.entries(CONSOLE_PATHS).map(([page, path]) => [path, page])) as Record<string, ConsolePage>;
+export const CONSOLE_PAGE_ORDER: ConsolePage[] = ['overview', 'analytics', 'keys', 'logs'];
+
+export function enabledConsolePages(pages: Partial<Record<ConsolePage, boolean>>): ConsolePage[] {
+  return CONSOLE_PAGE_ORDER.filter((page) => pages[page] !== false);
+}
 
 function routeSegments(pathname: string): string[] {
   const normalized = pathname.replace(/^\/monitor(?=\/|$)/, '').replace(/^\/+|\/+$/g, '');

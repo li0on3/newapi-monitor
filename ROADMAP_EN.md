@@ -11,7 +11,7 @@ The roadmap follows measured requirements and failure evidence. Dates are not gu
 - WeCom, Feishu, and email delivery with UI-based real test alerts.
 - New API session SSO, role mapping, emergency administration, and configuration auditing.
 - Single-host Docker Compose deployment, backups, diagnostics, and container hardening.
-- External Customer Console for overview, analytics, API keys, and real usage logs, reusing the New API session and original permissions.
+- External New API pages for overview, analytics, API keys, and real usage logs as independent top-level modules, reusing the New API session and original permissions.
 - Versioned multi-architecture GHCR images and GitHub Releases with checksums, SBOMs, and provenance.
 
 ## Next

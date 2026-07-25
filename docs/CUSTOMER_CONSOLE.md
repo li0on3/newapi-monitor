@@ -1,8 +1,8 @@
-# 客户控制台架构
+# New API 功能页架构
 
 [简体中文](CUSTOMER_CONSOLE.md) | [English](CUSTOMER_CONSOLE_EN.md)
 
-客户控制台是监控平台内的外置 New API 用户界面。它不修改 New API 源码，不复制用户、Token、额度或日志表，也不接管 New API 的鉴权和计费。
+概览、数据看板、API 密钥和使用日志是监控平台内的外置 New API 功能页，并作为独立顶级模块展示。它们不修改 New API 源码，不复制用户、Token、额度或日志表，也不接管 New API 的鉴权和计费。
 
 ## 请求链路
 
@@ -18,7 +18,9 @@
 
 为复用浏览器中的 New API Session 与 `uid`，生产环境应把监控平台挂载在 New API 的同一 Origin 下，例如 `https://api.example.com/monitor/`。独立域名或不同端口默认无法共享这两项浏览器状态，不应通过复制 Cookie 或管理 Token 冒充用户来绕过。
 
-监控平台的紧急管理员没有 New API 身份，因此不能进入客户控制台。监控角色映射只控制入口是否显示，不能把普通 New API 用户升级为全局管理员。
+监控平台的紧急管理员没有 New API 身份，因此不能进入这些业务页面。监控角色映射只控制入口是否显示，不能把普通 New API 用户升级为全局管理员。
+
+用户点击监控平台退出后，服务端设置独立的监控 SSO 抑制 Cookie。该 Cookie 不包含身份或凭据，只阻止监控自动复用 New API Session；用户主动点击“使用 New API 账号登录”后才解除。整个过程不会删除或修改 New API `session` Cookie。
 
 ## 页面和上游接口
 
@@ -50,4 +52,4 @@
 - 上游超时、非 JSON、超大响应和异常 HTTP 状态被转换为有限错误，不回显 Cookie、Token 或上游响应正文。
 - 携带 Session、管理员凭据或 Key 的上游请求不会跟随 HTTP 重定向，避免凭据被转发到其他主机。
 - New API API 合约发生变化时，只需调整 `dashboard_newapi_console.py` 及对应契约测试；New API 主业务不受监控平台故障影响。
-- 客户控制台可以在“系统配置 → 客户控制台”整体关闭，或按页面逐项关闭。
+- New API 功能页可以在“系统配置 → New API 功能页”整体关闭，或按页面逐项关闭。
