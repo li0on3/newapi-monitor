@@ -60,4 +60,11 @@ describe('translations', () => {
       'Custom groups organize monitor statistics only; they do not change New API routing, billing, or key permissions.',
     )
   })
+
+  test('translates theme controls', () => {
+    expect(translate('主题', 'en')).toBe('Theme')
+    expect(translate('跟随系统', 'en')).toBe('System')
+    expect(translate('浅色', 'en')).toBe('Light')
+    expect(translate('深色', 'en')).toBe('Dark')
+  })
 })
