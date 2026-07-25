@@ -345,25 +345,70 @@ class DashboardRepository:
 
     def resources(self, now: int | None = None, hours: int = 24, limit: int = 1440) -> dict[str, Any]:
         current_time = int(time.time()) if now is None else now
+        requested_hours = max(1, min(int(hours), 24 * 90))
         sample_limit = max(1, min(limit, 5000))
+        requested_start = current_time - requested_hours * 3600
+        bucket_seconds = max(1, math.ceil(requested_hours * 3600 / sample_limit))
+        if bucket_seconds > 15:
+            bucket_seconds = math.ceil(bucket_seconds / 15) * 15
         with self._connect() as connection:
             rows = connection.execute(
                 """
-                SELECT created_at, system_cpu, system_memory, system_disk,
-                       system_available_mb, system_swap, containers_json
-                FROM resource_samples
-                WHERE created_at >= ?
-                ORDER BY created_at DESC, id DESC
+                WITH bucketed AS (
+                    SELECT id, created_at,
+                           CAST((created_at - ?) / ? AS INTEGER) * ? + ? AS bucket_at,
+                           system_cpu, system_memory, system_disk,
+                           system_available_mb, system_swap, containers_json,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY CAST((created_at - ?) / ? AS INTEGER)
+                               ORDER BY created_at DESC, id DESC
+                           ) AS bucket_rank
+                    FROM resource_samples
+                    WHERE created_at >= ? AND created_at <= ?
+                )
+                SELECT bucket_at AS created_at,
+                       AVG(system_cpu) AS system_cpu,
+                       AVG(system_memory) AS system_memory,
+                       AVG(system_disk) AS system_disk,
+                       AVG(system_available_mb) AS system_available_mb,
+                       AVG(system_swap) AS system_swap,
+                       MAX(CASE WHEN bucket_rank = 1 THEN containers_json END) AS containers_json
+                FROM bucketed
+                GROUP BY bucket_at
+                ORDER BY bucket_at
                 LIMIT ?
                 """,
-                (current_time - max(1, hours) * 3600, sample_limit),
+                (
+                    requested_start,
+                    bucket_seconds,
+                    bucket_seconds,
+                    requested_start,
+                    requested_start,
+                    bucket_seconds,
+                    requested_start,
+                    current_time,
+                    sample_limit,
+                ),
             ).fetchall()
         samples = []
-        for row in reversed(rows):
+        for row in rows:
             item = dict(row)
             item["containers"] = self._decode_json(item.pop("containers_json"), {})
             samples.append(item)
-        return {"generated_at": current_time, "hours": hours, "samples": samples}
+        actual_start = int(samples[0]["created_at"]) if samples else 0
+        actual_end = int(samples[-1]["created_at"]) if samples else 0
+        covered_seconds = max(0, actual_end - actual_start + bucket_seconds) if samples else 0
+        coverage_ratio = min(1.0, covered_seconds / (requested_hours * 3600))
+        return {
+            "generated_at": current_time,
+            "hours": requested_hours,
+            "requested_start": requested_start,
+            "actual_start": actual_start,
+            "actual_end": actual_end,
+            "coverage_ratio": round(coverage_ratio, 4),
+            "bucket_seconds": bucket_seconds,
+            "samples": samples,
+        }
 
     def provider_status(
         self,

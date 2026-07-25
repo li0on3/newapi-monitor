@@ -35,6 +35,7 @@ Every screenshot below is generated from the built-in synthetic demo dataset. It
 - Analyzes total latency, time to first token, users, tokens, models, and channels from real New API usage logs.
 - Queries quota, model restrictions, and recent calls by API key without persisting the key or putting it in URLs or audit records.
 - Alerts when 3 of the latest 5 or 5 of the latest 10 requests exceed the latency threshold; a single critical sample can alert immediately.
+- Persists alerts to a SQLite delivery outbox before sending them independently to each destination. Failed deliveries use exponential backoff, survive process restarts, and become visible dead letters after the configured attempt limit.
 - Monitors host CPU, memory, disk, and Docker container status, resource use, restarts, and OOM events.
 - Detects stale collectors so a live dashboard cannot silently hide a stopped collection pipeline.
 - Supports email, WeCom applications, WeCom group bots, Feishu applications, and Feishu group bots with independent delivery and real test alerts.
@@ -109,7 +110,7 @@ Healthy response:
 
 Before the first-run wizard is completed, health returns HTTP 200 with `{"status":"setup_required"}` so orchestration remains healthy while collectors stay stopped.
 
-HTTP 503 is returned when SQLite is unavailable, the monitoring worker has stopped, or a channel sync, probe, log, resource, or enabled OpenAI status collector has exceeded its dynamic stale threshold.
+HTTP 503 is returned when SQLite is unavailable, the monitoring worker has stopped, a collector has exceeded its dynamic stale threshold, the database exceeds its configured capacity, dead letters exist, or pending delivery is older than 15 minutes.
 
 ## Default Policy
 
@@ -124,7 +125,12 @@ HTTP 503 is returned when SQLite is unavailable, the monitoring worker has stopp
 | Window alert | 3 of 5, or 5 of 10 |
 | Single critical alert | Over 180 seconds |
 | Resource alert | Threshold sustained for 180 seconds |
-| Retention | 90 days |
+| Raw sample retention | 90 days |
+| Resolved incident retention | 365 days |
+| Delivered/dead-letter retention | 30 days |
+| Database maintenance | Every 6 hours |
+| Database capacity alert | 2048 MB |
+| Maximum delivery attempts | 8 |
 
 ## Data and Security
 
@@ -144,6 +150,7 @@ HTTP 503 is returned when SQLite is unavailable, the monitoring worker has stopp
 - Configuration and role changes are audited, with secrets always masked.
 - Each OpenAI collection cycle only reads the fixed official `https://status.openai.com/api/v2/summary.json`, enforces response-size and timeout limits, and never accepts a configurable URL, preventing SSRF abuse.
 - Only the latest official-status snapshot is retained; incident progress is stored separately in the incident workspace, preventing unbounded SQLite growth at a 60-second polling interval.
+- Raw samples, resolved incidents, and notification delivery records have independent retention policies. Periodic pruning and WAL checkpoints bound storage growth, while System Settings shows database/WAL size, pending deliveries, and dead letters.
 
 See [New API pages architecture](docs/CUSTOMER_CONSOLE_EN.md) for API mapping, permission boundaries, and compatibility policy. See [SECURITY_EN.md](SECURITY_EN.md) for the wider security boundary, [ROADMAP_EN.md](ROADMAP_EN.md) for planned work, and [GITHUB_GUIDE_EN.md](GITHUB_GUIDE_EN.md) for the protected-branch workflow.
 
@@ -174,7 +181,10 @@ python -m unittest discover -s tests -v
 
 cd web
 bun install --frozen-lockfile
+bun run test
 bun run build
+bunx playwright install chromium
+bun run test:e2e
 
 cd ..
 docker compose --env-file .env.example config --quiet

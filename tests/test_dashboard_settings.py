@@ -16,6 +16,7 @@ class SettingsStoreTests(unittest.TestCase):
             defaults={
                 "channel_sync_interval_seconds": 5,
                 "slow_request_seconds": 60.0,
+                "console_enabled": True,
                 "smtp_password": "bootstrap-secret",
             },
         )
@@ -42,6 +43,17 @@ class SettingsStoreTests(unittest.TestCase):
         self.store.update_settings({"smtp_password": ""}, actor="root")
 
         self.assertEqual("bootstrap-secret", self.store.runtime_values()["smtp_password"])
+
+    def test_worker_version_changes_only_for_collector_runtime_settings(self):
+        before = self.store.worker_version()
+
+        self.store.update_settings({"console_enabled": False}, actor="root")
+        self.store.set_user_role("viewer", "operator", actor="root")
+        unchanged = self.store.worker_version()
+        self.store.update_settings({"channel_sync_interval_seconds": 10}, actor="root")
+
+        self.assertEqual(before, unchanged)
+        self.assertGreater(self.store.worker_version(), unchanged)
 
     def test_channel_settings_override_display_without_touching_source_channel(self):
         self.store.update_channel(

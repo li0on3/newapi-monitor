@@ -21,6 +21,7 @@ COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY --chown=monitor:monitor --chmod=0444 newapi_monitor.py dashboard_auth.py dashboard_data.py dashboard_http.py dashboard_key_groups.py dashboard_key_usage.py dashboard_newapi_console.py dashboard_settings.py dashboard_setup.py dashboard_sso.py dashboard_app.py ./
+COPY --chown=monitor:monitor --chmod=0555 monitoring_core/ ./monitoring_core/
 COPY --chown=monitor:monitor --chmod=0555 --from=dashboard-build /build/dist /app/static
 
 USER 10001:10001

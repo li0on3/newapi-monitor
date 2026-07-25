@@ -11,6 +11,8 @@ __pycache__/
 tests/__pycache__/
 web/node_modules/
 web/dist/
+web/playwright-report/
+web/test-results/
 web/*.tsbuildinfo
 *.tar.gz
 *.db
