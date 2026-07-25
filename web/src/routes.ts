@@ -49,6 +49,24 @@ export function enabledConsolePages(pages: Partial<Record<ConsolePage, boolean>>
   return CONSOLE_PAGE_ORDER.filter((page) => pages[page] !== false);
 }
 
+export function canAccessMonitorModules(role: string): boolean {
+  return role === 'operator' || role === 'admin';
+}
+
+export function defaultAuthorizedRoute(
+  role: string,
+  pages: Partial<Record<ConsolePage, boolean>>,
+): AppRoute {
+  if (!canAccessMonitorModules(role)) {
+    return {
+      tab: 'console',
+      settingsPage: 'status',
+      consolePage: enabledConsolePages(pages)[0] || 'overview',
+    };
+  }
+  return { tab: 'overview', settingsPage: 'status', consolePage: 'overview' };
+}
+
 function routeSegments(pathname: string): string[] {
   const normalized = pathname.replace(/^\/monitor(?=\/|$)/, '').replace(/^\/+|\/+$/g, '');
   return normalized ? normalized.split('/') : [];

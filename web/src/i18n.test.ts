@@ -52,6 +52,10 @@ describe('translations', () => {
     expect(translate('退出监控仅终止监控会话，不会退出或修改 New API。', 'en')).toBe(
       'Signing out only ends the monitor session. It does not sign out of or modify New API.',
     )
+    expect(translate('个人 New API 功能页', 'en')).toBe('Personal New API pages')
+    expect(translate('用户无需预先同步，登录时实时识别。普通 New API 用户只能使用个人 New API 功能页，Admin 与 Root 自动成为管理员；这里可以对指定用户覆盖。', 'en')).toContain(
+      'identified live at sign-in',
+    )
     expect(translate('第 {{page}}/{{pages}} 页 · {{total}} 条记录', 'en', { page: 2, pages: 5, total: 88 })).toBe(
       'Page 2 of 5 · 88 records',
     )

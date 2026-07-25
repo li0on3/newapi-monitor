@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from typing import get_type_hints
 from unittest import mock
 
 import dashboard_app
@@ -99,7 +100,7 @@ class DashboardSessionBoundaryTests(unittest.TestCase):
             "source": "newapi",
         }
         settings = mock.Mock()
-        settings.resolve_role.return_value = "operator"
+        settings.resolve_role.return_value = "admin"
 
         with mock.patch.object(dashboard_app.runtime, "auth", auth), mock.patch.object(
             dashboard_app.runtime, "sso", sso
@@ -107,7 +108,7 @@ class DashboardSessionBoundaryTests(unittest.TestCase):
             identity = dashboard_app.require_auth(self.request("session=new-api-session"))
 
         self.assertEqual("admin", identity["username"])
-        self.assertEqual("operator", identity["role"])
+        self.assertEqual("admin", identity["role"])
         sso.verify.assert_called_once_with("new-api-session", "1")
 
     def test_logout_sets_monitor_only_sso_suppression_cookie(self):
@@ -173,6 +174,33 @@ class DashboardSessionBoundaryTests(unittest.TestCase):
         )
         self.assertFalse(any(cookie.startswith("session=") for cookie in cookies))
 
+
+class DashboardRoleBoundaryTests(unittest.TestCase):
+    def test_regular_new_api_user_cannot_access_monitor_modules(self):
+        for endpoint, parameter in (
+            (dashboard_app.dashboard_summary, "user"),
+            (dashboard_app.openai_provider_status, "user"),
+            (dashboard_app.channels, "user"),
+            (dashboard_app.channel, "user"),
+            (dashboard_app.query_key_usage, "user"),
+        ):
+            with self.subTest(endpoint=endpoint.__name__):
+                self.assertEqual(
+                    dashboard_app.OperatorUser,
+                    get_type_hints(endpoint, include_extras=True)[parameter],
+                )
+
+        viewer = {
+            "username": "alice",
+            "display_name": "Alice",
+            "role": "viewer",
+            "source": "newapi",
+            "source_role": 1,
+            "user_id": 9,
+        }
+        with self.assertRaises(HTTPException) as denied:
+            dashboard_app.require_operator(viewer)
+        self.assertEqual(403, denied.exception.status_code)
 
 if __name__ == "__main__":
     unittest.main()

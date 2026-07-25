@@ -47,7 +47,7 @@ import { createPortal } from 'react-dom';
 import { api, ApiError } from './api';
 import { getLanguage, setLanguage, t } from './i18n';
 import { buildProviderStatusContext, DEFAULT_OPENAI_COMPONENT_NAMES } from './provider-status';
-import { enabledConsolePages, readRoute, routePath } from './routes';
+import { canAccessMonitorModules, defaultAuthorizedRoute, enabledConsolePages, readRoute, routePath } from './routes';
 import { ThemeSwitch } from './ThemeSwitch';
 import type { AppRoute, AppTab, ConsolePage, SettingsPage } from './routes';
 import type { AuthUser, Channel, ChannelMonitorConfig, ContainerMetric, Incident, IncidentPayload, IncidentSummary, KeyUsageCall, KeyUsageResult, LogItem, ProviderStatus, ResourceSample, Summary, SystemHealth } from './types';
@@ -384,7 +384,7 @@ const SETTING_SECTIONS: Array<{ id: SettingSectionId; title: string; short: stri
   ] },
   { id: 'keyUsage', title: t('Key 用量查询'), short: t('权限与查询策略'), icon: <KeyRound size={18} />, description: t('按 Key 即时读取其额度与最近调用。Key 仅在当前请求中转发给 New API，不写入监控数据库、审计日志或浏览器地址。'), fields: [
     { key: 'key_usage_enabled', label: t('启用 Key 用量查询'), type: 'boolean', hint: t('关闭后入口和接口同时停用') },
-    { key: 'key_usage_min_role', label: t('最低可用角色'), type: 'select', options: [['admin', t('仅管理员')], ['operator', t('运维员及管理员')], ['viewer', t('所有已登录用户')]], hint: t('建议保持仅管理员，降低 Key 信息泄露风险') },
+    { key: 'key_usage_min_role', label: t('最低可用角色'), type: 'select', options: [['admin', t('仅管理员')], ['operator', t('运维员及管理员')]], hint: t('普通用户固定不可访问，避免 Key 信息泄露') },
     { key: 'key_usage_log_limit', label: t('单次返回调用数'), type: 'number', hint: t('10–500，New API 最多提供最近 1000 条') },
     { key: 'key_usage_attempts_per_minute', label: t('每用户每分钟查询次数'), type: 'number', hint: t('防止撞库、滥用与上游压力') },
     { key: 'key_usage_quota_per_unit', label: t('额度换算单位'), type: 'number', hint: t('默认 500000，即 500000 额度显示为 $1') },
@@ -490,8 +490,8 @@ function SettingsView({ activePage, onActivePageChange }: { activePage: Settings
     setValue('openai_status_component_ids', selected.size ? Array.from(selected) : ['__none__']);
   };
   const addUser = async () => { if (!newUser.trim()) return; await api(`access/users/${encodeURIComponent(newUser.trim())}`, { method: 'PUT', body: JSON.stringify({ role: newRole }) }); setNewUser(''); await load(); };
-  const setOverviewVisibility = (channelId: number, audience: 'admin' | 'viewer', visible: boolean) => setOverviewChannels((current) => current.map((channel) => channel.channel_id === channelId ? { ...channel, [audience === 'admin' ? 'overview_admin_visible' : 'overview_viewer_visible']: visible } : channel));
-  const setAllOverviewVisibility = (audience: 'admin' | 'viewer', visible: boolean) => setOverviewChannels((current) => current.map((channel) => ({ ...channel, [audience === 'admin' ? 'overview_admin_visible' : 'overview_viewer_visible']: visible })));
+  const setOverviewVisibility = (channelId: number, visible: boolean) => setOverviewChannels((current) => current.map((channel) => channel.channel_id === channelId ? { ...channel, overview_admin_visible: visible } : channel));
+  const setAllOverviewVisibility = (visible: boolean) => setOverviewChannels((current) => current.map((channel) => ({ ...channel, overview_admin_visible: visible })));
   const saveOverviewVisibility = async () => {
     setSaving(true); setMessage('');
     try {
@@ -521,18 +521,17 @@ function SettingsView({ activePage, onActivePageChange }: { activePage: Settings
       <div className="settings-stage">
         {activePage === 'status' && <article className="settings-card settings-focus-card"><div className="settings-card-head settings-focus-head"><div className="settings-section-mark"><ShieldCheck size={18} /></div><div><span className="eyebrow">SELF MONITORING</span><h3>{t("采集链路状态")}</h3><p>{t("监控程序同时检查自身是否仍在持续产生新数据，避免“页面正常但采集已经停止”。")}</p></div><StatusPill tone={systemStatus?.status === 'ok' ? 'ok' : 'bad'}>{systemStatus?.status === 'ok' ? t('全部正常') : t('存在降级')}</StatusPill></div><div className="collector-health-grid"><div className="collector-health-card"><span>{t("数据库")}</span><strong>{systemStatus?.database === 'ok' ? t('正常') : t('异常')}</strong><small>{systemStatus?.database_error || t('SQLite 可读写')}</small></div><div className="collector-health-card"><span>{t("监控进程")}</span><strong>{systemStatus?.monitor_worker === 'running' ? t('运行中') : systemStatus?.monitor_worker || t('未知')}</strong><small>{systemStatus?.monitor_error || t('工作线程持续运行')}</small></div>{Object.entries(systemStatus?.collectors || {}).map(([name, collector]) => { const labels: Record<string, string> = { channel_sync: t('渠道同步'), channel_probe: t('渠道探测'), logs: t('使用日志'), resources: t('机器资源'), openai_status: t('OpenAI 官方状态') }; return <div className={classNames('collector-health-card', collector.status === 'stale' && 'collector-health-stale')} key={name}><span>{labels[name] || name}</span><strong>{collector.status === 'ok' ? t('正常') : collector.status === 'starting' ? t('启动中') : t('数据过期')}</strong><small>{t("最后成功")} {collector.age_seconds}{t("s 前 · 阈值")} {collector.stale_after_seconds}s</small>{collector.consecutive_failures > 0 && <em>{t("连续失败")} {collector.consecutive_failures} {t("次")}</em>}{collector.last_error && <code title={collector.last_error}>{collector.last_error}</code>}</div>; })}</div><div className="settings-action-bar"><div><strong>{t("最后检查")} {systemStatus ? formatFullTime(systemStatus.timestamp) : '—'}</strong><small>{t("数据超过动态失效阈值后，健康检查变为 503，并生成异常与恢复事件。")}</small></div><button className="secondary-button" onClick={() => void load()}><RefreshCw size={16} />{t("立即刷新")}</button></div></article>}
         {activePage === 'overview' && <article className="settings-card settings-focus-card overview-settings-card">
-          <div className="settings-card-head settings-focus-head"><div className="settings-section-mark"><Eye size={18} /></div><div><span className="eyebrow">ROLE-BASED OVERVIEW</span><h3>{t("总览渠道展示")}</h3><p>{t("管理端与普通用户使用独立渠道清单；总览状态、渠道卡片和异常判断都按当前登录角色计算。")}</p></div><span className="settings-field-count">{overviewChannels.length} {t("个渠道")}</span></div>
+          <div className="settings-card-head settings-focus-head"><div className="settings-section-mark"><Eye size={18} /></div><div><span className="eyebrow">MONITOR OVERVIEW</span><h3>{t("总览渠道展示")}</h3><p>{t("监控总览仅管理员和运维员可见；这里控制渠道卡片和总览状态的展示范围。")}</p></div><span className="settings-field-count">{overviewChannels.length} {t("个渠道")}</span></div>
           <div className="overview-audience-summary">
             <div><span className="overview-audience-icon admin"><ShieldCheck size={18} /></span><div><strong>{t("管理端")}</strong><small>{t("管理员与运维员可见")}</small></div><b>{overviewChannels.filter((channel) => channel.enabled && channel.overview_admin_visible).length}</b></div>
-            <div><span className="overview-audience-icon viewer"><Eye size={18} /></span><div><strong>{t("普通用户")}</strong><small>{t("只读总览用户可见")}</small></div><b>{overviewChannels.filter((channel) => channel.enabled && channel.overview_viewer_visible).length}</b></div>
-            <p><AlertTriangle size={15} />{t("隐藏仅影响对应角色的总览展示和状态汇总，不会停止渠道探测、日志采集或告警。")}</p>
+            <p><AlertTriangle size={15} />{t("隐藏仅影响监控总览展示和状态汇总，不会停止渠道探测、日志采集或告警。")}</p>
           </div>
-          <div className="overview-visibility-toolbar"><div><strong>{t("批量设置")}</strong><small>{t("先批量调整，再对个别渠道微调。")}</small></div><div><button onClick={() => setAllOverviewVisibility('admin', true)}>{t("管理端全开")}</button><button onClick={() => setAllOverviewVisibility('admin', false)}>{t("管理端全关")}</button><button onClick={() => setAllOverviewVisibility('viewer', true)}>{t("普通用户全开")}</button><button onClick={() => setAllOverviewVisibility('viewer', false)}>{t("普通用户全关")}</button><button onClick={() => setOverviewChannels((current) => current.map((channel) => ({ ...channel, overview_viewer_visible: channel.overview_admin_visible })))}>{t("普通用户跟随管理端")}</button></div></div>
+          <div className="overview-visibility-toolbar"><div><strong>{t("批量设置")}</strong><small>{t("先批量调整，再对个别渠道微调。")}</small></div><div><button onClick={() => setAllOverviewVisibility(true)}>{t("管理端全开")}</button><button onClick={() => setAllOverviewVisibility(false)}>{t("管理端全关")}</button></div></div>
           <div className="overview-visibility-table">
-            <div className="overview-visibility-head"><span>{t("渠道")}</span><span>New API</span><span>{t("管理端总览")}</span><span>{t("普通用户总览")}</span></div>
-            {overviewChannels.map((channel) => <div className={classNames('overview-visibility-row', !channel.enabled && 'disabled')} key={channel.channel_id}><div><span className="provider-mark compact">{channel.name.slice(0, 2).toUpperCase()}</span><span><strong>{channel.name}</strong><small>#{channel.channel_id} · {channel.group || 'default'}</small></span></div><StatusPill tone={channel.enabled ? 'ok' : 'muted'}>{channel.enabled ? t('已启用') : t('已禁用')}</StatusPill><Toggle checked={channel.overview_admin_visible ?? true} onChange={(visible) => setOverviewVisibility(channel.channel_id, 'admin', visible)} label={t("管理端")} /><Toggle checked={channel.overview_viewer_visible ?? true} onChange={(visible) => setOverviewVisibility(channel.channel_id, 'viewer', visible)} label={t("普通用户")} /></div>)}
+            <div className="overview-visibility-head"><span>{t("渠道")}</span><span>New API</span><span>{t("管理端总览")}</span></div>
+            {overviewChannels.map((channel) => <div className={classNames('overview-visibility-row', !channel.enabled && 'disabled')} key={channel.channel_id}><div><span className="provider-mark compact">{channel.name.slice(0, 2).toUpperCase()}</span><span><strong>{channel.name}</strong><small>#{channel.channel_id} · {channel.group || 'default'}</small></span></div><StatusPill tone={channel.enabled ? 'ok' : 'muted'}>{channel.enabled ? t('已启用') : t('已禁用')}</StatusPill><Toggle checked={channel.overview_admin_visible ?? true} onChange={(visible) => setOverviewVisibility(channel.channel_id, visible)} label={t("管理端")} /></div>)}
           </div>
-          <div className="settings-action-bar"><div><strong>{overviewDirty ? t('展示范围尚未应用') : t('角色展示范围已生效')}</strong><small>{t("保存后无需重启，管理员和普通用户刷新总览即可看到各自渠道。")}</small></div><button className="secondary-button" disabled={!overviewDirty || saving} onClick={() => void load()}>{t("撤销更改")}</button><button className="primary-button settings-save" disabled={!overviewDirty || saving || !overviewChannels.length} onClick={() => void saveOverviewVisibility()}>{saving ? <RefreshCw className="spin" size={16} /> : <Save size={16} />}{t("保存展示范围")}</button></div>
+          <div className="settings-action-bar"><div><strong>{overviewDirty ? t('展示范围尚未应用') : t('角色展示范围已生效')}</strong><small>{t("保存后无需重启，管理员和运维员刷新监控总览即可生效。")}</small></div><button className="secondary-button" disabled={!overviewDirty || saving} onClick={() => void load()}>{t("撤销更改")}</button><button className="primary-button settings-save" disabled={!overviewDirty || saving || !overviewChannels.length} onClick={() => void saveOverviewVisibility()}>{saving ? <RefreshCw className="spin" size={16} /> : <Save size={16} />}{t("保存展示范围")}</button></div>
         </article>}
         {activePage === 'providers' && <article className="settings-card settings-focus-card provider-settings-card">
           <div className="settings-card-head settings-focus-head"><div className="settings-section-mark"><Cloud size={18} /></div><div><span className="eyebrow">UPSTREAM STATUS INTELLIGENCE</span><h3>{t('OpenAI 官方状态')}</h3><p>{t('将 OpenAI 官方事件作为独立辅助上下文，用于解释故障和减少重复告警。')}</p></div><StatusPill tone={!openAIStatus || openAIStatus.stale ? 'muted' : openAIStatus.indicator === 'none' ? 'ok' : 'bad'}>{!openAIStatus ? t('等待同步') : openAIStatus.stale ? t('数据过期') : openAIStatus.description}</StatusPill></div>
@@ -581,7 +580,7 @@ function SettingsView({ activePage, onActivePageChange }: { activePage: Settings
           <div className="settings-action-bar"><div><strong>{dirty ? t('通知配置尚未应用') : t('通知路由已生效')}</strong><small>{dirty ? t('保存后工作线程会热加载；测试按钮将在保存后可用。') : t('可以展开任一渠道发送真实测试通知。')}</small></div><button className="secondary-button" disabled={!dirty || saving} onClick={() => { setValues(baseline); setMessage(t('已撤销本次未保存更改')); }}>{t("撤销更改")}</button><button className="primary-button settings-save" disabled={!dirty || saving} onClick={() => void save()}>{saving ? <RefreshCw className="spin" size={16} /> : <Save size={16} />}{t("保存通知配置")}</button></div>
         </article>}
         {activeSection && <article className="settings-card settings-focus-card"><div className="settings-card-head settings-focus-head"><div className="settings-section-mark">{activeSection.icon}</div><div><span className="eyebrow">CONFIGURATION GROUP</span><h3>{activeSection.title}</h3><p>{activeSection.description}</p></div><span className="settings-field-count">{activeSection.fields.length} {t("项")}</span></div><div className="settings-fields">{activeSection.fields.map((field) => field.type === 'boolean' ? <Toggle key={field.key} label={field.label} checked={Boolean(values[field.key])} onChange={(value) => setValue(field.key, value)} /> : <label key={field.key}><span>{field.label}</span>{field.type === 'select' ? <select value={String(values[field.key] ?? '')} onChange={(event) => setValue(field.key, event.target.value)}>{field.options?.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select> : <input type={field.type === 'password' ? 'password' : field.type === 'number' ? 'number' : 'text'} value={String(values[field.key] ?? '')} placeholder={field.hint} onChange={(event) => setValue(field.key, field.type === 'number' ? Number(event.target.value) : event.target.value)} />}<small>{field.hint}</small></label>)}</div><div className="settings-action-bar"><div><strong>{dirty ? t('更改尚未应用') : t('当前配置已生效')}</strong><small>{dirty ? t('保存后采集器将在数秒内热加载，无需重启。') : t('你可以切换左侧分类继续检查其他配置。')}</small></div><button className="secondary-button" disabled={!dirty || saving} onClick={() => { setValues(baseline); setMessage(t('已撤销本次未保存更改')); }}>{t("撤销更改")}</button><button className="primary-button settings-save" disabled={!dirty || saving} onClick={() => void save()}>{saving ? <RefreshCw className="spin" size={16} /> : <Save size={16} />}{t("保存并应用")}</button></div></article>}
-        {activePage === 'access' && <article className="settings-card settings-focus-card"><div className="settings-card-head settings-focus-head"><div className="settings-section-mark"><UserCog size={18} /></div><div><span className="eyebrow">ACCESS CONTROL</span><h3>{t("角色映射")}</h3><p>{t("普通 New API 用户默认只能查看总览，Admin 自动为运维员，Root 自动为管理员；这里可以对指定用户覆盖。")}</p></div></div><div className="user-add user-add-wide"><input placeholder={t("New API 用户名")} value={newUser} onChange={(event) => setNewUser(event.target.value)} /><select value={newRole} onChange={(event) => setNewRole(event.target.value)}><option value="viewer">{t("只读总览")}</option><option value="operator">{t("运维")}</option><option value="admin">{t("管理员")}</option></select><button onClick={() => void addUser()}><UserCog size={15} />{t("添加映射")}</button></div><div className="role-list">{users.map((user) => <div key={user.username}><strong>{user.username}</strong><span>{user.role}</span><button onClick={async () => { await api(`access/users/${encodeURIComponent(user.username)}`, { method: 'PUT', body: JSON.stringify({ role: null }) }); await load(); }}><X size={14} /></button></div>)}{!users.length && <p>{t("暂无用户覆盖规则")}</p>}</div></article>}
+        {activePage === 'access' && <article className="settings-card settings-focus-card"><div className="settings-card-head settings-focus-head"><div className="settings-section-mark"><UserCog size={18} /></div><div><span className="eyebrow">ACCESS CONTROL</span><h3>{t("角色映射")}</h3><p>{t("用户无需预先同步，登录时实时识别。普通 New API 用户只能使用个人 New API 功能页，Admin 与 Root 自动成为管理员；这里可以对指定用户覆盖。")}</p></div></div><div className="user-add user-add-wide"><input placeholder={t("New API 用户名")} value={newUser} onChange={(event) => setNewUser(event.target.value)} /><select value={newRole} onChange={(event) => setNewRole(event.target.value)}><option value="viewer">{t("个人 New API 功能页")}</option><option value="operator">{t("运维")}</option><option value="admin">{t("管理员")}</option></select><button onClick={() => void addUser()}><UserCog size={15} />{t("添加映射")}</button></div><div className="role-list">{users.map((user) => <div key={user.username}><strong>{user.username}</strong><span>{user.role}</span><button onClick={async () => { await api(`access/users/${encodeURIComponent(user.username)}`, { method: 'PUT', body: JSON.stringify({ role: null }) }); await load(); }}><X size={14} /></button></div>)}{!users.length && <p>{t("暂无用户覆盖规则")}</p>}</div></article>}
         {activePage === 'audit' && <article className="settings-card settings-focus-card"><div className="settings-card-head settings-focus-head"><div className="settings-section-mark"><Clock3 size={18} /></div><div><span className="eyebrow">CHANGE HISTORY</span><h3>{t("配置审计")}</h3><p>{t("最近30次系统、渠道和权限变更，便于快速定位误操作。")}</p></div><span className="settings-field-count">{audit.length} {t("条")}</span></div><div className="audit-list audit-list-wide">{audit.map((entry) => <div key={String(entry.id)}><span>{formatFullTime(Number(entry.created_at))}</span><strong>{String(entry.actor)}</strong><small>{String(entry.action)} · {String(entry.target)}</small></div>)}</div></article>}
       </div>
     </div>
@@ -1260,6 +1259,11 @@ export default function App() {
   const [countdown, setCountdown] = useState(REFRESH_SECONDS);
   const refreshSeconds = Math.max(2, user?.dashboard_refresh_seconds || REFRESH_SECONDS);
   const tab: Tab = route.tab;
+  const elevated = canAccessMonitorModules(user?.role || '');
+  const enabledConsolePageList = useMemo(
+    () => user?.console_available ? enabledConsolePages(user.console_pages || {}) : [],
+    [user?.console_available, user?.console_pages],
+  );
 
   const navigate = useCallback((nextRoute: AppRoute, replace = false) => {
     const path = routePath(nextRoute);
@@ -1305,19 +1309,24 @@ export default function App() {
     } finally { setRefreshing(false); }
   }, [refreshSeconds]);
 
-  useEffect(() => { if (authState !== 'ready' || tab === 'console') return; void loadCore(); const timer = window.setInterval(() => void loadCore(), refreshSeconds * 1000); return () => window.clearInterval(timer); }, [authState, loadCore, refreshSeconds, tab]);
+  useEffect(() => { if (authState !== 'ready' || tab === 'console' || !elevated) return; void loadCore(); const timer = window.setInterval(() => void loadCore(), refreshSeconds * 1000); return () => window.clearInterval(timer); }, [authState, elevated, loadCore, refreshSeconds, tab]);
   useEffect(() => { if (authState !== 'ready') return; const timer = window.setInterval(() => setCountdown((value) => value <= 1 ? refreshSeconds : value - 1), 1000); return () => window.clearInterval(timer); }, [authState, refreshSeconds]);
   useEffect(() => {
     if (!user) return;
-    const elevated = user.role === 'operator' || user.role === 'admin';
-    const allowed = tab === 'overview'
-      || (tab === 'console' && user.console_available)
+    const consoleAllowed = tab === 'console'
+      && user.console_available
+      && enabledConsolePageList.includes(route.consolePage);
+    const monitorAllowed = elevated && (
+      tab === 'overview'
       || tab === 'providerStatus'
       || (tab === 'keyUsage' && user.key_usage_available)
-      || (elevated && ['logs', 'resources', 'incidents', 'channels'].includes(tab))
-      || (tab === 'settings' && user.role === 'admin');
-    if (!allowed) navigate({ tab: 'overview', settingsPage: 'status', consolePage: 'overview' }, true);
-  }, [navigate, tab, user]);
+      || ['logs', 'resources', 'incidents', 'channels'].includes(tab)
+      || (tab === 'settings' && user.role === 'admin')
+    );
+    if (!consoleAllowed && !monitorAllowed) {
+      navigate(defaultAuthorizedRoute(user.role, user.console_pages || {}), true);
+    }
+  }, [elevated, enabledConsolePageList, navigate, route.consolePage, tab, user]);
 
   const overall = useMemo(() => {
     if (!summary) return { tone: 'muted' as const, label: t('正在同步') };
@@ -1333,9 +1342,8 @@ export default function App() {
   if (authState === 'setup' && setupStatus) return <SetupView status={setupStatus} onComplete={() => { const base = window.location.pathname.startsWith('/monitor') ? '/monitor/' : '/'; window.history.replaceState(null, '', base); setAuthState('guest'); }} />;
   if (authState === 'guest') return <Login onSuccess={(authenticatedUser) => { setUser(authenticatedUser); setCountdown(authenticatedUser.dashboard_refresh_seconds || REFRESH_SECONDS); setAuthState('ready'); }} />;
 
-  const elevated = user?.role === 'operator' || user?.role === 'admin';
   const enabledConsolePageSet = new Set<ConsolePage>(
-    user?.console_available ? enabledConsolePages(user.console_pages || {}) : [],
+    enabledConsolePageList,
   );
   const newApiNavItems = [
     { page: 'overview' as const, label: t('概览'), Icon: LayoutDashboard },
@@ -1344,13 +1352,13 @@ export default function App() {
     { page: 'logs' as const, label: t('使用日志'), Icon: ScrollText },
   ].filter((item) => enabledConsolePageSet.has(item.page));
   const monitorNavItems = [
-    { id: 'overview', label: t('监控总览'), Icon: Activity, route: { tab: 'overview', settingsPage: 'status', consolePage: 'overview' } as AppRoute, visible: true },
-    { id: 'keyUsage', label: t('Key 查询'), Icon: KeyRound, route: { tab: 'keyUsage', settingsPage: 'status', consolePage: 'overview' } as AppRoute, visible: Boolean(user?.key_usage_available) },
+    { id: 'overview', label: t('监控总览'), Icon: Activity, route: { tab: 'overview', settingsPage: 'status', consolePage: 'overview' } as AppRoute, visible: elevated },
+    { id: 'keyUsage', label: t('Key 查询'), Icon: KeyRound, route: { tab: 'keyUsage', settingsPage: 'status', consolePage: 'overview' } as AppRoute, visible: elevated && Boolean(user?.key_usage_available) },
     { id: 'logs', label: t('监控日志'), Icon: Clock3, route: { tab: 'logs', settingsPage: 'status', consolePage: 'overview' } as AppRoute, visible: elevated },
     { id: 'resources', label: t('机器资源'), Icon: Cpu, route: { tab: 'resources', settingsPage: 'status', consolePage: 'overview' } as AppRoute, visible: elevated },
     { id: 'incidents', label: t('事件'), Icon: AlertTriangle, route: { tab: 'incidents', settingsPage: 'status', consolePage: 'overview' } as AppRoute, visible: elevated },
     { id: 'channels', label: t('渠道配置'), Icon: SlidersHorizontal, route: { tab: 'channels', settingsPage: 'status', consolePage: 'overview' } as AppRoute, visible: elevated },
-    { id: 'providerStatus', label: t('官方状态'), Icon: Cloud, route: { tab: 'providerStatus', settingsPage: 'status', consolePage: 'overview' } as AppRoute, visible: Boolean(summary?.provider_status) },
+    { id: 'providerStatus', label: t('官方状态'), Icon: Cloud, route: { tab: 'providerStatus', settingsPage: 'status', consolePage: 'overview' } as AppRoute, visible: elevated && Boolean(summary?.provider_status) },
     { id: 'settings', label: t('系统配置'), Icon: Settings, route: { tab: 'settings', settingsPage: route.settingsPage, consolePage: 'overview' } as AppRoute, visible: user?.role === 'admin' },
   ].filter((item) => item.visible);
 
@@ -1367,10 +1375,10 @@ export default function App() {
               <div className="app-nav-section-title"><span>New API</span><small>{newApiNavItems.length}</small></div>
               {newApiNavItems.map(({ page, label, Icon }) => <button key={page} className={tab === 'console' && route.consolePage === page ? 'active' : ''} onClick={() => navigate({ tab: 'console', settingsPage: 'status', consolePage: page })}><span className="nav-icon"><Icon size={17} /></span><span>{label}</span></button>)}
             </section>}
-            <section className="app-nav-section" aria-label={t('监控')}>
+            {monitorNavItems.length > 0 && <section className="app-nav-section" aria-label={t('监控')}>
               <div className="app-nav-section-title"><span>{t('监控')}</span><small>{monitorNavItems.length}</small></div>
               {monitorNavItems.map(({ id, label, Icon, route: itemRoute }) => <button key={id} className={tab === itemRoute.tab ? 'active' : ''} onClick={() => navigate(itemRoute)}><span className="nav-icon"><Icon size={17} /></span><span>{label}</span></button>)}
-            </section>
+            </section>}
           </nav>
         </aside>
         <div className="app-canvas">

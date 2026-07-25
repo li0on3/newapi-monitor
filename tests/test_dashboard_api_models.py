@@ -108,6 +108,8 @@ class DashboardApiModelTests(unittest.TestCase):
         self.assertEqual("operator", settings.key_usage_min_role)
 
         with self.assertRaises(ValidationError):
+            SettingsUpdatePayload.model_validate({"key_usage_min_role": "viewer"})
+        with self.assertRaises(ValidationError):
             SettingsUpdatePayload.model_validate({"key_usage_min_role": "public"})
         with self.assertRaises(ValidationError):
             KeyUsageQueryPayload.model_validate({"api_key": "bad key"})

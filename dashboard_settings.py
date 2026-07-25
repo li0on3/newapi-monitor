@@ -116,6 +116,8 @@ class SettingsStore:
         for row in rows:
             key = str(row["key"])
             values[key] = self._decode_value(key, json.loads(str(row["value_json"])))
+        if values.get("key_usage_min_role") not in {None, "operator", "admin"}:
+            values["key_usage_min_role"] = "operator"
         return values
 
     def public_values(self) -> dict[str, Any]:
@@ -396,10 +398,8 @@ class SettingsStore:
             ).fetchone()
         if row:
             return str(row["role"])
-        if source_role >= 100:
-            return "admin"
         if source_role >= 10:
-            return "operator"
+            return "admin"
         return "viewer"
 
     def users(self) -> list[dict[str, Any]]:

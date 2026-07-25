@@ -97,12 +97,20 @@ class SettingsStoreTests(unittest.TestCase):
 
     def test_role_mapping_and_user_override(self):
         self.assertEqual("admin", self.store.resolve_role("alice", 100))
-        self.assertEqual("operator", self.store.resolve_role("alice", 10))
+        self.assertEqual("admin", self.store.resolve_role("alice", 10))
         self.assertEqual("viewer", self.store.resolve_role("alice", 1))
 
         self.store.set_user_role("alice", "viewer", actor="root")
 
         self.assertEqual("viewer", self.store.resolve_role("alice", 100))
+
+    def test_legacy_viewer_key_lookup_role_is_normalized_to_operator(self):
+        store = SettingsStore(
+            str(Path(self.temp_dir.name) / "legacy-key-role.db"),
+            defaults={"key_usage_min_role": "viewer"},
+        )
+
+        self.assertEqual("operator", store.runtime_values()["key_usage_min_role"])
 
     def test_bootstrap_channel_settings_does_not_overwrite_existing_configuration(self):
         self.store.update_channel(7, {"display_name": "Existing"}, actor="admin")

@@ -46,7 +46,7 @@ Every screenshot below is generated from the built-in synthetic demo dataset. It
 - Presents Overview, Analytics, API Keys, and real Usage Logs as independent top-level modules. Business data always comes from the current user's New API session and is not copied into a second customer database.
 - Supports API key create, edit, enable/disable, delete, batch delete, and one-time plaintext reveal. Plaintext keys are not stored in the monitor database, logs, audit records, or browser storage.
 - Supports monitor-local key groups plus 1/7/30-day real usage for each personal key and group. Custom key groups never change New API model routing, billing, or permissions.
-- Maintains separate channel visibility lists for administrators/operators and regular viewers.
+- Lets administrators and operators configure the channel list used by Monitor Overview without stopping probes, log collection, or alerts.
 - Synchronizes OpenAI status, components, and incidents from the official JSON feed. A dedicated page separates workload-relevant components from global incidents, while the overview keeps only a compact contextual hint and real local probes remain authoritative.
 
 ## Quick Start
@@ -131,13 +131,13 @@ HTTP 503 is returned when SQLite is unavailable, the monitoring worker has stopp
 - The production container runs as non-root UID `10001`, with a read-only root filesystem and all Linux capabilities removed.
 - Docker access is restricted through a read-only Socket Proxy; the monitor does not mount the Docker socket directly.
 - State-changing APIs require authentication, role checks, strict Pydantic schemas, and a same-origin request header.
-- Regular New API users can only see the overview by default. Operators can inspect logs, resources, incidents, and channels. Monitor administrators can manage settings and role mappings.
+- Regular New API users are identified live from their existing session and can access only their personal Overview, Analytics, API Keys, and Usage Logs. New API Admin and Root accounts automatically become monitor administrators with access to every monitor module.
 - New API page access requires a New API session. Monitor roles only control entry visibility; global versus self-only data remains governed by the original New API role. Emergency administrators cannot access these business pages.
 - Deploy the New API pages on the same browser Origin as New API (preferably under `/monitor/`) so the browser can reuse both the New API Session and `uid`.
 - After monitor sign-out, refresh does not silently reuse a remaining New API session. The user must explicitly choose “Sign in with New API”; this affects only monitor authentication and never signs out of or modifies New API.
 - The console BFF exposes only fixed New API API routes and never accepts arbitrary upstream URLs, paths, or headers. Regular users can query at most 30 days per request.
 - Customer business data is read on demand and is not persisted by the monitor. Plaintext keys exist only in the explicit one-time reveal response, and customer-data APIs are non-cacheable.
-- API key usage lookup is admin-only by default, rate-limited, and only calls New API read-only endpoints.
+- API key usage lookup is admin-only by default, can be lowered only to operators, is rate-limited, and calls only New API read-only endpoints.
 - Configuration and role changes are audited, with secrets always masked.
 - Each OpenAI collection cycle only reads the fixed official `https://status.openai.com/api/v2/summary.json`, enforces response-size and timeout limits, and never accepts a configurable URL, preventing SSRF abuse.
 - Only the latest official-status snapshot is retained; incident progress is stored separately in the incident workspace, preventing unbounded SQLite growth at a 60-second polling interval.

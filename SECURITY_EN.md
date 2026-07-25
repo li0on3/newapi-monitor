@@ -29,13 +29,14 @@ Include the affected version or commit, impact and prerequisites, a minimal repr
 
 Monitor administrators can change New API endpoints, probe rules, and notification credentials. Treat monitor administrators as infrastructure-privileged identities.
 
-API key usage lookup is admin-only by default. It uses POST forwarding, fixed upstream paths, and per-user/source rate limits. Raw keys are not stored in the database, URLs, audits, or API responses.
+API key usage lookup is admin-only by default and can be lowered only to operators. It uses POST forwarding, fixed upstream paths, and per-user/source rate limits. Raw keys are not stored in the database, URLs, audits, or API responses.
 
 The New API pages and legacy key-usage lookup are separate trust boundaries:
 
 - Only a New API session verified through `/api/user/self`, with a returned user ID matching the request header, is accepted. Emergency administrators are denied.
 - The BFF exposes only fixed overview, analytics, token, and log APIs. It has no configurable path, arbitrary headers, or generic reverse-proxy function.
 - The original New API role selects global versus self-only APIs; monitor role mappings cannot elevate upstream permissions.
+- New API Admin and Root accounts map to monitor administrators by default. Regular accounts can access only the four personal New API pages; Monitor Overview, channels, official status, logs, resources, incidents, key lookup, and configuration APIs require an operator or administrator on the server.
 - Plaintext keys are available only through a rate-limited one-time POST response with caching disabled. They are never written to databases, logs, audit records, URLs, or browser storage.
 - Regular-user logs strip administrator metadata, audit metadata, stream status, and channel names, and regular-user time ranges are capped at 30 days.
 - Mutations require the same-origin `X-Monitor-Request: 1` header and produce redacted audit records.
