@@ -767,6 +767,14 @@ const ENGLISH: Record<string, string> = {
 }
 
 const ENGLISH_OVERRIDES: Record<string, string> = {
+  'New API 功能页': 'New API pages',
+  '启用 New API 功能页': 'Enable New API pages',
+  '控制概览、数据看板、API 密钥和使用日志的可见范围与敏感操作频率。所有业务权限仍由 New API Session 最终校验。': 'Control the visibility and sensitive-operation limits of Overview, Analytics, API Keys, and Usage Logs. New API Session remains the final authority.',
+  '显示账号概览': 'Show account overview',
+  '退出监控仅终止监控会话，不会退出或修改 New API。': 'Signing out only ends the monitor session. It does not sign out of or modify New API.',
+  '监控': 'Monitor',
+  '监控总览': 'Monitor overview',
+  '监控日志': 'Monitor logs',
   '主题': 'Theme',
   '跟随系统': 'System',
   '浅色': 'Light',

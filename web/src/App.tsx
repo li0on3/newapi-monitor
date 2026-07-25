@@ -20,6 +20,7 @@ import {
   Inbox,
   Fingerprint,
   KeyRound,
+  LayoutDashboard,
   Languages,
   LogOut,
   Mail,
@@ -29,6 +30,7 @@ import {
   RefreshCw,
   Save,
   Search,
+  ScrollText,
   Send,
   Server,
   Settings,
@@ -45,9 +47,9 @@ import { createPortal } from 'react-dom';
 import { api, ApiError } from './api';
 import { getLanguage, setLanguage, t } from './i18n';
 import { buildProviderStatusContext, DEFAULT_OPENAI_COMPONENT_NAMES } from './provider-status';
-import { readRoute, routePath } from './routes';
+import { enabledConsolePages, readRoute, routePath } from './routes';
 import { ThemeSwitch } from './ThemeSwitch';
-import type { AppRoute, AppTab, SettingsPage } from './routes';
+import type { AppRoute, AppTab, ConsolePage, SettingsPage } from './routes';
 import type { AuthUser, Channel, ChannelMonitorConfig, ContainerMetric, Incident, IncidentPayload, IncidentSummary, KeyUsageCall, KeyUsageResult, LogItem, ProviderStatus, ResourceSample, Summary, SystemHealth } from './types';
 import { ConsoleShell } from './console/ConsoleShell';
 
@@ -137,26 +139,44 @@ function StatusPill({ tone, children }: { tone: 'ok' | 'warn' | 'bad' | 'muted';
   return <span className={`status-pill status-${tone}`}>{children}</span>;
 }
 
-function Login({ onSuccess }: { onSuccess: (username: string) => void }) {
+function Login({ onSuccess }: { onSuccess: (user: AuthUser) => void }) {
   const [username, setUsername] = useState('admin');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const [ssoSubmitting, setSsoSubmitting] = useState(false);
 
   async function submit(event: FormEvent) {
     event.preventDefault();
     setSubmitting(true);
     setError('');
     try {
-      const result = await api<{ authenticated: boolean; username: string }>('auth/login', {
+      await api<{ authenticated: boolean; username: string }>('auth/login', {
         method: 'POST',
         body: JSON.stringify({ username, password }),
       });
-      onSuccess(result.username);
+      onSuccess(await api<AuthUser>('auth/me'));
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : t('登录失败'));
     } finally {
       setSubmitting(false);
+    }
+  }
+
+  async function useNewApiSession() {
+    setSsoSubmitting(true);
+    setError('');
+    try {
+      await api<{ enabled: boolean }>('auth/sso', { method: 'POST' });
+      onSuccess(await api<AuthUser>('auth/me'));
+    } catch (requestError) {
+      if (requestError instanceof ApiError && requestError.status === 401) {
+        window.location.assign('/login');
+        return;
+      }
+      setError(requestError instanceof Error ? requestError.message : t('登录失败'));
+    } finally {
+      setSsoSubmitting(false);
     }
   }
 
@@ -168,7 +188,11 @@ function Login({ onSuccess }: { onSuccess: (username: string) => void }) {
         <div className="eyebrow">PRIVATE OPERATIONS CONSOLE</div>
         <h1>New API Monitor</h1>
         <p>{t("渠道真实探测、请求耗时与机器资源统一监控。")}</p>
-        <a className="sso-button" href="/login"><ShieldCheck size={17} />{t("使用 New API 账号登录")}</a>
+        <button className="sso-button" type="button" onClick={() => void useNewApiSession()} disabled={ssoSubmitting}>
+          {ssoSubmitting ? <RefreshCw className="spin" size={17} /> : <ShieldCheck size={17} />}
+          {ssoSubmitting ? t('正在验证') : t('使用 New API 账号登录')}
+        </button>
+        <p className="sso-note">{t('退出监控仅终止监控会话，不会退出或修改 New API。')}</p>
         <div className="login-divider"><span>{t("紧急管理员登录")}</span></div>
         <form onSubmit={submit}>
           <label>
@@ -347,10 +371,10 @@ const SETTING_SECTIONS: Array<{ id: SettingSectionId; title: string; short: stri
   { id: 'connection', title: t('New API 连接'), short: t('连接与凭据'), icon: <Network size={18} />, description: t('管理接口只读同步与真实探测凭据。敏感字段不会回显。'), fields: [
     { key: 'new_api_base_url', label: t('New API 地址') }, { key: 'new_api_user_id', label: t('管理用户 ID'), type: 'number' }, { key: 'new_api_access_token', label: t('管理访问令牌'), type: 'password', hint: t('留空保持原值') }, { key: 'relay_api_token', label: t('真实探测令牌'), type: 'password', hint: t('留空保持原值') },
   ] },
-  { id: 'console', title: t('客户控制台'), short: t('页面与访问策略'), icon: <TerminalSquare size={18} />, description: t('控制客户控制台入口、页面范围与敏感操作频率。所有业务权限仍由 New API Session 最终校验。'), fields: [
-    { key: 'console_enabled', label: t('启用客户控制台'), type: 'boolean', hint: t('关闭后入口和全部 BFF 接口同时停用') },
+  { id: 'console', title: t('New API 功能页'), short: t('页面与访问策略'), icon: <TerminalSquare size={18} />, description: t('控制概览、数据看板、API 密钥和使用日志的可见范围与敏感操作频率。所有业务权限仍由 New API Session 最终校验。'), fields: [
+    { key: 'console_enabled', label: t('启用 New API 功能页'), type: 'boolean', hint: t('关闭后入口和全部 BFF 接口同时停用') },
     { key: 'console_min_role', label: t('最低监控角色'), type: 'select', options: [['viewer', t('所有已登录用户')], ['operator', t('运维员及管理员')], ['admin', t('仅管理员')]], hint: t('监控角色只控制入口，不会提升 New API 原始权限') },
-    { key: 'console_overview_enabled', label: t('显示客户概览'), type: 'boolean' },
+    { key: 'console_overview_enabled', label: t('显示账号概览'), type: 'boolean' },
     { key: 'console_analytics_enabled', label: t('显示数据看板'), type: 'boolean' },
     { key: 'console_keys_enabled', label: t('允许管理 API 密钥'), type: 'boolean', hint: t('密钥增删改始终使用当前用户的 New API 会话') },
     { key: 'console_logs_enabled', label: t('显示真实使用日志'), type: 'boolean' },
@@ -1307,22 +1331,28 @@ export default function App() {
   async function logout() { await api('auth/logout', { method: 'POST' }).catch(() => undefined); setAuthState('guest'); setUser(null); setSummary(null); }
   if (authState === 'loading') return <div className="boot-screen"><Activity className="spin" /><span>{t("正在建立安全会话")}</span></div>;
   if (authState === 'setup' && setupStatus) return <SetupView status={setupStatus} onComplete={() => { const base = window.location.pathname.startsWith('/monitor') ? '/monitor/' : '/'; window.history.replaceState(null, '', base); setAuthState('guest'); }} />;
-  if (authState === 'guest') return <Login onSuccess={(name) => { api<AuthUser>('auth/me').then((authenticatedUser) => setUser(authenticatedUser)).catch(() => setUser({ authenticated: true, username: name, role: 'admin', source: 'emergency', key_usage_available: true })); setAuthState('ready'); }} />;
+  if (authState === 'guest') return <Login onSuccess={(authenticatedUser) => { setUser(authenticatedUser); setCountdown(authenticatedUser.dashboard_refresh_seconds || REFRESH_SECONDS); setAuthState('ready'); }} />;
 
   const elevated = user?.role === 'operator' || user?.role === 'admin';
-  const navItems = [
-    ['overview', t('总览'), BarChart3],
-    ...(user?.console_available ? [['console', t('客户控制台'), TerminalSquare] as const] : []),
-    ...(user?.key_usage_available ? [['keyUsage', t('Key 查询'), KeyRound] as const] : []),
-    ...(elevated ? [
-      ['logs', t('使用日志'), Clock3] as const,
-      ['resources', t('机器资源'), Cpu] as const,
-      ['incidents', t('事件'), AlertTriangle] as const,
-      ['channels', t('渠道配置'), SlidersHorizontal] as const,
-    ] : []),
-    ...(summary?.provider_status ? [['providerStatus', t('官方状态'), Cloud] as const] : []),
-    ...(user?.role === 'admin' ? [['settings', t('系统配置'), Settings] as const] : []),
-  ] as const;
+  const enabledConsolePageSet = new Set<ConsolePage>(
+    user?.console_available ? enabledConsolePages(user.console_pages || {}) : [],
+  );
+  const newApiNavItems = [
+    { page: 'overview' as const, label: t('概览'), Icon: LayoutDashboard },
+    { page: 'analytics' as const, label: t('数据看板'), Icon: BarChart3 },
+    { page: 'keys' as const, label: t('API 密钥'), Icon: KeyRound },
+    { page: 'logs' as const, label: t('使用日志'), Icon: ScrollText },
+  ].filter((item) => enabledConsolePageSet.has(item.page));
+  const monitorNavItems = [
+    { id: 'overview', label: t('监控总览'), Icon: Activity, route: { tab: 'overview', settingsPage: 'status', consolePage: 'overview' } as AppRoute, visible: true },
+    { id: 'keyUsage', label: t('Key 查询'), Icon: KeyRound, route: { tab: 'keyUsage', settingsPage: 'status', consolePage: 'overview' } as AppRoute, visible: Boolean(user?.key_usage_available) },
+    { id: 'logs', label: t('监控日志'), Icon: Clock3, route: { tab: 'logs', settingsPage: 'status', consolePage: 'overview' } as AppRoute, visible: elevated },
+    { id: 'resources', label: t('机器资源'), Icon: Cpu, route: { tab: 'resources', settingsPage: 'status', consolePage: 'overview' } as AppRoute, visible: elevated },
+    { id: 'incidents', label: t('事件'), Icon: AlertTriangle, route: { tab: 'incidents', settingsPage: 'status', consolePage: 'overview' } as AppRoute, visible: elevated },
+    { id: 'channels', label: t('渠道配置'), Icon: SlidersHorizontal, route: { tab: 'channels', settingsPage: 'status', consolePage: 'overview' } as AppRoute, visible: elevated },
+    { id: 'providerStatus', label: t('官方状态'), Icon: Cloud, route: { tab: 'providerStatus', settingsPage: 'status', consolePage: 'overview' } as AppRoute, visible: Boolean(summary?.provider_status) },
+    { id: 'settings', label: t('系统配置'), Icon: Settings, route: { tab: 'settings', settingsPage: route.settingsPage, consolePage: 'overview' } as AppRoute, visible: user?.role === 'admin' },
+  ].filter((item) => item.visible);
 
   return (
     <div className="app-shell">
@@ -1332,7 +1362,16 @@ export default function App() {
       </header>
       <div className="app-layout">
         <aside className="app-sidebar">
-          <nav aria-label={t('监控导航')}>{navItems.map(([key, label, Icon]) => <button key={key} className={tab === key ? 'active' : ''} onClick={() => navigate({ tab: key, settingsPage: key === 'settings' ? route.settingsPage : 'status', consolePage: key === 'console' ? route.consolePage : 'overview' })}><span className="nav-icon"><Icon size={17} /></span><span>{label}</span></button>)}</nav>
+          <nav aria-label={t('监控导航')}>
+            {newApiNavItems.length > 0 && <section className="app-nav-section" aria-label="New API">
+              <div className="app-nav-section-title"><span>New API</span><small>{newApiNavItems.length}</small></div>
+              {newApiNavItems.map(({ page, label, Icon }) => <button key={page} className={tab === 'console' && route.consolePage === page ? 'active' : ''} onClick={() => navigate({ tab: 'console', settingsPage: 'status', consolePage: page })}><span className="nav-icon"><Icon size={17} /></span><span>{label}</span></button>)}
+            </section>}
+            <section className="app-nav-section" aria-label={t('监控')}>
+              <div className="app-nav-section-title"><span>{t('监控')}</span><small>{monitorNavItems.length}</small></div>
+              {monitorNavItems.map(({ id, label, Icon, route: itemRoute }) => <button key={id} className={tab === itemRoute.tab ? 'active' : ''} onClick={() => navigate(itemRoute)}><span className="nav-icon"><Icon size={17} /></span><span>{label}</span></button>)}
+            </section>
+          </nav>
         </aside>
         <div className="app-canvas">
           <main className="content">{tab === 'console' && user?.console_available ? <ConsoleShell page={route.consolePage} pages={user.console_pages || {}} globalScope={Boolean(user.console_global_scope)} onNavigate={(consolePage) => navigate({ tab: 'console', settingsPage: 'status', consolePage })} /> : <><section className="hero"><div><div className="eyebrow">OPERATIONS / REAL-TIME</div><h1>{t("服务运行态势")}</h1><p>{t("真实渠道探测、真实消费日志、主机与容器资源。")}</p></div><div className={`overall-status overall-${overall.tone}`}><span className="status-beacon" /><div><small>OVERALL STATUS</small><strong>{overall.label}</strong></div><span>{summary ? formatTime(summary.generated_at) : t('同步中')}</span></div></section>

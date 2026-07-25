@@ -1,5 +1,7 @@
 import { describe, expect, test } from 'bun:test'
-import { readRoute } from './routes'
+import * as routes from './routes'
+
+const { readRoute } = routes
 
 describe('dashboard routes', () => {
   test('routes upstream status to its own page', () => {
@@ -39,5 +41,22 @@ describe('dashboard routes', () => {
       settingsPage: 'status',
       consolePage: 'logs',
     })
+  })
+
+  test('returns enabled New API pages in stable top-level navigation order', () => {
+    const enabledConsolePages = (
+      routes as typeof routes & {
+        enabledConsolePages?: (
+          pages: Partial<Record<routes.ConsolePage, boolean>>,
+        ) => routes.ConsolePage[]
+      }
+    ).enabledConsolePages
+
+    expect(typeof enabledConsolePages).toBe('function')
+    expect(enabledConsolePages?.({ overview: true, analytics: true, keys: false, logs: true })).toEqual([
+      'overview',
+      'analytics',
+      'logs',
+    ])
   })
 })

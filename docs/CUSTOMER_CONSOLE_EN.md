@@ -1,8 +1,8 @@
-# Customer Console Architecture
+# New API Pages Architecture
 
 [简体中文](CUSTOMER_CONSOLE.md) | [English](CUSTOMER_CONSOLE_EN.md)
 
-The Customer Console is an external New API user interface hosted by the monitor. It does not modify New API source code, duplicate user/token/quota/log tables, or replace New API authentication and billing.
+Overview, Analytics, API Keys, and Usage Logs are external New API pages hosted by the monitor and presented as independent top-level modules. They do not modify New API source code, duplicate user/token/quota/log tables, or replace New API authentication and billing.
 
 ## Request flow
 
@@ -18,7 +18,9 @@ Browser -> fixed monitor BFF -> fixed New API endpoints
 
 To reuse the browser's New API Session and `uid`, production should mount the monitor on the same Origin as New API, for example `https://api.example.com/monitor/`. A separate hostname or port cannot share both browser states by default and must not work around this boundary by copying cookies or impersonating users with a management token.
 
-The emergency monitor administrator has no New API identity and cannot enter the console. Monitor role mappings only control entry visibility and cannot promote a regular New API user to global administrator scope.
+The emergency monitor administrator has no New API identity and cannot enter these business pages. Monitor role mappings only control entry visibility and cannot promote a regular New API user to global administrator scope.
+
+After explicit monitor sign-out, the server sets a dedicated monitor SSO-suppression cookie. It contains no identity or credential and only prevents automatic reuse of the New API session. The user must explicitly select “Sign in with New API” to clear it. The New API `session` cookie is never deleted or modified.
 
 ## Pages and upstream endpoints
 
@@ -50,4 +52,4 @@ New API administrators use global endpoints; regular users use only self endpoin
 - Upstream timeouts, non-JSON data, oversized responses, and abnormal HTTP statuses are normalized to bounded errors without echoing cookies, tokens, or upstream response bodies.
 - Upstream requests carrying a Session, administrator credentials, or a Key never follow HTTP redirects, preventing credentials from being forwarded to another host.
 - If a New API API contract changes, only `dashboard_newapi_console.py` and its contract tests need adjustment. Monitor failures do not block New API traffic.
-- The console can be disabled globally or page by page under System Settings -> Customer Console.
+- New API pages can be disabled globally or page by page under System Settings -> New API Pages.

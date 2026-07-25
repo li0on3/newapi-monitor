@@ -4,6 +4,24 @@
 
 ## Unreleased
 
+## 1.6.0 - 2026-07-25
+
+### Fixed
+
+- Fixed explicit monitor sign-out being undone on refresh by a remaining New API session. The signed-out state now persists within the monitor until the user explicitly selects “Sign in with New API”.
+- Emergency administrator sign-in now reloads the server-issued identity and no longer fabricates an administrator state in the frontend when identity retrieval fails.
+
+### Changed
+
+- Removed the umbrella Customer Console module and nested sidebar. Overview, Analytics, API Keys, and Usage Logs are now independent top-level modules while retaining the existing deep links and BFF data contracts.
+- Split primary navigation into `New API` and `Monitor` workspaces, with explicit labels such as Monitor Overview and Monitor Logs to avoid ambiguity with New API business pages.
+- Renamed the settings entry to “New API Pages” without changing persisted setting keys or requiring a configuration migration.
+
+### Security
+
+- Added a dedicated HttpOnly, SameSite=Lax monitor SSO-suppression cookie. Monitor sign-out never deletes, changes, or impersonates the New API `session` cookie.
+- Re-enabling New API SSO requires an explicit same-origin-verified POST, preventing cross-site requests from silently clearing the signed-out state.
+
 ## 1.5.0 - 2026-07-25
 
 ### Added

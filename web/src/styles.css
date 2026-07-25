@@ -76,8 +76,10 @@ button { color: inherit; }
 .eyebrow { color: var(--text-muted); font-family: Consolas, monospace; font-size: 11px; letter-spacing: .16em; text-transform: uppercase; }
 .login-panel h1 { margin: 10px 0 8px; font-size: 32px; letter-spacing: -.03em; }
 .login-panel > p { margin: 0 0 28px; color: var(--text-muted); line-height: 1.7; }
-.sso-button { height: 48px; display: flex; align-items: center; justify-content: center; gap: 9px; margin-bottom: 20px; border: 1px solid color-mix(in srgb, var(--primary) 35%, transparent); border-radius: 11px; background: color-mix(in srgb, var(--primary) 9%, transparent); color: var(--green); font-weight: 700; text-decoration: none; }
-.sso-button:hover { background: color-mix(in srgb, var(--primary) 14%, transparent); border-color: color-mix(in srgb, var(--primary) 60%, transparent); }
+.sso-button { width: 100%; height: 48px; display: flex; align-items: center; justify-content: center; gap: 9px; margin-bottom: 8px; border: 1px solid color-mix(in srgb, var(--primary) 35%, transparent); border-radius: 11px; background: color-mix(in srgb, var(--primary) 9%, transparent); color: var(--green); font-weight: 700; text-decoration: none; cursor: pointer; }
+.sso-button:hover:not(:disabled) { background: color-mix(in srgb, var(--primary) 14%, transparent); border-color: color-mix(in srgb, var(--primary) 60%, transparent); }
+.sso-button:disabled { cursor: wait; opacity: .7; }
+.login-panel > .sso-note { margin: 0 0 20px; color: var(--text-subtle); font-size: 10px; line-height: 1.55; text-align: center; }
 .login-divider { display: flex; align-items: center; gap: 12px; margin: 2px 0 18px; color: var(--text-subtle); font-size: 11px; }.login-divider::before,.login-divider::after { content: ''; height: 1px; flex: 1; background: var(--border); }
 .login-panel form { display: grid; gap: 18px; }
 .setup-shell { align-items: center; padding-block: 40px; }
@@ -454,6 +456,10 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .app-layout { display: grid; grid-template-columns: 224px minmax(0, 1fr); min-height: calc(100vh - 52px); }
 .app-sidebar { position: sticky; top: 52px; z-index: 25; align-self: start; height: calc(100vh - 52px); overflow: hidden auto; padding: 12px; border-right: 1px solid var(--border); background: color-mix(in srgb, var(--foreground) .5%, var(--background)); }
 .app-sidebar nav { display: grid; gap: 4px; }
+.app-nav-section { display: grid; gap: 4px; }
+.app-nav-section + .app-nav-section { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border); }
+.app-nav-section-title { min-height: 28px; display: flex; align-items: center; justify-content: space-between; padding: 0 10px; color: var(--text-subtle); font-size: 9px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; }
+.app-nav-section-title small { min-width: 21px; height: 19px; display: grid; place-items: center; border: 1px solid var(--border); border-radius: 999px; background: var(--surface); color: var(--text-muted); font: 700 8px Consolas, monospace; }
 .app-sidebar nav button { width: 100%; min-width: 0; height: 42px; display: grid; grid-template-columns: 30px minmax(0, 1fr); align-items: center; gap: 10px; padding: 0 10px; border: 1px solid transparent; border-radius: 9px; background: transparent; color: var(--text-muted); text-align: left; cursor: pointer; font-size: 13px; font-weight: 500; }
 .app-sidebar nav button:hover { background: var(--surface-muted); color: var(--foreground); }
 .app-sidebar nav button.active { border-color: color-mix(in srgb, var(--primary) 18%, var(--border)); background: color-mix(in srgb, var(--primary) 12%, var(--background)); color: var(--primary); }
@@ -474,7 +480,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .login-panel { border-color: var(--border); border-radius: 16px; background: var(--surface); box-shadow: var(--shadow-lg); }
 .login-mark { border-radius: 13px; box-shadow: 0 10px 28px color-mix(in srgb, var(--primary) 24%, transparent); }
 .sso-button { border-color: color-mix(in srgb, var(--primary) 24%, var(--border)); background: color-mix(in srgb, var(--primary) 8%, var(--surface)); color: var(--primary); }
-.sso-button:hover { border-color: color-mix(in srgb, var(--primary) 45%, var(--border)); background: color-mix(in srgb, var(--primary) 12%, var(--surface)); }
+.sso-button:hover:not(:disabled) { border-color: color-mix(in srgb, var(--primary) 45%, var(--border)); background: color-mix(in srgb, var(--primary) 12%, var(--surface)); }
 .primary-button, .user-add button { background: var(--primary); color: var(--primary-foreground); box-shadow: 0 1px 2px color-mix(in srgb, var(--primary) 20%, transparent); }
 .primary-button:hover:not(:disabled), .user-add button:hover:not(:disabled) { background: color-mix(in srgb, var(--primary) 88%, var(--foreground)); }
 .secondary-button { border-color: var(--border); background: var(--surface); color: var(--foreground); }
@@ -503,6 +509,11 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .console-action-link, .console-panel-head > button:hover, .provider-subsection-head > button:hover, .key-group-head-actions > button:hover { color: var(--primary); }
 .console-action-link { border-color: color-mix(in srgb, var(--primary) 20%, var(--border)); background: color-mix(in srgb, var(--primary) 7%, var(--surface)); }
 .console-workspace { --console-line: var(--border); --console-panel: var(--surface); }
+.console-workspace-flat { display: grid; gap: 16px; }
+.console-module-header { min-height: 104px; display: flex; align-items: center; justify-content: space-between; gap: 24px; padding: 22px 24px; border: 1px solid var(--border); border-radius: 14px; background: linear-gradient(130deg, color-mix(in srgb, var(--primary) 6%, var(--surface)), var(--surface) 48%); box-shadow: 0 1px 2px color-mix(in srgb, var(--foreground) 4%, transparent); }
+.console-module-header h1 { margin: 6px 0 5px; font-size: clamp(24px, 3vw, 31px); line-height: 1.1; letter-spacing: -.035em; }
+.console-module-header p { margin: 0; color: var(--text-muted); font-size: 11px; line-height: 1.6; }
+.console-main-flat { min-width: 0; }
 .console-hero { background: linear-gradient(130deg, color-mix(in srgb, var(--primary) 7%, var(--surface)), var(--surface) 48%); }
 .console-scope-chip { border-color: color-mix(in srgb, var(--primary) 20%, var(--border)); background: color-mix(in srgb, var(--primary) 7%, var(--surface)); color: var(--primary); }
 .console-scope-chip strong { color: var(--foreground); }
@@ -535,6 +546,9 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   .app-layout { display: block; }
   .app-sidebar { top: 52px; height: auto; overflow: hidden; padding: 7px 10px; border-right: 0; border-bottom: 1px solid var(--border); background: color-mix(in srgb, var(--surface) 94%, transparent); backdrop-filter: blur(14px); }
   .app-sidebar nav { display: flex; gap: 4px; overflow-x: auto; scrollbar-width: none; }
+  .app-nav-section { display: flex; flex: none; gap: 4px; }
+  .app-nav-section + .app-nav-section { margin: 0; padding: 0; border: 0; }
+  .app-nav-section-title { display: none; }
   .app-sidebar nav::-webkit-scrollbar { display: none; }
   .app-sidebar nav button { width: auto; min-width: max-content; grid-template-columns: 28px auto; padding-right: 12px; }
   .nav-icon { width: 28px; height: 28px; }
@@ -559,6 +573,8 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   .login-panel { padding: 86px 24px 28px; }
   .setup-panel { padding-top: 86px; }
   .login-utilities { left: 24px; right: 24px; justify-content: space-between; }
+  .console-module-header { align-items: flex-start; flex-direction: column; padding: 19px; }
+  .console-module-header .console-scope-chip { width: 100%; min-width: 0; }
 }
 
 @media (prefers-reduced-motion: reduce) {

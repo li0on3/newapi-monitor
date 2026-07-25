@@ -34,8 +34,10 @@ describe('translations', () => {
     expect(translate('官方状态页可见范围', 'en')).toBe('Official status page visibility')
   })
 
-  test('translates the customer console and its security boundary', () => {
-    expect(translate('客户控制台', 'en')).toBe('Customer console')
+  test('translates the New API pages and their security boundary', () => {
+    expect(translate('New API 功能页', 'en')).toBe('New API pages')
+    expect(translate('监控总览', 'en')).toBe('Monitor overview')
+    expect(translate('监控日志', 'en')).toBe('Monitor logs')
     expect(translate('API 密钥', 'en')).toBe('API keys')
     expect(translate('数据看板', 'en')).toBe('Analytics')
     expect(translate('业务数据不落监控库；每次请求由 New API Session 再鉴权。', 'en')).toBe(
@@ -47,6 +49,9 @@ describe('translations', () => {
     expect(translate('首字', 'en')).toBe('First token')
     expect(translate('调用渠道', 'en')).toBe('Channel')
     expect(translate('账号、额度与快捷入口', 'en')).toBe('Account, quota, and quick actions')
+    expect(translate('退出监控仅终止监控会话，不会退出或修改 New API。', 'en')).toBe(
+      'Signing out only ends the monitor session. It does not sign out of or modify New API.',
+    )
     expect(translate('第 {{page}}/{{pages}} 页 · {{total}} 条记录', 'en', { page: 2, pages: 5, total: 88 })).toBe(
       'Page 2 of 5 · 88 records',
     )

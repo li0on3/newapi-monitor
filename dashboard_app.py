@@ -416,9 +416,17 @@ class Runtime:
     def __init__(self):
         self.state_db = os.getenv("STATE_DB", "/data/monitor.db")
         self.cookie_name = os.getenv("DASHBOARD_COOKIE_NAME", "newapi_monitor_session")
+        self.sso_suppressed_cookie_name = os.getenv(
+            "DASHBOARD_SSO_SUPPRESSED_COOKIE_NAME",
+            "newapi_monitor_sso_suppressed",
+        )
         self.cookie_path = os.getenv("DASHBOARD_COOKIE_PATH", "/") or "/"
         self.cookie_secure = env_bool("DASHBOARD_COOKIE_SECURE", True)
         self.session_seconds = env_int("DASHBOARD_SESSION_SECONDS", 7 * 86400)
+        self.sso_suppression_seconds = min(
+            max(env_int("DASHBOARD_SSO_SUPPRESSION_SECONDS", 365 * 86400), 3600),
+            400 * 86400,
+        )
         self.monitor_enabled = env_bool("MONITOR_WORKER_ENABLED", True)
         self.trust_proxy_headers = env_bool("TRUST_PROXY_HEADERS", False)
         self.static_dir = Path(os.getenv("DASHBOARD_STATIC_DIR", "/app/static")).resolve()
@@ -740,6 +748,8 @@ def require_auth(request: Request) -> dict[str, Any]:
     username = runtime.auth.resolve_session(request.cookies.get(runtime.cookie_name, ""))
     if username is not None:
         return {"username": username, "display_name": username, "role": "admin", "source": "emergency"}
+    if request.cookies.get(runtime.sso_suppressed_cookie_name) == "1":
+        raise HTTPException(status_code=401, detail="authentication required")
     if runtime.sso is not None and runtime.settings is not None:
         identity = runtime.sso.verify(
             request.cookies.get("session", ""),
@@ -774,18 +784,18 @@ def require_console_access(
     page: str,
 ) -> dict[str, Any]:
     if user.get("source") != "newapi" or int(user.get("user_id") or 0) <= 0:
-        raise HTTPException(status_code=403, detail="客户控制台必须使用 New API 会话登录")
+        raise HTTPException(status_code=403, detail="New API 功能页必须使用 New API 会话登录")
     if not bool(values.get("console_enabled", True)):
-        raise HTTPException(status_code=404, detail="客户控制台未启用")
+        raise HTTPException(status_code=404, detail="New API 功能页未启用")
     role_order = {"viewer": 0, "operator": 1, "admin": 2}
     role = str(user.get("role") or "viewer")
     minimum = str(values.get("console_min_role") or "viewer")
     if role_order.get(role, -1) < role_order.get(minimum, 0):
-        raise HTTPException(status_code=403, detail="当前账号无权访问客户控制台")
+        raise HTTPException(status_code=403, detail="当前账号无权访问 New API 功能页")
     if page not in {"overview", "analytics", "keys", "logs"}:
-        raise HTTPException(status_code=404, detail="客户控制台页面不存在")
+        raise HTTPException(status_code=404, detail="New API 功能页不存在")
     if not bool(values.get(f"console_{page}_enabled", True)):
-        raise HTTPException(status_code=404, detail="该客户控制台页面未启用")
+        raise HTTPException(status_code=404, detail="该 New API 功能页未启用")
     return user
 
 
@@ -1006,7 +1016,28 @@ def logout(request: Request, response: Response) -> dict[str, bool]:
         httponly=True,
         samesite="lax",
     )
+    response.set_cookie(
+        runtime.sso_suppressed_cookie_name,
+        "1",
+        max_age=runtime.sso_suppression_seconds,
+        httponly=True,
+        secure=runtime.cookie_secure,
+        samesite="lax",
+        path=runtime.cookie_path,
+    )
     return {"authenticated": False}
+
+
+@app.post("/api/auth/sso")
+def resume_new_api_sso(response: Response) -> dict[str, bool]:
+    response.delete_cookie(
+        runtime.sso_suppressed_cookie_name,
+        path=runtime.cookie_path,
+        secure=runtime.cookie_secure,
+        httponly=True,
+        samesite="lax",
+    )
+    return {"enabled": True}
 
 
 @app.get("/api/auth/me")

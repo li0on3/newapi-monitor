@@ -11,7 +11,7 @@
 - 企业微信、飞书与邮件多渠道告警及页面测试。
 - New API Session SSO、角色映射、紧急管理员和配置审计。
 - 单机 Docker Compose 快速部署、备份、诊断和安全加固。
-- 外置客户控制台：概览、数据看板、API 密钥和真实使用日志，复用 New API Session 与原始权限。
+- 外置 New API 功能页：概览、数据看板、API 密钥和真实使用日志作为独立顶级模块，复用 New API Session 与原始权限。
 - 带版本号的 GHCR 多架构镜像、GitHub Release、校验和、SBOM 与来源证明。
 
 ## 下一阶段
