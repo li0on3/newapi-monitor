@@ -767,6 +767,11 @@ const ENGLISH: Record<string, string> = {
 }
 
 const ENGLISH_OVERRIDES: Record<string, string> = {
+  '主题': 'Theme',
+  '跟随系统': 'System',
+  '浅色': 'Light',
+  '深色': 'Dark',
+  '监控导航': 'Monitor navigation',
   '总览': 'Overview',
   '次': 'times',
   '类型': 'Type',

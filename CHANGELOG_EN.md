@@ -4,6 +4,23 @@
 
 ## Unreleased
 
+## 1.5.0 - 2026-07-25
+
+### Added
+
+- Added System, Light, and Dark theme modes with browser preference detection, live operating-system theme updates, and persistent local selection.
+- Added the same theme control to sign-in, first-run setup, and authenticated screens, with pre-render theme initialization to prevent a light/dark flash.
+
+### Changed
+
+- Aligned the complete visual language with the New API default frontend: blue primary color, semantic surfaces and borders, a compact header, workspace sidebar, and consistent cards, forms, tables, dialogs, and status treatments.
+- Replaced the legacy hard-coded dark palette with shared semantic light/dark tokens while preserving every monitoring, configuration, Customer Console, and deep-link behavior.
+- Improved desktop, tablet, and mobile navigation density, focus visibility, reduced-motion handling, and light-theme readability.
+
+### Security
+
+- Loads the pre-render theme bootstrap from a same-origin static asset so the existing strict Content Security Policy remains unchanged.
+
 ## 1.4.0 - 2026-07-25
 
 ### Added

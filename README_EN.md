@@ -41,6 +41,7 @@ Every screenshot below is generated from the built-in synthetic demo dataset. It
 - Uses the same conclusion-first, risk-prioritized, human-readable report across every notification channel; email also includes responsive HTML cards with a plain-text fallback.
 - Reuses New API sessions for SSO, with role mapping, an emergency administrator, login throttling, and configuration auditing.
 - Automatically follows the browser language for Chinese or English, with a persistent manual switch in the page header.
+- Aligns the overall visual system with the New API default frontend and supports persistent System, Light, and Dark theme modes.
 - Stores runtime configuration in the monitor database and never writes configuration back to New API.
 - Provides a standalone Customer Console for overview, analytics, API keys, and real usage logs. Business data always comes from the current user's New API session and is not copied into a second customer database.
 - Supports API key create, edit, enable/disable, delete, batch delete, and one-time plaintext reveal. Plaintext keys are not stored in the monitor database, logs, audit records, or browser storage.
