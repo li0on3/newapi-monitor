@@ -59,4 +59,35 @@ describe('dashboard routes', () => {
       'logs',
     ])
   })
+
+  test('regular users fall back to New API pages and cannot access monitor modules', () => {
+    const access = routes as typeof routes & {
+      canAccessMonitorModules?: (role: string) => boolean
+      defaultAuthorizedRoute?: (
+        role: string,
+        pages: Partial<Record<routes.ConsolePage, boolean>>,
+      ) => routes.AppRoute
+    }
+
+    expect(typeof access.canAccessMonitorModules).toBe('function')
+    expect(access.canAccessMonitorModules?.('viewer')).toBe(false)
+    expect(access.canAccessMonitorModules?.('operator')).toBe(true)
+    expect(access.canAccessMonitorModules?.('admin')).toBe(true)
+    expect(access.defaultAuthorizedRoute?.('viewer', {
+      overview: true,
+      analytics: true,
+      keys: true,
+      logs: true,
+    })).toEqual({
+      tab: 'console',
+      settingsPage: 'status',
+      consolePage: 'overview',
+    })
+    expect(access.defaultAuthorizedRoute?.('viewer', {
+      overview: false,
+      analytics: true,
+      keys: true,
+      logs: true,
+    })?.consolePage).toBe('analytics')
+  })
 })

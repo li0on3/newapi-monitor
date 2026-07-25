@@ -146,7 +146,7 @@ class SettingsUpdatePayload(BaseModel):
     send_startup_email: bool | None = None
     subject_prefix: str | None = Field(None, max_length=256)
     key_usage_enabled: bool | None = None
-    key_usage_min_role: str | None = Field(None, pattern="^(viewer|operator|admin)$")
+    key_usage_min_role: str | None = Field(None, pattern="^(operator|admin)$")
     key_usage_log_limit: int | None = Field(None, ge=10, le=500)
     key_usage_attempts_per_minute: int | None = Field(None, ge=1, le=120)
     key_usage_quota_per_unit: float | None = Field(None, gt=0, le=1_000_000_000)
@@ -1064,7 +1064,7 @@ def me(user: AuthenticatedUser) -> dict[str, Any]:
 
 
 @app.post("/api/key-usage/query")
-def query_key_usage(payload: KeyUsageQueryPayload, request: Request, user: AuthenticatedUser) -> dict[str, Any]:
+def query_key_usage(payload: KeyUsageQueryPayload, request: Request, user: OperatorUser) -> dict[str, Any]:
     if runtime.settings is None:
         raise HTTPException(status_code=503, detail="settings are unavailable")
     values = runtime.settings.runtime_values()
@@ -1659,7 +1659,7 @@ def get_console_logs(
 
 
 @app.get("/api/dashboard/summary")
-def dashboard_summary(user: AuthenticatedUser) -> dict[str, Any]:
+def dashboard_summary(user: OperatorUser) -> dict[str, Any]:
     if runtime.settings is None:
         return repository().summary()
     values = runtime.settings.runtime_values()
@@ -1702,7 +1702,7 @@ def dashboard_summary(user: AuthenticatedUser) -> dict[str, Any]:
 
 
 @app.get("/api/provider-status/openai")
-def openai_provider_status(user: AuthenticatedUser) -> dict[str, Any]:
+def openai_provider_status(user: OperatorUser) -> dict[str, Any]:
     if runtime.settings is None:
         return repository().provider_status("openai")
     values = runtime.settings.runtime_values()
@@ -1761,7 +1761,7 @@ def test_openai_provider_status(_: AdminUser) -> dict[str, Any]:
 
 
 @app.get("/api/channels")
-def channels(user: AuthenticatedUser) -> dict[str, Any]:
+def channels(user: OperatorUser) -> dict[str, Any]:
     items = repository().channels()
     if runtime.settings is not None:
         audience = "viewer" if user["role"] == "viewer" else "admin"
@@ -1770,7 +1770,7 @@ def channels(user: AuthenticatedUser) -> dict[str, Any]:
 
 
 @app.get("/api/channels/{channel_id}")
-def channel(channel_id: int, user: AuthenticatedUser) -> dict[str, Any]:
+def channel(channel_id: int, user: OperatorUser) -> dict[str, Any]:
     item = repository().channel(channel_id)
     if item is None:
         raise HTTPException(status_code=404, detail="channel not found")

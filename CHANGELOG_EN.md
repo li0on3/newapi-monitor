@@ -4,6 +4,20 @@
 
 ## Unreleased
 
+## 1.6.1 - 2026-07-25
+
+### Changed
+
+- New API Admin and Root accounts now both map to monitor administrators. Regular New API users are still identified live from their login session and never need duplicate monitor accounts.
+- Regular users now land on the New API Overview and see only Overview, Analytics, API Keys, and Usage Logs for their own account.
+- API-key usage lookup now requires at least the operator role. Legacy `viewer` settings are interpreted as operator to keep configuration aligned with the enforced API boundary.
+- Overview visibility settings now present only the monitor channel list used by administrators and operators. Legacy viewer-visibility fields remain in the database and API for migration-free compatibility.
+
+### Security
+
+- Monitor Overview, channels, official status, monitor logs, resources, incidents, key lookup, and configuration APIs now reject regular users on the server instead of relying on hidden navigation.
+- A regular user opening a monitor deep link is redirected to the first available personal New API page and cannot bypass the boundary by editing the URL.
+
 ## 1.6.0 - 2026-07-25
 
 ### Fixed

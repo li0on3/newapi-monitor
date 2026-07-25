@@ -16,9 +16,11 @@ Browser -> fixed monitor BFF -> fixed New API endpoints
 3. The BFF forwards only the current session and verified user ID to code-defined New API endpoints.
 4. New API remains responsible for data scope, token ownership, quota validation, and every mutation.
 
+The monitor does not batch-copy the New API user table. It synchronizes the current identity from the login session on demand; account disablement, deletion, and role changes take effect after the short identity cache expires, so accounts are never maintained twice.
+
 To reuse the browser's New API Session and `uid`, production should mount the monitor on the same Origin as New API, for example `https://api.example.com/monitor/`. A separate hostname or port cannot share both browser states by default and must not work around this boundary by copying cookies or impersonating users with a management token.
 
-The emergency monitor administrator has no New API identity and cannot enter these business pages. Monitor role mappings only control entry visibility and cannot promote a regular New API user to global administrator scope.
+New API Admin and Root accounts map to monitor administrators and can use every monitor module. Regular New API users can use only the four personal business pages below. The emergency monitor administrator has no New API identity and cannot enter these business pages. Explicit monitor-role overrides change monitor entry access only and cannot grant a regular user global New API data scope.
 
 After explicit monitor sign-out, the server sets a dedicated monitor SSO-suppression cookie. It contains no identity or credential and only prevents automatic reuse of the New API session. The user must explicitly select “Sign in with New API” to clear it. The New API `session` cookie is never deleted or modified.
 
@@ -32,6 +34,8 @@ After explicit monitor sign-out, the server sets a dedicated monitor SSO-suppres
 | Usage Logs | `/monitor/console/logs` | `/api/log/` or `/api/log/self`, plus the matching statistics endpoint |
 
 New API administrators use global endpoints; regular users use only self endpoints. A regular-user query is capped at 30 days.
+
+Regular users do not see the Monitor workspace. Monitor Overview, channels, official status, monitor logs, machine resources, incidents, key lookup, and system settings also reject viewers on the server. Editing a URL cannot bypass this boundary and falls back to a personal New API page.
 
 ## Data and keys
 
