@@ -4,14 +4,14 @@
 
 The roadmap follows measured requirements and failure evidence. Dates are not guaranteed.
 
-## Current Baseline (1.3)
+## Current Baseline (1.7)
 
 - External, read-only New API integration without upstream source modifications.
 - Real channel probes, usage-log latency analysis, resource monitoring, and collector self-monitoring.
 - WeCom, Feishu, and email delivery with UI-based real test alerts.
 - New API session SSO, role mapping, emergency administration, and configuration auditing.
 - Single-host Docker Compose deployment, backups, diagnostics, and container hardening.
-- External New API pages for overview, analytics, API keys, and real usage logs as independent top-level modules, reusing the New API session and original permissions.
+- A regular-user workspace with viewer-filtered Monitor Overview, account Overview, interactive Analytics, multi-group API Keys, and real Usage Logs, reusing the New API session and original permissions.
 - Versioned multi-architecture GHCR images and GitHub Releases with checksums, SBOMs, and provenance.
 
 ## Next

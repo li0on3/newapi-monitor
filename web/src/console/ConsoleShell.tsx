@@ -20,11 +20,13 @@ export function ConsoleShell({
   page,
   pages,
   globalScope,
+  customerView,
   onNavigate,
 }: {
   page: ConsolePage
   pages: Partial<Record<ConsolePageKey, boolean>>
   globalScope: boolean
+  customerView: boolean
   onNavigate: (page: ConsolePage) => void
 }) {
   const visiblePageIds = useMemo(() => enabledConsolePages(pages), [pages])
@@ -37,8 +39,8 @@ export function ConsoleShell({
 
   return <section className="console-workspace console-workspace-flat">
     <header className="console-module-header">
-      <div><span className="eyebrow">NEW API / {current.id.toUpperCase()}</span><h1>{current.label}</h1><p>{current.detail}</p></div>
-      <div className="console-scope-chip"><ShieldCheck size={17} /><span><strong>{globalScope ? t('管理员数据范围') : t('个人数据范围')}</strong><small>{t('权限始终由 New API 校验')}</small></span></div>
+      <div><span className="eyebrow">{customerView ? 'SERVICE' : 'NEW API'} / {current.id.toUpperCase()}</span><h1>{current.label}</h1><p>{current.detail}</p></div>
+      <div className="console-scope-chip"><ShieldCheck size={17} /><span><strong>{globalScope ? t('管理员数据范围') : t('个人数据范围')}</strong><small>{customerView ? t('账号权限实时校验') : t('权限始终由 New API 校验')}</small></span></div>
     </header>
     <main className="console-main console-main-flat">
       {activePage === 'overview' && <ConsoleOverview onNavigate={onNavigate} pages={pages} />}

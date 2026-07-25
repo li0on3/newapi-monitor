@@ -60,9 +60,10 @@ describe('dashboard routes', () => {
     ])
   })
 
-  test('regular users fall back to New API pages and cannot access monitor modules', () => {
+  test('regular users land on monitor overview but cannot access operator modules', () => {
     const access = routes as typeof routes & {
       canAccessMonitorModules?: (role: string) => boolean
+      canAccessMonitorOverview?: (role: string) => boolean
       defaultAuthorizedRoute?: (
         role: string,
         pages: Partial<Record<routes.ConsolePage, boolean>>,
@@ -70,7 +71,9 @@ describe('dashboard routes', () => {
     }
 
     expect(typeof access.canAccessMonitorModules).toBe('function')
+    expect(typeof access.canAccessMonitorOverview).toBe('function')
     expect(access.canAccessMonitorModules?.('viewer')).toBe(false)
+    expect(access.canAccessMonitorOverview?.('viewer')).toBe(true)
     expect(access.canAccessMonitorModules?.('operator')).toBe(true)
     expect(access.canAccessMonitorModules?.('admin')).toBe(true)
     expect(access.defaultAuthorizedRoute?.('viewer', {
@@ -79,15 +82,9 @@ describe('dashboard routes', () => {
       keys: true,
       logs: true,
     })).toEqual({
-      tab: 'console',
+      tab: 'overview',
       settingsPage: 'status',
       consolePage: 'overview',
     })
-    expect(access.defaultAuthorizedRoute?.('viewer', {
-      overview: false,
-      analytics: true,
-      keys: true,
-      logs: true,
-    })?.consolePage).toBe('analytics')
   })
 })

@@ -37,6 +37,8 @@ export type ConsoleTokenPage = {
 export type ConsoleKeyUsage = {
   token_id: number
   token_name: string
+  key_group_ids: number[]
+  key_groups: Array<{ id: number; name: string; color: ConsoleKeyGroupColor }>
   key_group_id: number | null
   key_group_name: string
   key_group_color: ConsoleKeyGroupColor
@@ -68,7 +70,7 @@ export type ConsoleKeyGroupWorkspace = {
   end_timestamp: number
   days: number
   quota_per_unit: number
-  usage_attribution: 'current_membership'
+  usage_attribution: 'current_multi_membership'
   summary: { requests: number; quota: number; tokens: number; models: number; keys: number; groups: number }
   groups: ConsoleKeyGroup[]
   ungrouped: {

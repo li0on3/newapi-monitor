@@ -32,10 +32,15 @@ export const consoleApi = {
   updateKeyGroup: (id: number, payload: { name: string; color: ConsoleKeyGroupColor }) =>
     api<{ item: ConsoleKeyGroupRecord }>(`console/key-groups/${id}`, { method: 'PUT', body: JSON.stringify(payload) }),
   deleteKeyGroup: (id: number) => api<{ deleted: boolean }>(`console/key-groups/${id}`, { method: 'DELETE' }),
-  assignKeyGroup: (token_ids: number[], group_id: number | null) =>
+  assignKeyGroups: (token_ids: number[], group_ids: number[]) =>
     api<{ assigned: number }>('console/key-groups/assignments', {
       method: 'PUT',
-      body: JSON.stringify({ token_ids, group_id }),
+      body: JSON.stringify({ token_ids, group_ids }),
+    }),
+  updateKeyGroupMembers: (group_id: number, token_ids: number[]) =>
+    api<{ changed: number }>(`console/key-groups/${group_id}/members`, {
+      method: 'PUT',
+      body: JSON.stringify({ token_ids }),
     }),
   createKey: (payload: ConsoleTokenDraft) =>
     api<{ created: boolean }>('console/keys', { method: 'POST', body: JSON.stringify(payload) }),

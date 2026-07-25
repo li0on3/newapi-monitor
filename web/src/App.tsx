@@ -39,6 +39,7 @@ import {
   TimerReset,
   TerminalSquare,
   UserCog,
+  Users,
   X,
   XCircle,
 } from 'lucide-react';
@@ -139,7 +140,7 @@ function StatusPill({ tone, children }: { tone: 'ok' | 'warn' | 'bad' | 'muted';
   return <span className={`status-pill status-${tone}`}>{children}</span>;
 }
 
-function Login({ onSuccess }: { onSuccess: (user: AuthUser) => void }) {
+export function Login({ onSuccess }: { onSuccess: (user: AuthUser) => void }) {
   const [username, setUsername] = useState('admin');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
@@ -171,7 +172,7 @@ function Login({ onSuccess }: { onSuccess: (user: AuthUser) => void }) {
       onSuccess(await api<AuthUser>('auth/me'));
     } catch (requestError) {
       if (requestError instanceof ApiError && requestError.status === 401) {
-        window.location.assign('/login');
+        setError(t('当前浏览器没有有效账号会话，请先登录账户服务后重试。'));
         return;
       }
       setError(requestError instanceof Error ? requestError.message : t('登录失败'));
@@ -186,13 +187,13 @@ function Login({ onSuccess }: { onSuccess: (user: AuthUser) => void }) {
         <div className="login-utilities"><ThemeSwitch compact /><LanguageSwitch /></div>
         <div className="login-mark"><Activity size={26} /></div>
         <div className="eyebrow">PRIVATE OPERATIONS CONSOLE</div>
-        <h1>New API Monitor</h1>
-        <p>{t("渠道真实探测、请求耗时与机器资源统一监控。")}</p>
+        <h1>{t('API 服务中心')}</h1>
+        <p>{t('服务状态、用量与访问凭据统一管理。')}</p>
         <button className="sso-button" type="button" onClick={() => void useNewApiSession()} disabled={ssoSubmitting}>
           {ssoSubmitting ? <RefreshCw className="spin" size={17} /> : <ShieldCheck size={17} />}
-          {ssoSubmitting ? t('正在验证') : t('使用 New API 账号登录')}
+          {ssoSubmitting ? t('正在验证') : t('账号登录')}
         </button>
-        <p className="sso-note">{t('退出监控仅终止监控会话，不会退出或修改 New API。')}</p>
+        <p className="sso-note">{t('使用已有账号会话安全登录；退出仅结束本平台会话。')}</p>
         <div className="login-divider"><span>{t("紧急管理员登录")}</span></div>
         <form onSubmit={submit}>
           <label>
@@ -490,8 +491,8 @@ function SettingsView({ activePage, onActivePageChange }: { activePage: Settings
     setValue('openai_status_component_ids', selected.size ? Array.from(selected) : ['__none__']);
   };
   const addUser = async () => { if (!newUser.trim()) return; await api(`access/users/${encodeURIComponent(newUser.trim())}`, { method: 'PUT', body: JSON.stringify({ role: newRole }) }); setNewUser(''); await load(); };
-  const setOverviewVisibility = (channelId: number, visible: boolean) => setOverviewChannels((current) => current.map((channel) => channel.channel_id === channelId ? { ...channel, overview_admin_visible: visible } : channel));
-  const setAllOverviewVisibility = (visible: boolean) => setOverviewChannels((current) => current.map((channel) => ({ ...channel, overview_admin_visible: visible })));
+  const setOverviewVisibility = (channelId: number, audience: 'admin' | 'viewer', visible: boolean) => setOverviewChannels((current) => current.map((channel) => channel.channel_id === channelId ? { ...channel, [audience === 'viewer' ? 'overview_viewer_visible' : 'overview_admin_visible']: visible } : channel));
+  const setAllOverviewVisibility = (audience: 'admin' | 'viewer', visible: boolean) => setOverviewChannels((current) => current.map((channel) => ({ ...channel, [audience === 'viewer' ? 'overview_viewer_visible' : 'overview_admin_visible']: visible })));
   const saveOverviewVisibility = async () => {
     setSaving(true); setMessage('');
     try {
@@ -521,17 +522,18 @@ function SettingsView({ activePage, onActivePageChange }: { activePage: Settings
       <div className="settings-stage">
         {activePage === 'status' && <article className="settings-card settings-focus-card"><div className="settings-card-head settings-focus-head"><div className="settings-section-mark"><ShieldCheck size={18} /></div><div><span className="eyebrow">SELF MONITORING</span><h3>{t("采集链路状态")}</h3><p>{t("监控程序同时检查自身是否仍在持续产生新数据，避免“页面正常但采集已经停止”。")}</p></div><StatusPill tone={systemStatus?.status === 'ok' ? 'ok' : 'bad'}>{systemStatus?.status === 'ok' ? t('全部正常') : t('存在降级')}</StatusPill></div><div className="collector-health-grid"><div className="collector-health-card"><span>{t("数据库")}</span><strong>{systemStatus?.database === 'ok' ? t('正常') : t('异常')}</strong><small>{systemStatus?.database_error || t('SQLite 可读写')}</small></div><div className="collector-health-card"><span>{t("监控进程")}</span><strong>{systemStatus?.monitor_worker === 'running' ? t('运行中') : systemStatus?.monitor_worker || t('未知')}</strong><small>{systemStatus?.monitor_error || t('工作线程持续运行')}</small></div>{Object.entries(systemStatus?.collectors || {}).map(([name, collector]) => { const labels: Record<string, string> = { channel_sync: t('渠道同步'), channel_probe: t('渠道探测'), logs: t('使用日志'), resources: t('机器资源'), openai_status: t('OpenAI 官方状态') }; return <div className={classNames('collector-health-card', collector.status === 'stale' && 'collector-health-stale')} key={name}><span>{labels[name] || name}</span><strong>{collector.status === 'ok' ? t('正常') : collector.status === 'starting' ? t('启动中') : t('数据过期')}</strong><small>{t("最后成功")} {collector.age_seconds}{t("s 前 · 阈值")} {collector.stale_after_seconds}s</small>{collector.consecutive_failures > 0 && <em>{t("连续失败")} {collector.consecutive_failures} {t("次")}</em>}{collector.last_error && <code title={collector.last_error}>{collector.last_error}</code>}</div>; })}</div><div className="settings-action-bar"><div><strong>{t("最后检查")} {systemStatus ? formatFullTime(systemStatus.timestamp) : '—'}</strong><small>{t("数据超过动态失效阈值后，健康检查变为 503，并生成异常与恢复事件。")}</small></div><button className="secondary-button" onClick={() => void load()}><RefreshCw size={16} />{t("立即刷新")}</button></div></article>}
         {activePage === 'overview' && <article className="settings-card settings-focus-card overview-settings-card">
-          <div className="settings-card-head settings-focus-head"><div className="settings-section-mark"><Eye size={18} /></div><div><span className="eyebrow">MONITOR OVERVIEW</span><h3>{t("总览渠道展示")}</h3><p>{t("监控总览仅管理员和运维员可见；这里控制渠道卡片和总览状态的展示范围。")}</p></div><span className="settings-field-count">{overviewChannels.length} {t("个渠道")}</span></div>
+          <div className="settings-card-head settings-focus-head"><div className="settings-section-mark"><Eye size={18} /></div><div><span className="eyebrow">MONITOR OVERVIEW</span><h3>{t("总览渠道展示")}</h3><p>{t("分别控制管理端与普通用户看到的渠道卡片和状态汇总。")}</p></div><span className="settings-field-count">{overviewChannels.length} {t("个渠道")}</span></div>
           <div className="overview-audience-summary">
             <div><span className="overview-audience-icon admin"><ShieldCheck size={18} /></span><div><strong>{t("管理端")}</strong><small>{t("管理员与运维员可见")}</small></div><b>{overviewChannels.filter((channel) => channel.enabled && channel.overview_admin_visible).length}</b></div>
+            <div><span className="overview-audience-icon viewer"><Users size={18} /></span><div><strong>{t("用户端")}</strong><small>{t("普通用户可见")}</small></div><b>{overviewChannels.filter((channel) => channel.enabled && channel.overview_viewer_visible).length}</b></div>
             <p><AlertTriangle size={15} />{t("隐藏仅影响监控总览展示和状态汇总，不会停止渠道探测、日志采集或告警。")}</p>
           </div>
-          <div className="overview-visibility-toolbar"><div><strong>{t("批量设置")}</strong><small>{t("先批量调整，再对个别渠道微调。")}</small></div><div><button onClick={() => setAllOverviewVisibility(true)}>{t("管理端全开")}</button><button onClick={() => setAllOverviewVisibility(false)}>{t("管理端全关")}</button></div></div>
+          <div className="overview-visibility-toolbar"><div><strong>{t("批量设置")}</strong><small>{t("先批量调整，再对个别渠道微调。")}</small></div><div><button onClick={() => setAllOverviewVisibility('admin', true)}>{t("管理端全开")}</button><button onClick={() => setAllOverviewVisibility('admin', false)}>{t("管理端全关")}</button><button onClick={() => setAllOverviewVisibility('viewer', true)}>{t("用户端全开")}</button><button onClick={() => setAllOverviewVisibility('viewer', false)}>{t("用户端全关")}</button></div></div>
           <div className="overview-visibility-table">
-            <div className="overview-visibility-head"><span>{t("渠道")}</span><span>New API</span><span>{t("管理端总览")}</span></div>
-            {overviewChannels.map((channel) => <div className={classNames('overview-visibility-row', !channel.enabled && 'disabled')} key={channel.channel_id}><div><span className="provider-mark compact">{channel.name.slice(0, 2).toUpperCase()}</span><span><strong>{channel.name}</strong><small>#{channel.channel_id} · {channel.group || 'default'}</small></span></div><StatusPill tone={channel.enabled ? 'ok' : 'muted'}>{channel.enabled ? t('已启用') : t('已禁用')}</StatusPill><Toggle checked={channel.overview_admin_visible ?? true} onChange={(visible) => setOverviewVisibility(channel.channel_id, visible)} label={t("管理端")} /></div>)}
+            <div className="overview-visibility-head"><span>{t("渠道")}</span><span>{t('源状态')}</span><span>{t("管理端总览")}</span><span>{t('用户端总览')}</span></div>
+            {overviewChannels.map((channel) => <div className={classNames('overview-visibility-row', !channel.enabled && 'disabled')} key={channel.channel_id}><div><span className="provider-mark compact">{channel.name.slice(0, 2).toUpperCase()}</span><span><strong>{channel.name}</strong><small>#{channel.channel_id} · {channel.group || 'default'}</small></span></div><StatusPill tone={channel.enabled ? 'ok' : 'muted'}>{channel.enabled ? t('已启用') : t('已禁用')}</StatusPill><Toggle checked={channel.overview_admin_visible ?? true} onChange={(visible) => setOverviewVisibility(channel.channel_id, 'admin', visible)} label={t("管理端")} /><Toggle checked={channel.overview_viewer_visible ?? true} onChange={(visible) => setOverviewVisibility(channel.channel_id, 'viewer', visible)} label={t('用户端')} /></div>)}
           </div>
-          <div className="settings-action-bar"><div><strong>{overviewDirty ? t('展示范围尚未应用') : t('角色展示范围已生效')}</strong><small>{t("保存后无需重启，管理员和运维员刷新监控总览即可生效。")}</small></div><button className="secondary-button" disabled={!overviewDirty || saving} onClick={() => void load()}>{t("撤销更改")}</button><button className="primary-button settings-save" disabled={!overviewDirty || saving || !overviewChannels.length} onClick={() => void saveOverviewVisibility()}>{saving ? <RefreshCw className="spin" size={16} /> : <Save size={16} />}{t("保存展示范围")}</button></div>
+          <div className="settings-action-bar"><div><strong>{overviewDirty ? t('展示范围尚未应用') : t('角色展示范围已生效')}</strong><small>{t("保存后无需重启，各角色刷新监控总览即可生效。")}</small></div><button className="secondary-button" disabled={!overviewDirty || saving} onClick={() => void load()}>{t("撤销更改")}</button><button className="primary-button settings-save" disabled={!overviewDirty || saving || !overviewChannels.length} onClick={() => void saveOverviewVisibility()}>{saving ? <RefreshCw className="spin" size={16} /> : <Save size={16} />}{t("保存展示范围")}</button></div>
         </article>}
         {activePage === 'providers' && <article className="settings-card settings-focus-card provider-settings-card">
           <div className="settings-card-head settings-focus-head"><div className="settings-section-mark"><Cloud size={18} /></div><div><span className="eyebrow">UPSTREAM STATUS INTELLIGENCE</span><h3>{t('OpenAI 官方状态')}</h3><p>{t('将 OpenAI 官方事件作为独立辅助上下文，用于解释故障和减少重复告警。')}</p></div><StatusPill tone={!openAIStatus || openAIStatus.stale ? 'muted' : openAIStatus.indicator === 'none' ? 'ok' : 'bad'}>{!openAIStatus ? t('等待同步') : openAIStatus.stale ? t('数据过期') : openAIStatus.description}</StatusPill></div>
@@ -746,17 +748,17 @@ function ChannelCard({ channel, onOpen }: { channel: Channel; onOpen: () => void
   );
 }
 
-function DetailDrawer({ channel, onClose }: { channel: Channel; onClose: () => void }) {
+function DetailDrawer({ channel, onClose, customerView }: { channel: Channel; onClose: () => void; customerView: boolean }) {
   return (
     <div className="drawer-backdrop" role="presentation" onMouseDown={onClose}>
       <aside className="drawer" role="dialog" aria-modal="true" aria-label={t('{{name}} 渠道详情', { name: channel.name })} onMouseDown={(event) => event.stopPropagation()}>
         <button className="icon-button drawer-close" onClick={onClose} aria-label={t("关闭")}><X size={20} /></button>
         <div className="eyebrow">CHANNEL DETAIL / #{channel.channel_id}</div>
         <h2>{channel.name}</h2>
-        <p className="drawer-subtitle">{t("数据与 New API 渠道配置实时同步，探测结果独立存档。")}</p>
+        <p className="drawer-subtitle">{customerView ? t('渠道状态实时同步，探测结果独立存档。') : t('数据与 New API 渠道配置实时同步，探测结果独立存档。')}</p>
         <div className="drawer-grid">
           <div><span>{t("状态")}</span><strong>{channel.latest?.success ? t('正常') : t('异常')}</strong></div>
-          <div><span>{t("探测方式")}</span><strong>{channel.latest?.source === 'real' ? t('真实模型请求') : t('New API 内置测试')}</strong></div>
+          <div><span>{t("探测方式")}</span><strong>{channel.latest?.source === 'real' ? t('真实模型请求') : customerView ? t('平台健康检查') : t('New API 内置测试')}</strong></div>
           <div><span>{t("总耗时")}</span><strong>{formatDuration(channel.latest?.elapsed_ms)}</strong></div>
           <div><span>{t("首字耗时")}</span><strong>{formatDuration(channel.latest?.frt_ms)}</strong></div>
         </div>
@@ -846,7 +848,7 @@ function ProviderStatusView({ status, summary, onOverview }: { status: ProviderS
   );
 }
 
-function Overview({ summary, channels, onChannel, onProviderStatus }: { summary: Summary; channels: Channel[]; onChannel: (channel: Channel) => void; onProviderStatus: () => void }) {
+function Overview({ summary, channels, onChannel, onProviderStatus, showProviderStatus }: { summary: Summary; channels: Channel[]; onChannel: (channel: Channel) => void; onProviderStatus: () => void; showProviderStatus: boolean }) {
   const resourceAge = summary.resources.created_at ? Math.floor(Date.now() / 1000 - summary.resources.created_at) : null;
   return (
     <>
@@ -856,10 +858,10 @@ function Overview({ summary, channels, onChannel, onProviderStatus }: { summary:
         <MetricCard icon={<AlertTriangle />} label={t("慢请求")} value={`${summary.requests.slow}`} detail={`${t('总耗时')} / ${t('首字')} > ${SLOW_SECONDS}s · ${summary.requests.slow_ratio.toFixed(1)}%`} tone={summary.requests.slow ? 'warn' : 'ok'} />
         <MetricCard icon={<Server />} label={t("机器资源")} value={`MEM ${formatPercent(summary.resources.system_memory)}`} detail={resourceAge == null ? t('等待资源样本') : `${resourceAge}s ${t('前更新')} · DISK ${formatPercent(summary.resources.system_disk)}`} tone={(summary.resources.system_memory || 0) > 85 ? 'bad' : 'neutral'} />
       </section>
-      <div className="section-heading channel-section-heading"><div><span className="eyebrow">LIVE CHANNEL MATRIX</span><h2>{t("渠道运行状态")}</h2></div><div className="channel-heading-aside">{summary.provider_status && <ProviderStatusHint status={summary.provider_status} onOpen={onProviderStatus} />}<div className="legend"><span><i className="legend-ok" />{t("正常")}</span><span><i className="legend-warn" />{t("延迟")}</span><span><i className="legend-bad" />{t("异常")}</span></div></div></div>
+      <div className="section-heading channel-section-heading"><div><span className="eyebrow">LIVE CHANNEL MATRIX</span><h2>{t("渠道运行状态")}</h2></div><div className="channel-heading-aside">{showProviderStatus && summary.provider_status && <ProviderStatusHint status={summary.provider_status} onOpen={onProviderStatus} />}<div className="legend"><span><i className="legend-ok" />{t("正常")}</span><span><i className="legend-warn" />{t("延迟")}</span><span><i className="legend-bad" />{t("异常")}</span></div></div></div>
       <section className="channel-grid">
         {channels.map((channel) => <ChannelCard key={channel.channel_id} channel={channel} onOpen={() => onChannel(channel)} />)}
-        {!channels.length && <div className="empty-state"><Database size={28} /><strong>{t("等待渠道同步")}</strong><span>{t("监控程序将在首次轮询后展示 New API 渠道。")}</span></div>}
+        {!channels.length && <div className="empty-state"><Database size={28} /><strong>{t("等待渠道同步")}</strong><span>{t("首次状态同步完成后将在这里展示可用渠道。")}</span></div>}
       </section>
     </>
   );
@@ -1260,6 +1262,7 @@ export default function App() {
   const refreshSeconds = Math.max(2, user?.dashboard_refresh_seconds || REFRESH_SECONDS);
   const tab: Tab = route.tab;
   const elevated = canAccessMonitorModules(user?.role || '');
+  const customerView = user?.role === 'viewer';
   const enabledConsolePageList = useMemo(
     () => user?.console_available ? enabledConsolePages(user.console_pages || {}) : [],
     [user?.console_available, user?.console_pages],
@@ -1309,20 +1312,19 @@ export default function App() {
     } finally { setRefreshing(false); }
   }, [refreshSeconds]);
 
-  useEffect(() => { if (authState !== 'ready' || tab === 'console' || !elevated) return; void loadCore(); const timer = window.setInterval(() => void loadCore(), refreshSeconds * 1000); return () => window.clearInterval(timer); }, [authState, elevated, loadCore, refreshSeconds, tab]);
+  useEffect(() => { if (authState !== 'ready' || tab === 'console' || (!elevated && tab !== 'overview')) return; void loadCore(); const timer = window.setInterval(() => void loadCore(), refreshSeconds * 1000); return () => window.clearInterval(timer); }, [authState, elevated, loadCore, refreshSeconds, tab]);
   useEffect(() => { if (authState !== 'ready') return; const timer = window.setInterval(() => setCountdown((value) => value <= 1 ? refreshSeconds : value - 1), 1000); return () => window.clearInterval(timer); }, [authState, refreshSeconds]);
   useEffect(() => {
     if (!user) return;
     const consoleAllowed = tab === 'console'
       && user.console_available
       && enabledConsolePageList.includes(route.consolePage);
-    const monitorAllowed = elevated && (
-      tab === 'overview'
-      || tab === 'providerStatus'
+    const monitorAllowed = tab === 'overview' || (elevated && (
+      tab === 'providerStatus'
       || (tab === 'keyUsage' && user.key_usage_available)
       || ['logs', 'resources', 'incidents', 'channels'].includes(tab)
       || (tab === 'settings' && user.role === 'admin')
-    );
+    ));
     if (!consoleAllowed && !monitorAllowed) {
       navigate(defaultAuthorizedRoute(user.role, user.console_pages || {}), true);
     }
@@ -1345,14 +1347,14 @@ export default function App() {
   const enabledConsolePageSet = new Set<ConsolePage>(
     enabledConsolePageList,
   );
-  const newApiNavItems = [
-    { page: 'overview' as const, label: t('概览'), Icon: LayoutDashboard },
-    { page: 'analytics' as const, label: t('数据看板'), Icon: BarChart3 },
-    { page: 'keys' as const, label: t('API 密钥'), Icon: KeyRound },
-    { page: 'logs' as const, label: t('使用日志'), Icon: ScrollText },
-  ].filter((item) => enabledConsolePageSet.has(item.page));
+  const primaryNavItems = [
+    { id: 'monitor-overview', label: t('监控总览'), Icon: Activity, route: { tab: 'overview', settingsPage: 'status', consolePage: 'overview' } as AppRoute, visible: true },
+    { id: 'console-overview', label: t('概览'), Icon: LayoutDashboard, route: { tab: 'console', settingsPage: 'status', consolePage: 'overview' } as AppRoute, visible: enabledConsolePageSet.has('overview') },
+    { id: 'console-analytics', label: t('数据看板'), Icon: BarChart3, route: { tab: 'console', settingsPage: 'status', consolePage: 'analytics' } as AppRoute, visible: enabledConsolePageSet.has('analytics') },
+    { id: 'console-keys', label: t('API 密钥'), Icon: KeyRound, route: { tab: 'console', settingsPage: 'status', consolePage: 'keys' } as AppRoute, visible: enabledConsolePageSet.has('keys') },
+    { id: 'console-logs', label: t('使用日志'), Icon: ScrollText, route: { tab: 'console', settingsPage: 'status', consolePage: 'logs' } as AppRoute, visible: enabledConsolePageSet.has('logs') },
+  ].filter((item) => item.visible);
   const monitorNavItems = [
-    { id: 'overview', label: t('监控总览'), Icon: Activity, route: { tab: 'overview', settingsPage: 'status', consolePage: 'overview' } as AppRoute, visible: elevated },
     { id: 'keyUsage', label: t('Key 查询'), Icon: KeyRound, route: { tab: 'keyUsage', settingsPage: 'status', consolePage: 'overview' } as AppRoute, visible: elevated && Boolean(user?.key_usage_available) },
     { id: 'logs', label: t('监控日志'), Icon: Clock3, route: { tab: 'logs', settingsPage: 'status', consolePage: 'overview' } as AppRoute, visible: elevated },
     { id: 'resources', label: t('机器资源'), Icon: Cpu, route: { tab: 'resources', settingsPage: 'status', consolePage: 'overview' } as AppRoute, visible: elevated },
@@ -1365,15 +1367,15 @@ export default function App() {
   return (
     <div className="app-shell">
       <header className="topbar">
-        <div className="brand"><div className="brand-mark"><Activity size={21} /></div><div><span>NEW API</span><strong>MONITOR</strong></div></div>
+        <div className="brand"><div className="brand-mark"><Activity size={21} /></div><div><span>{customerView ? 'API' : 'NEW API'}</span><strong>{customerView ? 'CONSOLE' : 'MONITOR'}</strong></div></div>
         <div className="top-actions"><ThemeSwitch compact /><LanguageSwitch compact />{tab !== 'console' && <div className="refresh-state"><RefreshCw className={refreshing ? 'spin' : ''} size={14} /><span>{countdown}s</span></div>}<span className="user-chip">{user?.display_name || user?.username}<small>{user?.role}</small></span><button className="icon-button" onClick={() => void logout()} title={t("退出登录")}><LogOut size={17} /></button></div>
       </header>
       <div className="app-layout">
         <aside className="app-sidebar">
           <nav aria-label={t('监控导航')}>
-            {newApiNavItems.length > 0 && <section className="app-nav-section" aria-label="New API">
-              <div className="app-nav-section-title"><span>New API</span><small>{newApiNavItems.length}</small></div>
-              {newApiNavItems.map(({ page, label, Icon }) => <button key={page} className={tab === 'console' && route.consolePage === page ? 'active' : ''} onClick={() => navigate({ tab: 'console', settingsPage: 'status', consolePage: page })}><span className="nav-icon"><Icon size={17} /></span><span>{label}</span></button>)}
+            {primaryNavItems.length > 0 && <section className="app-nav-section" aria-label={customerView ? t('服务中心') : 'New API'}>
+              <div className="app-nav-section-title"><span>{customerView ? t('服务中心') : 'New API'}</span><small>{primaryNavItems.length}</small></div>
+              {primaryNavItems.map(({ id, label, Icon, route: itemRoute }) => <button key={id} className={tab === itemRoute.tab && (itemRoute.tab !== 'console' || route.consolePage === itemRoute.consolePage) ? 'active' : ''} onClick={() => navigate(itemRoute)}><span className="nav-icon"><Icon size={17} /></span><span>{label}</span></button>)}
             </section>}
             {monitorNavItems.length > 0 && <section className="app-nav-section" aria-label={t('监控')}>
               <div className="app-nav-section-title"><span>{t('监控')}</span><small>{monitorNavItems.length}</small></div>
@@ -1382,14 +1384,14 @@ export default function App() {
           </nav>
         </aside>
         <div className="app-canvas">
-          <main className="content">{tab === 'console' && user?.console_available ? <ConsoleShell page={route.consolePage} pages={user.console_pages || {}} globalScope={Boolean(user.console_global_scope)} onNavigate={(consolePage) => navigate({ tab: 'console', settingsPage: 'status', consolePage })} /> : <><section className="hero"><div><div className="eyebrow">OPERATIONS / REAL-TIME</div><h1>{t("服务运行态势")}</h1><p>{t("真实渠道探测、真实消费日志、主机与容器资源。")}</p></div><div className={`overall-status overall-${overall.tone}`}><span className="status-beacon" /><div><small>OVERALL STATUS</small><strong>{overall.label}</strong></div><span>{summary ? formatTime(summary.generated_at) : t('同步中')}</span></div></section>
+          <main className="content">{tab === 'console' && user?.console_available ? <ConsoleShell page={route.consolePage} pages={user.console_pages || {}} globalScope={Boolean(user.console_global_scope)} customerView={customerView} onNavigate={(consolePage) => navigate({ tab: 'console', settingsPage: 'status', consolePage })} /> : <><section className="hero"><div><div className="eyebrow">OPERATIONS / REAL-TIME</div><h1>{t("服务运行态势")}</h1><p>{t("真实渠道探测、真实消费日志、主机与容器资源。")}</p></div><div className={`overall-status overall-${overall.tone}`}><span className="status-beacon" /><div><small>OVERALL STATUS</small><strong>{overall.label}</strong></div><span>{summary ? formatTime(summary.generated_at) : t('同步中')}</span></div></section>
             {error && <div className="inline-error"><AlertTriangle size={16} />{error}<button onClick={() => void loadCore()}>{t("重试")}</button></div>}
-            {summary ? <>{tab === 'overview' && <Overview summary={summary} channels={channels} onChannel={setSelectedChannel} onProviderStatus={() => navigate({ tab: 'providerStatus', settingsPage: 'status', consolePage: 'overview' })} />}{tab === 'providerStatus' && summary.provider_status && <ProviderStatusView status={summary.provider_status} summary={summary} onOverview={() => navigate({ tab: 'overview', settingsPage: 'status', consolePage: 'overview' })} />}{tab === 'providerStatus' && !summary.provider_status && <div className="empty-state provider-unavailable"><Cloud size={28} /><strong>{t('官方状态当前不可见')}</strong><span>{t('该功能可能已关闭，或当前角色没有查看权限。')}</span><button className="secondary-button" type="button" onClick={() => navigate({ tab: 'overview', settingsPage: 'status', consolePage: 'overview' })}>{t('返回渠道总览')}</button></div>}{tab === 'keyUsage' && user?.key_usage_available && <KeyUsageView />}{tab === 'logs' && elevated && <LogsView channels={channels} />}{tab === 'resources' && elevated && <ResourcesView />}{tab === 'incidents' && elevated && <IncidentsView />}{tab === 'channels' && elevated && <ChannelSettingsView />}{tab === 'settings' && user?.role === 'admin' && <SettingsView activePage={route.settingsPage} onActivePageChange={(settingsPage) => navigate({ tab: 'settings', settingsPage, consolePage: 'overview' })} />}</> : <div className="loading-panel"><RefreshCw className="spin" /><span>{t("正在读取第一批监控数据")}</span></div>}</>}
+            {summary ? <>{tab === 'overview' && <Overview summary={summary} channels={channels} onChannel={setSelectedChannel} showProviderStatus={elevated} onProviderStatus={() => navigate({ tab: 'providerStatus', settingsPage: 'status', consolePage: 'overview' })} />}{tab === 'providerStatus' && summary.provider_status && <ProviderStatusView status={summary.provider_status} summary={summary} onOverview={() => navigate({ tab: 'overview', settingsPage: 'status', consolePage: 'overview' })} />}{tab === 'providerStatus' && !summary.provider_status && <div className="empty-state provider-unavailable"><Cloud size={28} /><strong>{t('官方状态当前不可见')}</strong><span>{t('该功能可能已关闭，或当前角色没有查看权限。')}</span><button className="secondary-button" type="button" onClick={() => navigate({ tab: 'overview', settingsPage: 'status', consolePage: 'overview' })}>{t('返回渠道总览')}</button></div>}{tab === 'keyUsage' && user?.key_usage_available && <KeyUsageView />}{tab === 'logs' && elevated && <LogsView channels={channels} />}{tab === 'resources' && elevated && <ResourcesView />}{tab === 'incidents' && elevated && <IncidentsView />}{tab === 'channels' && elevated && <ChannelSettingsView />}{tab === 'settings' && user?.role === 'admin' && <SettingsView activePage={route.settingsPage} onActivePageChange={(settingsPage) => navigate({ tab: 'settings', settingsPage, consolePage: 'overview' })} />}</> : <div className="loading-panel"><RefreshCw className="spin" /><span>{t("正在读取第一批监控数据")}</span></div>}</>}
           </main>
-          <footer><span>{t("数据源：New API 管理接口 / 真实 Relay 请求 / Linux")} & Docker / OpenAI Status</span><span>{t("告警阈值：总耗时或首字")} &gt; {t("60s，3/5 或 5/10 触发")}</span></footer>
+          <footer><span>{customerView ? t('数据源：真实调用、渠道探测与资源采集') : <>{t("数据源：New API 管理接口 / 真实 Relay 请求 / Linux")} & Docker / OpenAI Status</>}</span><span>{t("告警阈值：总耗时或首字")} &gt; {t("60s，3/5 或 5/10 触发")}</span></footer>
         </div>
       </div>
-      {selectedChannel && <DetailDrawer channel={selectedChannel} onClose={() => setSelectedChannel(null)} />}
+      {selectedChannel && <DetailDrawer channel={selectedChannel} customerView={customerView} onClose={() => setSelectedChannel(null)} />}
     </div>
   );
 }

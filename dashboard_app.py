@@ -324,7 +324,44 @@ class ConsoleKeyGroupAssignmentPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     token_ids: list[int] = Field(min_length=1, max_length=100)
-    group_id: int | None = Field(None, ge=1)
+    group_ids: list[int] = Field(default_factory=list, max_length=50)
+    group_id: int | None = Field(default=None, ge=1, exclude=True)
+
+    @field_validator("token_ids")
+    @classmethod
+    def validate_token_ids(cls, value: list[int]) -> list[int]:
+        normalized: list[int] = []
+        for token_id in value:
+            if token_id <= 0:
+                raise ValueError("token_ids must contain positive integers")
+            if token_id not in normalized:
+                normalized.append(token_id)
+        return normalized
+
+    @field_validator("group_ids")
+    @classmethod
+    def validate_group_ids(cls, value: list[int]) -> list[int]:
+        normalized: list[int] = []
+        for group_id in value:
+            if group_id <= 0:
+                raise ValueError("group_ids must contain positive integers")
+            if group_id not in normalized:
+                normalized.append(group_id)
+        return normalized
+
+    @model_validator(mode="after")
+    def normalize_legacy_group_id(self) -> ConsoleKeyGroupAssignmentPayload:
+        if self.group_id is not None and self.group_id not in self.group_ids:
+            self.group_ids.append(self.group_id)
+        if len(self.group_ids) > 50:
+            raise ValueError("group_ids must contain at most 50 positive integers")
+        return self
+
+
+class ConsoleKeyGroupMembersPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    token_ids: list[int] = Field(default_factory=list, max_length=2000)
 
     @field_validator("token_ids")
     @classmethod
@@ -693,7 +730,7 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(
-    title="New API Monitor",
+    title="API Service Monitor",
     docs_url=None,
     redoc_url=None,
     openapi_url=None,
@@ -758,7 +795,7 @@ def require_auth(request: Request) -> dict[str, Any]:
         if identity is not None:
             role = runtime.settings.resolve_role(identity["username"], int(identity["source_role"]))
             if role is None:
-                raise HTTPException(status_code=403, detail="New API account is not allowed to access monitor")
+                raise HTTPException(status_code=403, detail="account is not allowed to access this service")
             return {**identity, "role": role}
     raise HTTPException(status_code=401, detail="authentication required")
 
@@ -784,18 +821,18 @@ def require_console_access(
     page: str,
 ) -> dict[str, Any]:
     if user.get("source") != "newapi" or int(user.get("user_id") or 0) <= 0:
-        raise HTTPException(status_code=403, detail="New API 功能页必须使用 New API 会话登录")
+        raise HTTPException(status_code=403, detail="账号功能页必须使用有效账号会话登录")
     if not bool(values.get("console_enabled", True)):
-        raise HTTPException(status_code=404, detail="New API 功能页未启用")
+        raise HTTPException(status_code=404, detail="账号功能页未启用")
     role_order = {"viewer": 0, "operator": 1, "admin": 2}
     role = str(user.get("role") or "viewer")
     minimum = str(values.get("console_min_role") or "viewer")
     if role_order.get(role, -1) < role_order.get(minimum, 0):
-        raise HTTPException(status_code=403, detail="当前账号无权访问 New API 功能页")
+        raise HTTPException(status_code=403, detail="当前账号无权访问此功能页")
     if page not in {"overview", "analytics", "keys", "logs"}:
-        raise HTTPException(status_code=404, detail="New API 功能页不存在")
+        raise HTTPException(status_code=404, detail="账号功能页不存在")
     if not bool(values.get(f"console_{page}_enabled", True)):
-        raise HTTPException(status_code=404, detail="该 New API 功能页未启用")
+        raise HTTPException(status_code=404, detail="该账号功能页未启用")
     return user
 
 
@@ -1112,7 +1149,7 @@ def console_identity(
     require_console_access(user, values, page)
     session_cookie = request.cookies.get("session", "")
     if not session_cookie:
-        raise HTTPException(status_code=401, detail="New API session is required")
+        raise HTTPException(status_code=401, detail="account session is required")
     return session_cookie, int(user["user_id"])
 
 
@@ -1352,16 +1389,52 @@ def assign_console_key_group(
     if missing_ids:
         raise HTTPException(status_code=404, detail="one or more API keys do not exist")
     try:
-        assigned = key_group_store().assign_tokens(user_id, payload.token_ids, payload.group_id)
+        assigned = key_group_store().assign_tokens(user_id, payload.token_ids, payload.group_ids)
     except KeyGroupError as error:
         raise_key_group_error(error)
     if runtime.settings is not None:
         runtime.settings.record_audit(
             str(user["username"]), "console.key-group.assign", "tokens",
-            {"token_ids": payload.token_ids}, {"group_id": payload.group_id, "assigned": assigned},
+            {"token_ids": payload.token_ids}, {"group_ids": payload.group_ids, "assigned": assigned},
             runtime.remote_addr(request),
         )
     return {"assigned": assigned}
+
+
+@app.put("/api/console/key-groups/{group_id}/members")
+def update_console_key_group_members(
+    group_id: int,
+    payload: ConsoleKeyGroupMembersPayload,
+    request: Request,
+    user: AuthenticatedUser,
+) -> dict[str, Any]:
+    if group_id <= 0:
+        raise HTTPException(status_code=422, detail="invalid group id")
+    values = console_values()
+    session_cookie, user_id = console_identity(request, user, values, "keys")
+    console_rate_limit(
+        console_write_limiter,
+        request,
+        user,
+        int(values.get("console_write_attempts_per_minute", 30)),
+    )
+    try:
+        owned_ids = {int(item["id"]) for item in console_client(values).list_all_tokens(session_cookie, user_id)}
+    except NewAPIConsoleError as error:
+        raise_console_error(error)
+    missing_ids = [token_id for token_id in payload.token_ids if token_id not in owned_ids]
+    if missing_ids:
+        raise HTTPException(status_code=404, detail="one or more API keys do not exist")
+    try:
+        changed = key_group_store().set_group_members(user_id, group_id, payload.token_ids)
+    except KeyGroupError as error:
+        raise_key_group_error(error)
+    if runtime.settings is not None:
+        runtime.settings.record_audit(
+            str(user["username"]), "console.key-group.members", f"key-group:{group_id}",
+            {}, {"token_ids": payload.token_ids, "changed": changed}, runtime.remote_addr(request),
+        )
+    return {"changed": changed}
 
 
 @app.put("/api/console/key-groups/{group_id}")
@@ -1590,7 +1663,7 @@ def reveal_console_key(token_id: int, request: Request, user: AuthenticatedUser)
     except NewAPIConsoleError as error:
         raise_console_error(error)
     if not key:
-        raise HTTPException(status_code=502, detail="New API did not return the key")
+        raise HTTPException(status_code=502, detail="account service did not return the key")
     if runtime.settings is not None:
         runtime.settings.record_audit(
             str(user["username"]), "console.token.reveal", f"token:{token_id}", {},
@@ -1659,8 +1732,10 @@ def get_console_logs(
 
 
 @app.get("/api/dashboard/summary")
-def dashboard_summary(user: OperatorUser) -> dict[str, Any]:
+def dashboard_summary(user: AuthenticatedUser) -> dict[str, Any]:
     if runtime.settings is None:
+        if user["role"] == "viewer":
+            raise HTTPException(status_code=503, detail="channel visibility settings are unavailable")
         return repository().summary()
     values = runtime.settings.runtime_values()
     audience = "viewer" if user["role"] == "viewer" else "admin"
@@ -1699,6 +1774,40 @@ def dashboard_summary(user: OperatorUser) -> dict[str, Any]:
         )
         result["provider_status"] = provider
     return result
+
+
+def viewer_observation_payload(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    return {
+        "observed_at": value.get("observed_at", 0),
+        "success": bool(value.get("success")),
+        "elapsed_ms": value.get("elapsed_ms", 0),
+        "frt_ms": value.get("frt_ms"),
+        "message": "",
+        "source": value.get("source", "builtin"),
+    }
+
+
+def viewer_channel_payload(item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "channel_id": item.get("channel_id", 0),
+        "name": item.get("name", ""),
+        "channel_type": item.get("channel_type", 0),
+        "enabled": bool(item.get("enabled")),
+        "raw_status": item.get("raw_status", 0),
+        "models": list(item.get("models") or []),
+        "group": item.get("group", ""),
+        "synced_at": item.get("synced_at", 0),
+        "latest": viewer_observation_payload(item.get("latest")),
+        "history": [
+            payload
+            for value in item.get("history") or []
+            if (payload := viewer_observation_payload(value)) is not None
+        ],
+        "availability": dict(item.get("availability") or {}),
+        "usage_24h": dict(item.get("usage_24h") or {}),
+    }
 
 
 @app.get("/api/provider-status/openai")
@@ -1761,25 +1870,35 @@ def test_openai_provider_status(_: AdminUser) -> dict[str, Any]:
 
 
 @app.get("/api/channels")
-def channels(user: OperatorUser) -> dict[str, Any]:
+def channels(user: AuthenticatedUser) -> dict[str, Any]:
     items = repository().channels()
-    if runtime.settings is not None:
-        audience = "viewer" if user["role"] == "viewer" else "admin"
-        items = runtime.settings.decorate_channels(items, audience=audience)
+    if runtime.settings is None:
+        if user["role"] == "viewer":
+            raise HTTPException(status_code=503, detail="channel visibility settings are unavailable")
+        return {"items": items}
+    audience = "viewer" if user["role"] == "viewer" else "admin"
+    items = runtime.settings.decorate_channels(items, audience=audience)
+    if audience == "viewer":
+        items = [viewer_channel_payload(item) for item in items]
     return {"items": items}
 
 
 @app.get("/api/channels/{channel_id}")
-def channel(channel_id: int, user: OperatorUser) -> dict[str, Any]:
+def channel(channel_id: int, user: AuthenticatedUser) -> dict[str, Any]:
     item = repository().channel(channel_id)
     if item is None:
         raise HTTPException(status_code=404, detail="channel not found")
-    if runtime.settings is not None:
-        audience = "viewer" if user["role"] == "viewer" else "admin"
-        visible = runtime.settings.decorate_channels([item], include_hidden=False, audience=audience)
-        if not visible:
-            raise HTTPException(status_code=404, detail="channel not found")
-        item = visible[0]
+    if runtime.settings is None:
+        if user["role"] == "viewer":
+            raise HTTPException(status_code=503, detail="channel visibility settings are unavailable")
+        return item
+    audience = "viewer" if user["role"] == "viewer" else "admin"
+    visible = runtime.settings.decorate_channels([item], include_hidden=False, audience=audience)
+    if not visible:
+        raise HTTPException(status_code=404, detail="channel not found")
+    item = visible[0]
+    if audience == "viewer":
+        item = viewer_channel_payload(item)
     return item
 
 

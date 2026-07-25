@@ -9,6 +9,7 @@ describe('ConsoleShell', () => {
         page="analytics"
         pages={{ overview: true, analytics: true, keys: true, logs: true }}
         globalScope={false}
+        customerView
         onNavigate={() => undefined}
       />,
     )
@@ -17,5 +18,7 @@ describe('ConsoleShell', () => {
     expect(html).toContain('请求、Token 与额度趋势')
     expect(html).not.toContain('New API 客户控制台')
     expect(html).not.toContain('客户控制台导航')
+    expect(html).not.toContain('New API')
+    expect(html).toContain('账号权限实时校验')
   })
 })

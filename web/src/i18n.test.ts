@@ -70,6 +70,16 @@ describe('translations', () => {
     )
   })
 
+  test('translates the neutral customer experience and multi-group workflow', () => {
+    expect(translate('API 服务中心', 'en')).toBe('API Service Center')
+    expect(translate('账号登录', 'en')).toBe('Sign in')
+    expect(translate('监控总览', 'en')).toBe('Monitor overview')
+    expect(translate('一个密钥可以同时属于多个分组。', 'en')).toBe('A key can belong to multiple groups at the same time.')
+    expect(translate('保存成员', 'en')).toBe('Save members')
+    expect(translate('趋势数据表', 'en')).toBe('Trend data table')
+    expect(translate('其他模型', 'en')).toBe('Other models')
+  })
+
   test('translates theme controls', () => {
     expect(translate('主题', 'en')).toBe('Theme')
     expect(translate('跟随系统', 'en')).toBe('System')

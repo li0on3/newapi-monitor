@@ -21,6 +21,8 @@ describe('theme preference', () => {
     const html = await Bun.file(new URL('../index.html', import.meta.url)).text()
 
     expect(html).toContain('<script src="/theme-init.js"></script>')
+    expect(html).toContain('<title>API Service Center</title>')
+    expect(html).not.toContain('<title>New API')
     expect(html).not.toContain("localStorage.getItem('newapi-monitor-theme')")
   })
 })

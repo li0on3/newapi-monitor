@@ -53,17 +53,14 @@ export function canAccessMonitorModules(role: string): boolean {
   return role === 'operator' || role === 'admin';
 }
 
+export function canAccessMonitorOverview(role: string): boolean {
+  return role === 'viewer' || role === 'operator' || role === 'admin';
+}
+
 export function defaultAuthorizedRoute(
-  role: string,
-  pages: Partial<Record<ConsolePage, boolean>>,
+  _role: string,
+  _pages: Partial<Record<ConsolePage, boolean>>,
 ): AppRoute {
-  if (!canAccessMonitorModules(role)) {
-    return {
-      tab: 'console',
-      settingsPage: 'status',
-      consolePage: enabledConsolePages(pages)[0] || 'overview',
-    };
-  }
   return { tab: 'overview', settingsPage: 'status', consolePage: 'overview' };
 }
 

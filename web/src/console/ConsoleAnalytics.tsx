@@ -1,10 +1,11 @@
 import { BarChart3, CircleDollarSign, Filter, Layers3, RefreshCw, Sigma, Users } from 'lucide-react'
-import { FormEvent, useCallback, useEffect, useMemo, useState } from 'react'
-import { getLanguage, t } from '../i18n'
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { t } from '../i18n'
+import { AnalyticsTrendChart } from './AnalyticsTrendChart'
 import { consoleApi } from './api'
 import { ConsoleBadge, ConsoleEmpty, ConsoleError, ConsoleLoading, ConsoleMetric } from './ConsoleCommon'
 import type { ConsoleAnalytics as ConsoleAnalyticsData } from './types'
-import { buildAnalyticsTimeline, compactNumber, quotaText } from './utils'
+import { compactNumber, quotaText } from './utils'
 
 function dateInput(timestamp: number) {
   const date = new Date(timestamp * 1000)
@@ -23,26 +24,38 @@ export function ConsoleAnalytics({ globalScope }: { globalScope: boolean }) {
   const [data, setData] = useState<ConsoleAnalyticsData | null>(null)
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
+  const requestSequence = useRef(0)
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (range?: { startDate: string; endDate: string }) => {
+    const requestId = ++requestSequence.current
+    const requestedStart = range?.startDate || startDate
+    const requestedEnd = range?.endDate || endDate
     setLoading(true)
     setError('')
     try {
-      setData(await consoleApi.analytics({
-        start_timestamp: startOfDay(startDate),
-        end_timestamp: startOfDay(endDate) + 86399,
+      const response = await consoleApi.analytics({
+        start_timestamp: startOfDay(requestedStart),
+        end_timestamp: startOfDay(requestedEnd) + 86399,
         username: globalScope ? username.trim() : undefined,
-      }))
+      })
+      if (requestId === requestSequence.current) setData(response)
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : t('未知错误'))
+      if (requestId === requestSequence.current) setError(reason instanceof Error ? reason.message : t('未知错误'))
     } finally {
-      setLoading(false)
+      if (requestId === requestSequence.current) setLoading(false)
     }
   }, [endDate, globalScope, startDate, username])
 
+  const applyRange = (days: number) => {
+    const current = Math.floor(Date.now() / 1000)
+    const nextStart = dateInput(current - (days - 1) * 86400)
+    const nextEnd = dateInput(current)
+    setStartDate(nextStart)
+    setEndDate(nextEnd)
+    void load({ startDate: nextStart, endDate: nextEnd })
+  }
+
   useEffect(() => { void load() }, [])
-  const timeline = useMemo(() => buildAnalyticsTimeline(data?.series || []), [data])
-  const maxRequests = Math.max(1, ...timeline.map((item) => item.requests))
   const modelRows = useMemo(() => {
     const values = new Map<string, { model: string; requests: number; quota: number; tokens: number }>()
     for (const item of data?.series || []) {
@@ -59,7 +72,12 @@ export function ConsoleAnalytics({ globalScope }: { globalScope: boolean }) {
   const submit = (event: FormEvent) => { event.preventDefault(); void load() }
   return <div className="console-page console-analytics-page">
     <form className="console-filter-bar" onSubmit={submit}>
-      <div className="console-filter-title"><Filter size={17} /><span><strong>{t('分析范围')}</strong><small>{globalScope ? t('管理员可按用户名筛选全局数据') : t('仅展示当前 New API 账号的数据')}</small></span></div>
+      <div className="console-filter-title"><Filter size={17} /><span><strong>{t('分析范围')}</strong><small>{globalScope ? t('管理员可按用户名筛选全局数据') : t('仅展示当前账号的数据')}</small></span></div>
+      <div className="analytics-range-presets" aria-label={t('快捷日期范围')}>{[1, 7, 30].map((days) => {
+        const current = Math.floor(Date.now() / 1000)
+        const active = startDate === dateInput(current - (days - 1) * 86400) && endDate === dateInput(current)
+        return <button className={active ? 'active' : ''} type="button" aria-pressed={active} disabled={loading && active} key={days} onClick={() => applyRange(days)}>{days === 1 ? t('今天') : t('近 {{days}} 天', { days })}</button>
+      })}</div>
       <label><span>{t('开始日期')}</span><input type="date" value={startDate} max={endDate} onChange={(event) => setStartDate(event.target.value)} /></label>
       <label><span>{t('结束日期')}</span><input type="date" value={endDate} min={startDate} onChange={(event) => setEndDate(event.target.value)} /></label>
       {globalScope && <label><span>{t('用户名')}</span><input value={username} maxLength={128} placeholder={t('留空查看全部')} onChange={(event) => setUsername(event.target.value)} /></label>}
@@ -72,12 +90,12 @@ export function ConsoleAnalytics({ globalScope }: { globalScope: boolean }) {
         <ConsoleMetric icon={<BarChart3 size={19} />} label={t('请求数')} value={compactNumber(data.summary.requests)} detail={`${data.summary.models} ${t('个模型')}`} tone="blue" />
         <ConsoleMetric icon={<Sigma size={19} />} label={t('Token 用量')} value={compactNumber(data.summary.tokens)} detail={`TPM ${compactNumber(data.stat.tpm)}`} tone="green" />
         <ConsoleMetric icon={<CircleDollarSign size={19} />} label={t('额度消耗')} value={quotaText(data.summary.quota, data.quota_per_unit)} detail={`RPM ${compactNumber(data.stat.rpm)}`} tone="amber" />
-        <ConsoleMetric icon={<Users size={19} />} label={t('数据范围')} value={data.scope === 'global' ? t('全局') : t('当前账号')} detail={`${startDate} → ${endDate}`} />
+        <ConsoleMetric icon={<Users size={19} />} label={t('数据范围')} value={data.scope === 'global' ? t('全局') : t('当前账号')} detail={`${dateInput(data.start_timestamp)} → ${dateInput(data.end_timestamp)}`} />
       </section>
 
       <section className="console-panel console-chart-panel">
-        <div className="console-panel-head"><div><span className="eyebrow">REQUEST TIMELINE</span><h3>{t('请求趋势')}</h3><p>{t('按 New API 数据看板时间桶汇总，不在监控平台重复存储业务数据。')}</p></div><ConsoleBadge tone="blue">{timeline.length} {t('个数据点')}</ConsoleBadge></div>
-        {timeline.length ? <div className="console-bar-chart" role="img" aria-label={t('请求趋势图')}>{timeline.map((item) => <div className="console-bar-column" key={item.timestamp} title={`${new Date(item.timestamp * 1000).toLocaleString()} · ${item.requests} ${t('请求')}`}><span style={{ height: `${Math.max(4, item.requests / maxRequests * 100)}%` }} /><small>{new Intl.DateTimeFormat(getLanguage() === 'en' ? 'en-US' : 'zh-CN', { month: '2-digit', day: '2-digit' }).format(new Date(item.timestamp * 1000))}</small></div>)}</div> : <ConsoleEmpty title={t('该时间范围暂无请求')} detail={t('调整日期范围，或确认 New API 已启用数据看板采集。')} />}
+        <div className="console-panel-head"><div><span className="eyebrow">REQUEST TIMELINE</span><h3>{t('请求趋势')}</h3><p>{t('按时间与模型拆分真实请求，可切换请求数、Token 和额度。')}</p></div><ConsoleBadge tone="blue">{new Set(data.series.map((item) => item.created_at)).size} {t('个时间桶')}</ConsoleBadge></div>
+        {data.series.length ? <AnalyticsTrendChart series={data.series} quotaPerUnit={data.quota_per_unit} /> : <ConsoleEmpty title={t('该时间范围暂无请求')} detail={t('调整日期范围，或确认当前账号已有调用记录。')} />}
       </section>
 
       <section className="console-two-column console-analytics-detail-grid">
@@ -87,7 +105,7 @@ export function ConsoleAnalytics({ globalScope }: { globalScope: boolean }) {
         </article>
         <article className="console-panel">
           <div className="console-panel-head"><div><span className="eyebrow">USAGE FLOW</span><h3>{t('额度流向')}</h3></div><ConsoleBadge>{data.flow.length}</ConsoleBadge></div>
-          {data.flow.length ? <div className="console-flow-list">{data.flow.slice(0, 12).map((item, index) => <div key={`${item.token_id}-${item.model_name}-${index}`}><span><strong>{item.token_name || item.username || `#${item.token_id}`}</strong><small>{item.use_group || t('默认分组')} · {item.model_name}</small></span><em>{quotaText(item.quota, data.quota_per_unit)}<small>{compactNumber(item.count)} {t('次调用')}</small></em></div>)}</div> : <ConsoleEmpty title={t('暂无流向数据')} detail={t('New API 当前没有返回分组流向记录。')} />}
+          {data.flow.length ? <div className="console-flow-list">{data.flow.slice(0, 12).map((item, index) => <div key={`${item.token_id}-${item.model_name}-${index}`}><span><strong>{item.token_name || item.username || `#${item.token_id}`}</strong><small>{item.use_group || t('默认分组')} · {item.model_name}</small></span><em>{quotaText(item.quota, data.quota_per_unit)}<small>{compactNumber(item.count)} {t('次调用')}</small></em></div>)}</div> : <ConsoleEmpty title={t('暂无流向数据')} detail={t('当前筛选范围没有可展示的流向记录。')} />}
         </article>
       </section>
     </>}

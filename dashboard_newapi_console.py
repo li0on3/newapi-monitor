@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -39,7 +40,7 @@ class NewAPIConsoleClient:
         body: dict[str, Any] | None = None,
     ) -> Any:
         if not session_cookie or user_id <= 0:
-            raise NewAPIConsoleError(401, "New API session is required")
+            raise NewAPIConsoleError(401, "Account session is required")
         if not path.startswith("/api/") or "://" in path or ".." in path:
             raise NewAPIConsoleError(500, "invalid upstream route")
         encoded_query = urllib.parse.urlencode(
@@ -61,17 +62,18 @@ class NewAPIConsoleClient:
                 raw = response.read(self.max_response_bytes + 1)
         except urllib.error.HTTPError as error:
             status = error.code if error.code in {400, 401, 403, 404, 409, 429} else 502
-            raise NewAPIConsoleError(status, f"New API request failed with HTTP {error.code}") from error
+            raise NewAPIConsoleError(status, f"Account service request failed with HTTP {error.code}") from error
         except (urllib.error.URLError, TimeoutError, OSError) as error:
-            raise NewAPIConsoleError(502, "New API is currently unreachable") from error
+            raise NewAPIConsoleError(502, "Account service is currently unreachable") from error
         if len(raw) > self.max_response_bytes:
-            raise NewAPIConsoleError(502, "New API response is too large")
+            raise NewAPIConsoleError(502, "Account service response is too large")
         try:
             payload = json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
-            raise NewAPIConsoleError(502, "New API returned invalid JSON") from error
+            raise NewAPIConsoleError(502, "Account service returned invalid JSON") from error
         if isinstance(payload, dict) and payload.get("success") is False:
-            message = str(payload.get("message") or "New API rejected the request")[:500]
+            message = str(payload.get("message") or "Account service rejected the request")[:500]
+            message = re.sub(r"new[\s_-]*api", "account service", message, flags=re.IGNORECASE)
             raise NewAPIConsoleError(400, message)
         if isinstance(payload, dict) and "success" in payload and "data" in payload:
             return payload["data"]

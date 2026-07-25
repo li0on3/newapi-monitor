@@ -68,14 +68,14 @@ export function ConsoleLogs({ globalScope }: { globalScope: boolean }) {
     const url = URL.createObjectURL(blob)
     const anchor = document.createElement('a')
     anchor.href = url
-    anchor.download = `newapi-usage-logs-${Date.now()}.csv`
+    anchor.download = `usage-logs-${Date.now()}.csv`
     anchor.click()
     URL.revokeObjectURL(url)
   }
 
   return <div className="console-page console-logs-page">
     <form className="console-log-filters" onSubmit={submit}>
-      <div className="console-filter-title"><Filter size={17} /><span><strong>{t('日志筛选')}</strong><small>{globalScope ? t('支持全局账号与调用维度检索') : t('只查询当前账号的真实 New API 日志')}</small></span></div>
+      <div className="console-filter-title"><Filter size={17} /><span><strong>{t('日志筛选')}</strong><small>{globalScope ? t('支持全局账号与调用维度检索') : t('只查询当前账号的真实调用日志')}</small></span></div>
       <div className="console-log-filter-grid">
         <label><span>{t('开始日期')}</span><input type="date" value={filters.startDate} max={filters.endDate} onChange={(event) => setFilters({ ...filters, startDate: event.target.value })} /></label>
         <label><span>{t('结束日期')}</span><input type="date" value={filters.endDate} min={filters.startDate} onChange={(event) => setFilters({ ...filters, endDate: event.target.value })} /></label>
@@ -100,7 +100,7 @@ export function ConsoleLogs({ globalScope }: { globalScope: boolean }) {
       </section>
 
       <section className="console-panel console-log-list-panel">
-        <div className="console-panel-head"><div><span className="eyebrow">REAL USAGE TRACE</span><h3>{t('使用日志')}</h3><p>{t('展开一条记录可查看请求标识、Token、耗时和 New API 返回的诊断字段。')}</p></div><ConsoleBadge tone="blue">{data.total}</ConsoleBadge></div>
+        <div className="console-panel-head"><div><span className="eyebrow">REAL USAGE TRACE</span><h3>{t('使用日志')}</h3><p>{t('展开一条记录可查看请求标识、Token、耗时和服务诊断字段。')}</p></div><ConsoleBadge tone="blue">{data.total}</ConsoleBadge></div>
         {data.items.length ? <div className="console-log-list">{data.items.map((item) => {
           const open = expanded.has(item.id)
           const frt = Number(item.other.frt || item.other.frt_ms || 0)

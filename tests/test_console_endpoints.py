@@ -112,10 +112,14 @@ class FakeKeyGroupStore:
         }]
 
     def membership_map(self, user_id):
-        return {8: 3}
+        return {8: [3]}
 
-    def assign_tokens(self, user_id, token_ids, group_id):
-        self.assignments.append((user_id, token_ids, group_id))
+    def assign_tokens(self, user_id, token_ids, group_ids):
+        self.assignments.append((user_id, token_ids, group_ids))
+        return len(token_ids)
+
+    def set_group_members(self, user_id, group_id, token_ids):
+        self.assignments.append((user_id, group_id, token_ids))
         return len(token_ids)
 
 
@@ -157,6 +161,17 @@ class ConsoleEndpointTests(unittest.TestCase):
 
         self.assertEqual("/api/console/key-groups/assignments", matching_path)
 
+    def test_key_group_member_route_is_not_shadowed_by_group_id_route(self):
+        scope = request("/api/console/key-groups/3/members", "PUT").scope
+
+        matching_path = next(
+            route.path
+            for route in dashboard_app.app.routes
+            if route.matches(scope)[0] is Match.FULL
+        )
+
+        self.assertEqual("/api/console/key-groups/{group_id}/members", matching_path)
+
     def test_key_group_workspace_uses_current_account_tokens_and_self_usage(self):
         with patch.object(dashboard_app.runtime, "settings", self.settings), patch(
             "dashboard_app.console_client", return_value=self.client
@@ -174,7 +189,7 @@ class ConsoleEndpointTests(unittest.TestCase):
         self.assertTrue(any(call[0] == "self_flow" for call in self.client.calls))
 
     def test_key_assignment_rejects_token_ids_not_owned_by_current_user(self):
-        payload = dashboard_app.ConsoleKeyGroupAssignmentPayload(token_ids=[7, 99], group_id=3)
+        payload = dashboard_app.ConsoleKeyGroupAssignmentPayload(token_ids=[7, 99], group_ids=[3])
         with patch.object(dashboard_app.runtime, "settings", self.settings), patch(
             "dashboard_app.console_client", return_value=self.client
         ), patch("dashboard_app.key_group_store", return_value=self.key_groups):
@@ -182,6 +197,52 @@ class ConsoleEndpointTests(unittest.TestCase):
                 dashboard_app.assign_console_key_group(
                     payload,
                     request("/api/console/key-groups/assignments", "PUT"),
+                    self.user,
+                )
+
+        self.assertEqual(404, raised.exception.status_code)
+        self.assertEqual([], self.key_groups.assignments)
+
+    def test_key_assignment_accepts_multiple_monitor_groups(self):
+        payload = dashboard_app.ConsoleKeyGroupAssignmentPayload(token_ids=[7, 8], group_ids=[3, 4, 3])
+        with patch.object(dashboard_app.runtime, "settings", self.settings), patch(
+            "dashboard_app.console_client", return_value=self.client
+        ), patch("dashboard_app.key_group_store", return_value=self.key_groups):
+            result = dashboard_app.assign_console_key_group(
+                payload,
+                request("/api/console/key-groups/assignments", "PUT"),
+                self.user,
+            )
+
+        self.assertEqual({"assigned": 2}, result)
+        self.assertEqual([(9, [7, 8], [3, 4])], self.key_groups.assignments)
+
+    def test_group_member_editor_replaces_only_the_selected_group_members(self):
+        payload = dashboard_app.ConsoleKeyGroupMembersPayload(token_ids=[8, 7, 8])
+        with patch.object(dashboard_app.runtime, "settings", self.settings), patch(
+            "dashboard_app.console_client", return_value=self.client
+        ), patch("dashboard_app.key_group_store", return_value=self.key_groups):
+            result = dashboard_app.update_console_key_group_members(
+                3,
+                payload,
+                request("/api/console/key-groups/3/members", "PUT"),
+                self.user,
+            )
+
+        self.assertEqual({"changed": 2}, result)
+        self.assertEqual([(9, 3, [8, 7])], self.key_groups.assignments)
+        self.assertEqual("console.key-group.members", self.settings.audits[0]["action"])
+
+    def test_group_member_editor_rejects_keys_not_owned_by_current_user(self):
+        payload = dashboard_app.ConsoleKeyGroupMembersPayload(token_ids=[7, 99])
+        with patch.object(dashboard_app.runtime, "settings", self.settings), patch(
+            "dashboard_app.console_client", return_value=self.client
+        ), patch("dashboard_app.key_group_store", return_value=self.key_groups):
+            with self.assertRaises(HTTPException) as raised:
+                dashboard_app.update_console_key_group_members(
+                    3,
+                    payload,
+                    request("/api/console/key-groups/3/members", "PUT"),
                     self.user,
                 )
 

@@ -2,7 +2,7 @@ import { AlertTriangle, LoaderCircle, RefreshCw } from 'lucide-react'
 import type { ReactNode } from 'react'
 import { t } from '../i18n'
 
-export function ConsoleLoading({ label = t('正在读取 New API 数据') }: { label?: string }) {
+export function ConsoleLoading({ label = t('正在读取账号数据') }: { label?: string }) {
   return <div className="console-state"><LoaderCircle className="spin" size={24} /><strong>{label}</strong></div>
 }
 
