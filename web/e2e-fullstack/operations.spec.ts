@@ -1,5 +1,10 @@
 import { expect, test, type Page } from '@playwright/test';
 
+test.beforeEach(async ({ request }) => {
+  const response = await request.post('http://127.0.0.1:18083/monitor/api/e2e/reset');
+  expect(response.ok()).toBe(true);
+});
+
 async function login(page: Page) {
   await page.goto('deliveries');
   await page.locator('input[autocomplete="current-password"]').fill('E2E-Admin-Password-2026!');
@@ -55,13 +60,22 @@ test('真实后端支持事件确认、静默时段与渠道维护窗口', async
   await page.locator('.maintenance-window-fields input[type="datetime-local"]').nth(0).fill(start);
   await page.locator('.maintenance-window-fields input[type="datetime-local"]').nth(1).fill(end);
   await page.getByPlaceholder('例如：上游升级或线路切换').fill('E2E maintenance');
+  const saveResponse = page.waitForResponse((response) => (
+    response.request().method() === 'PUT'
+    && response.url().endsWith('/monitor/api/channel-settings/1')
+  ));
   await page.getByRole('button', { name: '保存渠道配置' }).click();
+  expect((await saveResponse).ok()).toBe(true);
   await expect(page.getByPlaceholder('例如：上游升级或线路切换')).toHaveValue('E2E maintenance');
 
   const settings = await page.evaluate(async () => (await fetch('/monitor/api/settings')).json());
   expect(settings.values.notification_quiet_hours_enabled).toBe(true);
   expect(settings.values.notification_quiet_hours_start).toBe('23:00');
-  const channels = await page.evaluate(async () => (await fetch('/monitor/api/channel-settings')).json());
-  expect(channels.items[0].monitor_config.maintenance_window_enabled).toBe(true);
-  expect(channels.items[0].monitor_config.maintenance_window_reason).toBe('E2E maintenance');
+  await expect.poll(async () => page.evaluate(async () => {
+    const channels = await (await fetch('/monitor/api/channel-settings')).json();
+    return channels.items[0].monitor_config;
+  })).toMatchObject({
+    maintenance_window_enabled: true,
+    maintenance_window_reason: 'E2E maintenance',
+  });
 });

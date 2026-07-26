@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import os
+import sqlite3
 import sys
 import tempfile
 import time
 from pathlib import Path
 
 import uvicorn
+from starlette.requests import Request
+from starlette.responses import JSONResponse
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -129,6 +132,86 @@ store.connection.commit()
 store.connection.close()
 
 from dashboard_app import app  # noqa: E402
+
+
+def reset_fixture_state() -> None:
+    timestamp = int(time.time())
+    with sqlite3.connect(DATABASE, timeout=30) as connection:
+        connection.execute(
+            """
+            UPDATE incidents
+            SET acknowledged_at = NULL, acknowledged_by = '', acknowledgement_note = ''
+            WHERE id = ?
+            """,
+            (incident_id,),
+        )
+        connection.execute(
+            """
+            UPDATE notification_outbox
+            SET status = 'pending', attempts = 0, next_attempt_at = ?, lease_until = NULL,
+                last_error = '', delivered_at = NULL, updated_at = ?
+            WHERE id = ?
+            """,
+            (timestamp + 300, timestamp, pending_id),
+        )
+        connection.execute(
+            """
+            UPDATE notification_outbox
+            SET status = 'dead', attempts = 8, next_attempt_at = ?, lease_until = NULL,
+                last_error = 'synthetic webhook timeout', delivered_at = NULL, updated_at = ?
+            WHERE id = ?
+            """,
+            (timestamp, timestamp, dead_id),
+        )
+        connection.execute(
+            """
+            UPDATE notification_outbox
+            SET status = 'sending', attempts = 1, next_attempt_at = ?, lease_until = ?,
+                last_error = '', delivered_at = NULL, updated_at = ?
+            WHERE id = ?
+            """,
+            (timestamp, timestamp + 600, timestamp, sending_id),
+        )
+        connection.execute(
+            """
+            UPDATE notification_outbox
+            SET status = 'delivered', delivered_at = ?, lease_until = NULL,
+                last_error = '', updated_at = ?
+            WHERE id = ?
+            """,
+            (timestamp - 500, timestamp, delivered_id),
+        )
+        connection.execute(
+            """
+            UPDATE notification_outbox
+            SET status = 'cancelled', lease_until = NULL,
+                last_error = 'cancelled by administrator', updated_at = ?
+            WHERE id = ?
+            """,
+            (timestamp, cancelled_id),
+        )
+        connection.execute("DELETE FROM monitor_channel_settings WHERE channel_id = 1")
+        connection.execute(
+            """
+            DELETE FROM monitor_settings
+            WHERE key IN (
+                'notification_quiet_hours_enabled',
+                'notification_quiet_hours_start',
+                'notification_quiet_hours_end',
+                'notification_quiet_hours_timezone',
+                'notification_quiet_hours_allow_critical'
+            )
+            """
+        )
+        connection.commit()
+
+
+@app.middleware("http")
+async def reset_e2e_fixture(request: Request, call_next):
+    if request.url.path.endswith("/api/e2e/reset"):
+        reset_fixture_state()
+        return JSONResponse({"success": True})
+    return await call_next(request)
 
 
 if __name__ == "__main__":
