@@ -33,6 +33,8 @@ jobs:
         run: bunx playwright install --with-deps chromium
       - working-directory: web
         run: bun run test:e2e
+      - working-directory: web
+        run: bun run test:e2e:fullstack
       - run: cp .env.example .env
       - run: docker compose --env-file .env config --quiet
       - run: docker build --tag newapi-monitor:ci .

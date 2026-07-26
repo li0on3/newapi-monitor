@@ -16,6 +16,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -44,6 +45,7 @@ from monitoring_core.alerting import (
     summarize_logs,
 )
 from monitoring_core.delivery import AlertPublisher, NotificationOutboxWorker
+from monitoring_core.policies import channel_maintenance_state, quiet_hours_defer_until
 from monitoring_core.probe_protocol import ProbeProtocolValidator, validate_probe_json
 from monitoring_core.state_store import StateStore
 
@@ -590,6 +592,11 @@ class Config:
     database_maintenance_interval_seconds: int
     database_max_mb: int
     notification_max_attempts: int
+    notification_quiet_hours_enabled: bool
+    notification_quiet_hours_start: str
+    notification_quiet_hours_end: str
+    notification_quiet_hours_timezone: str
+    notification_quiet_hours_allow_critical: bool
     smtp_host: str
     smtp_port: int
     smtp_user: str
@@ -731,6 +738,11 @@ class Config:
             ),
             database_max_mb=max(128, int(value("database_max_mb", "DATABASE_MAX_MB", 2048))),
             notification_max_attempts=max(1, min(20, int(value("notification_max_attempts", "NOTIFICATION_MAX_ATTEMPTS", 8)))),
+            notification_quiet_hours_enabled=bool(value("notification_quiet_hours_enabled", "NOTIFICATION_QUIET_HOURS_ENABLED", False)),
+            notification_quiet_hours_start=str(value("notification_quiet_hours_start", "NOTIFICATION_QUIET_HOURS_START", "22:00")),
+            notification_quiet_hours_end=str(value("notification_quiet_hours_end", "NOTIFICATION_QUIET_HOURS_END", "08:00")),
+            notification_quiet_hours_timezone=str(value("notification_quiet_hours_timezone", "NOTIFICATION_QUIET_HOURS_TIMEZONE", "Asia/Shanghai")),
+            notification_quiet_hours_allow_critical=bool(value("notification_quiet_hours_allow_critical", "NOTIFICATION_QUIET_HOURS_ALLOW_CRITICAL", True)),
             smtp_host=str(value("smtp_host", "SMTP_HOST", "")),
             smtp_port=int(value("smtp_port", "SMTP_PORT", 25)),
             smtp_user=str(value("smtp_user", "SMTP_USER", "")),
@@ -817,6 +829,19 @@ class Config:
             missing.append("FEISHU_WEBHOOK_URL")
         if self.openai_status_min_impact not in OPENAI_IMPACT_RANK:
             raise ValueError("OPENAI_STATUS_MIN_IMPACT must be none, minor, major or critical")
+        for clock in (self.notification_quiet_hours_start, self.notification_quiet_hours_end):
+            try:
+                hour, minute = (int(part) for part in clock.split(":", 1))
+            except (TypeError, ValueError) as error:
+                raise ValueError("notification quiet hours must use HH:MM") from error
+            if hour not in range(24) or minute not in range(60):
+                raise ValueError("notification quiet hours must use HH:MM")
+        if self.notification_quiet_hours_start == self.notification_quiet_hours_end:
+            raise ValueError("notification quiet hours start and end must be different")
+        try:
+            ZoneInfo(self.notification_quiet_hours_timezone)
+        except ZoneInfoNotFoundError as error:
+            raise ValueError("notification quiet hours timezone is invalid") from error
         if missing:
             raise ValueError("missing required settings: " + ", ".join(missing))
 
@@ -1682,7 +1707,7 @@ class ChannelProbeWorker:
             channel_config = self.config.channel_settings.get(channel_id, {})
             if channel_id <= 0 or int(channel.get("status") or 0) != 1:
                 continue
-            if channel_config.get("maintenance_mode"):
+            if channel_maintenance_state(channel_config)[0]:
                 continue
             channels.append(channel)
 
@@ -1775,6 +1800,17 @@ class MonitorApp:
             self.store,
             self.notifier,
             max_attempts=config.notification_max_attempts,
+            quiet_until=lambda priority, now: quiet_hours_defer_until(
+                {
+                    "notification_quiet_hours_enabled": config.notification_quiet_hours_enabled,
+                    "notification_quiet_hours_start": config.notification_quiet_hours_start,
+                    "notification_quiet_hours_end": config.notification_quiet_hours_end,
+                    "notification_quiet_hours_timezone": config.notification_quiet_hours_timezone,
+                    "notification_quiet_hours_allow_critical": config.notification_quiet_hours_allow_critical,
+                },
+                priority,
+                now,
+            ),
         )
         self.openai_status_client = OpenAIStatusClient()
         self.openai_status_tracker = OpenAIStatusTracker(

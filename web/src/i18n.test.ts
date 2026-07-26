@@ -86,4 +86,11 @@ describe('translations', () => {
     expect(translate('浅色', 'en')).toBe('Light')
     expect(translate('深色', 'en')).toBe('Dark')
   })
+
+  test('translates alert delivery operations and maintenance policies', () => {
+    expect(translate('告警投递中心', 'en')).toBe('Alert delivery center')
+    expect(translate('恢复死信并重投', 'en')).toBe('Recover dead letter and redeliver')
+    expect(translate('启用静默时段', 'en')).toBe('Enable quiet hours')
+    expect(translate('计划维护窗口', 'en')).toBe('Scheduled maintenance window')
+  })
 })

@@ -53,6 +53,7 @@ import { ThemeSwitch } from './ThemeSwitch';
 import type { AppRoute, AppTab, ConsolePage, SettingsPage } from './routes';
 import type { AuthUser, Channel, ChannelMonitorConfig, ContainerMetric, Incident, IncidentPayload, IncidentSummary, KeyUsageCall, KeyUsageResult, LogItem, ProviderStatus, ResourceSample, Summary, SystemHealth } from './types';
 import { ConsoleShell } from './console/ConsoleShell';
+import { DeliveriesView } from './deliveries/DeliveriesView';
 import { SECRET_SETTING_KEYS, SETTING_SECTIONS } from './settings/catalog';
 import type { SettingSectionId } from './settings/catalog';
 
@@ -84,6 +85,19 @@ function formatFullTime(timestamp: number): string {
     second: '2-digit',
     hour12: false,
   }).format(new Date(timestamp * 1000));
+}
+
+function formatDateTimeLocal(timestamp: number | null | undefined): string {
+  if (!timestamp) return '';
+  const date = new Date(timestamp * 1000);
+  const local = new Date(date.getTime() - date.getTimezoneOffset() * 60_000);
+  return local.toISOString().slice(0, 16);
+}
+
+function parseDateTimeLocal(value: string): number {
+  if (!value) return 0;
+  const timestamp = new Date(value).getTime();
+  return Number.isFinite(timestamp) ? Math.floor(timestamp / 1000) : 0;
 }
 
 function formatDuration(ms: number | null | undefined): string {
@@ -359,6 +373,7 @@ function ChannelSettingsView() {
         </div>
         <div className="config-visibility-note"><Eye size={15} /><span>{t("总览展示范围由管理员在“系统配置 → 总览展示”中统一管理。")}</span></div>
         <div className="config-toggle-grid"><Toggle checked={config.probe_enabled ?? false} onChange={(value) => edit(channel.channel_id, 'probe_enabled', value)} label={t("使用真实请求探测")} /><Toggle checked={config.alert_enabled ?? true} onChange={(value) => edit(channel.channel_id, 'alert_enabled', value)} label={t("渠道告警")} /><Toggle checked={config.maintenance_mode ?? false} onChange={(value) => edit(channel.channel_id, 'maintenance_mode', value)} label={t("维护模式")} /></div>
+        <div className="maintenance-window-card"><div className="maintenance-window-head"><div><Clock3 size={15} /><span><strong>{t('计划维护窗口')}</strong><small>{t('到达结束时间后自动恢复探测与告警。')}</small></span></div><Toggle checked={config.maintenance_window_enabled ?? false} onChange={(value) => edit(channel.channel_id, 'maintenance_window_enabled', value)} label={t('启用计划维护')} /></div><div className="maintenance-window-fields"><label><span>{t('开始时间')}</span><input type="datetime-local" disabled={!config.maintenance_window_enabled} value={formatDateTimeLocal(config.maintenance_window_start)} onChange={(event) => edit(channel.channel_id, 'maintenance_window_start', parseDateTimeLocal(event.target.value))} /></label><label><span>{t('结束时间')}</span><input type="datetime-local" disabled={!config.maintenance_window_enabled} value={formatDateTimeLocal(config.maintenance_window_end)} onChange={(event) => edit(channel.channel_id, 'maintenance_window_end', parseDateTimeLocal(event.target.value))} /></label><label className="config-wide"><span>{t('维护原因')}</span><input disabled={!config.maintenance_window_enabled} value={config.maintenance_window_reason ?? ''} placeholder={t('例如：上游升级或线路切换')} onChange={(event) => edit(channel.channel_id, 'maintenance_window_reason', event.target.value)} /></label></div></div>
         <button className="primary-button compact-button" disabled={saving === channel.channel_id} onClick={() => void save(channel)}>{saving === channel.channel_id ? <RefreshCw className="spin" size={15} /> : <Save size={15} />}{t("保存渠道配置")}</button>
       </article>;
     })}</div>
@@ -405,8 +420,10 @@ function SettingsView({ activePage, onActivePageChange }: { activePage: Settings
   const setValue = (key: string, value: unknown) => setValues((current) => ({ ...current, [key]: value }));
   const save = async () => {
     setSaving(true); setMessage('');
-    const payload = { ...values };
-    for (const key of SECRET_SETTING_KEYS) if (payload[key] === '********') payload[key] = '';
+    const payload = Object.fromEntries(
+      Object.entries(values).filter(([key, value]) => JSON.stringify(value) !== JSON.stringify(baseline[key])),
+    );
+    for (const key of SECRET_SETTING_KEYS) if (payload[key] === '********') delete payload[key];
     try { await api('settings', { method: 'PUT', body: JSON.stringify(payload) }); setMessage(t('配置已保存，采集器正在热加载')); await load(); }
     catch (error) { setMessage(error instanceof Error ? error.message : t('保存失败')); }
     finally { setSaving(false); }
@@ -537,6 +554,7 @@ function SettingsView({ activePage, onActivePageChange }: { activePage: Settings
         {activePage === 'notifications' && <article className="settings-card settings-focus-card notification-center-card">
           <div className="settings-card-head settings-focus-head"><div className="settings-section-mark"><BellRing size={18} /></div><div><span className="eyebrow">MULTI-CHANNEL DELIVERY</span><h3>{t("告警通知中心")}</h3><p>{t("同一告警可同时发送到多个渠道；单个渠道失败不会阻断其他渠道。敏感凭据加密保存且不会回显。")}</p></div><span className="settings-field-count">{['email_enabled', 'wecom_app_enabled', 'wecom_webhook_enabled', 'feishu_app_enabled', 'feishu_webhook_enabled'].filter((key) => Boolean(values[key])).length} {t("个已启用")}</span></div>
           <div className="notification-global-bar"><label><span>{t("通知标题前缀")}</span><input value={String(values.subject_prefix ?? '')} onChange={(event) => setValue('subject_prefix', event.target.value)} /></label><Toggle checked={Boolean(values.send_startup_email)} onChange={(value) => setValue('send_startup_email', value)} label={t("监控启动时发送通知")} /><div><ShieldCheck size={15} /><span>{t("应用 Secret、Webhook 地址与签名密钥均按秘密字段加密存储。")}</span></div></div>
+          <div className="notification-policy-card"><div className="notification-policy-head"><div><Clock3 size={16} /><span><strong>{t('静默时段')}</strong><small>{t('静默期间保留告警并延后投递，不丢弃任何消息。')}</small></span></div><Toggle checked={Boolean(values.notification_quiet_hours_enabled)} onChange={(value) => setValue('notification_quiet_hours_enabled', value)} label={t('启用静默时段')} /></div><div className="notification-policy-fields"><label><span>{t('开始')}</span><input type="time" disabled={!values.notification_quiet_hours_enabled} value={String(values.notification_quiet_hours_start ?? '22:00')} onChange={(event) => setValue('notification_quiet_hours_start', event.target.value)} /></label><label><span>{t('结束')}</span><input type="time" disabled={!values.notification_quiet_hours_enabled} value={String(values.notification_quiet_hours_end ?? '08:00')} onChange={(event) => setValue('notification_quiet_hours_end', event.target.value)} /></label><label><span>{t('时区')}</span><input disabled={!values.notification_quiet_hours_enabled} value={String(values.notification_quiet_hours_timezone ?? 'Asia/Shanghai')} onChange={(event) => setValue('notification_quiet_hours_timezone', event.target.value)} /></label><Toggle checked={Boolean(values.notification_quiet_hours_allow_critical ?? true)} onChange={(value) => setValue('notification_quiet_hours_allow_critical', value)} label={t('严重告警仍立即发送')} /></div></div>
           <div className="notification-channel-grid">
             {([
               { id: 'wecom_app' as const, title: t('企业微信自建应用'), description: t('适合直接通知应用可见范围内的成员'), icon: <MessageSquare size={18} />, enabled: Boolean(values.wecom_app_enabled), configured: Boolean(values.wecom_corp_id && values.wecom_agent_id && values.wecom_app_secret && (values.wecom_to_user || values.wecom_to_party || values.wecom_to_tag)), fields: <><label><span>{t("企业 ID")}</span><input value={String(values.wecom_corp_id ?? '')} onChange={(event) => setValue('wecom_corp_id', event.target.value)} /></label><label><span>AgentId</span><input type="number" value={String(values.wecom_agent_id ?? '')} onChange={(event) => setValue('wecom_agent_id', Number(event.target.value))} /></label><label className="notification-wide"><span>{t("应用 Secret")}</span><input type="password" value={String(values.wecom_app_secret ?? '')} placeholder={t("留空保持原值")} onChange={(event) => setValue('wecom_app_secret', event.target.value)} /></label><label><span>{t("成员")}</span><input value={String(values.wecom_to_user ?? '')} placeholder={t("@all 或 user1|user2")} onChange={(event) => setValue('wecom_to_user', event.target.value)} /></label><label><span>{t("部门")}</span><input value={String(values.wecom_to_party ?? '')} placeholder={t("可选，1|2")} onChange={(event) => setValue('wecom_to_party', event.target.value)} /></label><label><span>{t("标签")}</span><input value={String(values.wecom_to_tag ?? '')} placeholder={t("可选，1|2")} onChange={(event) => setValue('wecom_to_tag', event.target.value)} /></label></> },
@@ -1096,6 +1114,8 @@ function IncidentsView() {
   const [generatedAt, setGeneratedAt] = useState(0);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [acknowledgementNote, setAcknowledgementNote] = useState('');
+  const [acknowledging, setAcknowledging] = useState(false);
   const pageSize = 50;
 
   useEffect(() => {
@@ -1142,6 +1162,22 @@ function IncidentsView() {
     setWindowHours(168);
     setSearch('');
     setQuery('');
+  };
+
+  const acknowledge = async (incident: Incident) => {
+    setAcknowledging(true);
+    try {
+      await api(`incidents/${incident.id}/acknowledge`, {
+        method: 'POST',
+        body: JSON.stringify({ note: acknowledgementNote }),
+      });
+      setAcknowledgementNote('');
+      await load();
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : t('事件确认失败'));
+    } finally {
+      setAcknowledging(false);
+    }
   };
 
   return (
@@ -1196,6 +1232,8 @@ function IncidentsView() {
               <div className="complete"><span><BellRing size={15} /></span><div><strong>{t("最后一次告警通知")}</strong><small>{formatFullTime(selected.last_notified_at)}</small></div></div>
               <div className={selected.status === 'resolved' ? 'complete' : ''}><span><CheckCircle2 size={15} /></span><div><strong>{selected.status === 'resolved' ? t('指标恢复') : t('等待恢复')}</strong><small>{selected.resolved_at ? formatFullTime(selected.resolved_at) : t('最后更新 {{time}}', { time: formatFullTime(selected.updated_at) })}</small></div></div>
             </div>
+
+            <div className={classNames('incident-ack-card', Boolean(selected.acknowledged_at) && 'acknowledged')}><div className="incident-ack-head"><div><ShieldCheck size={16} /><span><strong>{selected.acknowledged_at ? t('事件已确认') : t('确认事件')}</strong><small>{selected.acknowledged_at ? `${selected.acknowledged_by} · ${formatFullTime(selected.acknowledged_at)}` : t('确认表示运维人员已经知晓并开始处理，不会改变健康状态。')}</small></span></div>{selected.acknowledged_at && <CheckCircle2 size={18} />}</div>{selected.acknowledged_at ? <p>{selected.acknowledgement_note || t('未填写处理备注')}</p> : <div className="incident-ack-form"><input value={acknowledgementNote} maxLength={1000} placeholder={t('可选：记录负责人、排查动作或工单编号')} onChange={(event) => setAcknowledgementNote(event.target.value)} /><button type="button" className="primary-button" disabled={acknowledging} onClick={() => void acknowledge(selected)}>{acknowledging ? <RefreshCw className="spin" size={14} /> : <ShieldCheck size={14} />}{t('确认并记录')}</button></div>}</div>
 
             {selected.metadata?.provider && <div className="provider-incident-context">
               <div className="provider-incident-context-head"><div><Cloud size={17} /><span><strong>{t('官方事件上下文')}</strong><small>{selected.metadata.provider.toUpperCase()} · {selected.metadata.impact || selected.severity} · {selected.metadata.phase || selected.status}</small></span></div>{selected.metadata.source_url && <a href={selected.metadata.source_url} target="_blank" rel="noreferrer">{t('查看官方状态页')}<ExternalLink size={13} /></a>}</div>
@@ -1290,6 +1328,7 @@ export default function App() {
       tab === 'providerStatus'
       || (tab === 'keyUsage' && user.key_usage_available)
       || ['logs', 'resources', 'incidents', 'channels'].includes(tab)
+      || (tab === 'deliveries' && user.role === 'admin')
       || (tab === 'settings' && user.role === 'admin')
     ));
     if (!consoleAllowed && !monitorAllowed) {
@@ -1326,6 +1365,7 @@ export default function App() {
     { id: 'logs', label: t('监控日志'), Icon: Clock3, route: { tab: 'logs', settingsPage: 'status', consolePage: 'overview' } as AppRoute, visible: elevated },
     { id: 'resources', label: t('机器资源'), Icon: Cpu, route: { tab: 'resources', settingsPage: 'status', consolePage: 'overview' } as AppRoute, visible: elevated },
     { id: 'incidents', label: t('事件'), Icon: AlertTriangle, route: { tab: 'incidents', settingsPage: 'status', consolePage: 'overview' } as AppRoute, visible: elevated },
+    { id: 'deliveries', label: t('告警投递'), Icon: Mail, route: { tab: 'deliveries', settingsPage: 'status', consolePage: 'overview' } as AppRoute, visible: user?.role === 'admin' },
     { id: 'channels', label: t('渠道配置'), Icon: SlidersHorizontal, route: { tab: 'channels', settingsPage: 'status', consolePage: 'overview' } as AppRoute, visible: elevated },
     { id: 'providerStatus', label: t('官方状态'), Icon: Cloud, route: { tab: 'providerStatus', settingsPage: 'status', consolePage: 'overview' } as AppRoute, visible: elevated && Boolean(summary?.provider_status) },
     { id: 'settings', label: t('系统配置'), Icon: Settings, route: { tab: 'settings', settingsPage: route.settingsPage, consolePage: 'overview' } as AppRoute, visible: user?.role === 'admin' },
@@ -1353,7 +1393,7 @@ export default function App() {
         <div className="app-canvas">
           <main className="content">{tab === 'console' && user?.console_available ? <ConsoleShell page={route.consolePage} pages={user.console_pages || {}} globalScope={Boolean(user.console_global_scope)} customerView={customerView} onNavigate={(consolePage) => navigate({ tab: 'console', settingsPage: 'status', consolePage })} /> : <><section className="hero"><div><div className="eyebrow">OPERATIONS / REAL-TIME</div><h1>{t("服务运行态势")}</h1><p>{t("真实渠道探测、真实消费日志、主机与容器资源。")}</p></div><div className={`overall-status overall-${overall.tone}`}><span className="status-beacon" /><div><small>OVERALL STATUS</small><strong>{overall.label}</strong></div><span>{summary ? formatTime(summary.generated_at) : t('同步中')}</span></div></section>
             {error && <div className="inline-error"><AlertTriangle size={16} />{error}<button onClick={() => void loadCore()}>{t("重试")}</button></div>}
-            {summary ? <>{tab === 'overview' && <Overview summary={summary} channels={channels} onChannel={setSelectedChannel} showProviderStatus={elevated} onProviderStatus={() => navigate({ tab: 'providerStatus', settingsPage: 'status', consolePage: 'overview' })} />}{tab === 'providerStatus' && summary.provider_status && <ProviderStatusView status={summary.provider_status} summary={summary} onOverview={() => navigate({ tab: 'overview', settingsPage: 'status', consolePage: 'overview' })} />}{tab === 'providerStatus' && !summary.provider_status && <div className="empty-state provider-unavailable"><Cloud size={28} /><strong>{t('官方状态当前不可见')}</strong><span>{t('该功能可能已关闭，或当前角色没有查看权限。')}</span><button className="secondary-button" type="button" onClick={() => navigate({ tab: 'overview', settingsPage: 'status', consolePage: 'overview' })}>{t('返回渠道总览')}</button></div>}{tab === 'keyUsage' && user?.key_usage_available && <KeyUsageView />}{tab === 'logs' && elevated && <LogsView channels={channels} />}{tab === 'resources' && elevated && <ResourcesView />}{tab === 'incidents' && elevated && <IncidentsView />}{tab === 'channels' && elevated && <ChannelSettingsView />}{tab === 'settings' && user?.role === 'admin' && <SettingsView activePage={route.settingsPage} onActivePageChange={(settingsPage) => navigate({ tab: 'settings', settingsPage, consolePage: 'overview' })} />}</> : <div className="loading-panel"><RefreshCw className="spin" /><span>{t("正在读取第一批监控数据")}</span></div>}</>}
+            {summary ? <>{tab === 'overview' && <Overview summary={summary} channels={channels} onChannel={setSelectedChannel} showProviderStatus={elevated} onProviderStatus={() => navigate({ tab: 'providerStatus', settingsPage: 'status', consolePage: 'overview' })} />}{tab === 'providerStatus' && summary.provider_status && <ProviderStatusView status={summary.provider_status} summary={summary} onOverview={() => navigate({ tab: 'overview', settingsPage: 'status', consolePage: 'overview' })} />}{tab === 'providerStatus' && !summary.provider_status && <div className="empty-state provider-unavailable"><Cloud size={28} /><strong>{t('官方状态当前不可见')}</strong><span>{t('该功能可能已关闭，或当前角色没有查看权限。')}</span><button className="secondary-button" type="button" onClick={() => navigate({ tab: 'overview', settingsPage: 'status', consolePage: 'overview' })}>{t('返回渠道总览')}</button></div>}{tab === 'keyUsage' && user?.key_usage_available && <KeyUsageView />}{tab === 'logs' && elevated && <LogsView channels={channels} />}{tab === 'resources' && elevated && <ResourcesView />}{tab === 'incidents' && elevated && <IncidentsView />}{tab === 'deliveries' && user?.role === 'admin' && <DeliveriesView />}{tab === 'channels' && elevated && <ChannelSettingsView />}{tab === 'settings' && user?.role === 'admin' && <SettingsView activePage={route.settingsPage} onActivePageChange={(settingsPage) => navigate({ tab: 'settings', settingsPage, consolePage: 'overview' })} />}</> : <div className="loading-panel"><RefreshCw className="spin" /><span>{t("正在读取第一批监控数据")}</span></div>}</>}
           </main>
           <footer><span>{customerView ? t('数据源：真实调用、渠道探测与资源采集') : <>{t("数据源：New API 管理接口 / 真实 Relay 请求 / Linux")} & Docker / OpenAI Status</>}</span><span>{t("告警阈值：总耗时或首字")} &gt; {t("60s，3/5 或 5/10 触发")}</span></footer>
         </div>

@@ -4,11 +4,13 @@
 
 The roadmap follows measured requirements and failure evidence. Dates are not guaranteed.
 
-## Current Baseline (1.7)
+## Current Baseline (1.9)
 
 - External, read-only New API integration without upstream source modifications.
 - Real channel probes, usage-log latency analysis, resource monitoring, and collector self-monitoring.
 - WeCom, Feishu, and email delivery with UI-based real test alerts.
+- A durable delivery operations center with dead-letter recovery, bulk actions, incident acknowledgement, quiet hours, and scheduled channel maintenance windows.
+- Frontend route/permission E2E plus real FastAPI + SQLite full-stack E2E.
 - New API session SSO, role mapping, emergency administration, and configuration auditing.
 - Single-host Docker Compose deployment, backups, diagnostics, and container hardening.
 - A regular-user workspace with viewer-filtered Monitor Overview, account Overview, interactive Analytics, multi-group API Keys, and real Usage Logs, reusing the New API session and original permissions.
@@ -17,7 +19,7 @@ The roadmap follows measured requirements and failure evidence. Dates are not gu
 ## Next
 
 - Add configuration import/export with secrets excluded by default.
-- Add notification previews, quiet hours, and escalation policies.
+- Add notification previews and escalation policies.
 - Add an independent external heartbeat example for full-host outage detection.
 - Expand observability, recovery drills, and upgrade compatibility tests.
 

@@ -34,6 +34,9 @@ WORKER_SETTING_KEYS = {
     "docker_container_names", "disk_path", "excluded_token_names", "retention_days",
     "incident_retention_days", "notification_retention_days",
     "database_maintenance_interval_seconds", "database_max_mb", "notification_max_attempts",
+    "notification_quiet_hours_enabled", "notification_quiet_hours_start",
+    "notification_quiet_hours_end", "notification_quiet_hours_timezone",
+    "notification_quiet_hours_allow_critical",
     "smtp_host", "smtp_port", "smtp_user", "smtp_password", "smtp_from", "smtp_to",
     "smtp_starttls", "smtp_ssl", "email_enabled", "wecom_app_enabled", "wecom_corp_id",
     "wecom_agent_id", "wecom_app_secret", "wecom_to_user", "wecom_to_party",
@@ -48,7 +51,8 @@ WORKER_SETTING_KEYS = {
 }
 WORKER_CHANNEL_KEYS = {
     "probe_enabled", "probe_model", "probe_path", "probe_format", "probe_prompt",
-    "max_output_tokens", "alert_enabled", "maintenance_mode",
+    "max_output_tokens", "alert_enabled", "maintenance_mode", "maintenance_window_enabled",
+    "maintenance_window_start", "maintenance_window_end", "maintenance_window_reason",
 }
 
 
@@ -277,6 +281,8 @@ class SettingsStore:
             "display_name", "sort_order", "probe_enabled",
             "probe_model", "probe_path", "probe_format", "probe_prompt",
             "max_output_tokens", "alert_enabled", "maintenance_mode",
+            "maintenance_window_enabled", "maintenance_window_start",
+            "maintenance_window_end", "maintenance_window_reason",
         }
         unknown = set(updates) - allowed
         if unknown:
@@ -295,6 +301,15 @@ class SettingsStore:
         merged["probe_enabled"] = bool(merged.get("probe_enabled", False))
         merged["alert_enabled"] = bool(merged.get("alert_enabled", True))
         merged["maintenance_mode"] = bool(merged.get("maintenance_mode", False))
+        merged["maintenance_window_enabled"] = bool(merged.get("maintenance_window_enabled", False))
+        merged["maintenance_window_start"] = max(0, int(merged.get("maintenance_window_start") or 0))
+        merged["maintenance_window_end"] = max(0, int(merged.get("maintenance_window_end") or 0))
+        merged["maintenance_window_reason"] = str(merged.get("maintenance_window_reason") or "").strip()[:256]
+        if merged["maintenance_window_enabled"] and (
+            merged["maintenance_window_start"] <= 0
+            or merged["maintenance_window_end"] <= merged["maintenance_window_start"]
+        ):
+            raise ValueError("maintenance window end must be later than start")
         merged["sort_order"] = int(merged.get("sort_order", 0))
         merged["max_output_tokens"] = max(1, min(4096, int(merged.get("max_output_tokens", 1))))
         if merged.get("probe_format") not in {None, "", "responses", "chat", "anthropic"}:

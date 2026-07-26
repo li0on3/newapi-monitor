@@ -11,6 +11,7 @@ from collections import defaultdict, deque
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated, Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.gzip import GZipMiddleware
@@ -119,6 +120,11 @@ class SettingsUpdatePayload(BaseModel):
     database_maintenance_interval_seconds: int | None = Field(None, ge=3600, le=604800)
     database_max_mb: int | None = Field(None, ge=128, le=102400)
     notification_max_attempts: int | None = Field(None, ge=1, le=20)
+    notification_quiet_hours_enabled: bool | None = None
+    notification_quiet_hours_start: str | None = Field(None, pattern="^(?:[01]\\d|2[0-3]):[0-5]\\d$")
+    notification_quiet_hours_end: str | None = Field(None, pattern="^(?:[01]\\d|2[0-3]):[0-5]\\d$")
+    notification_quiet_hours_timezone: str | None = Field(None, min_length=1, max_length=128)
+    notification_quiet_hours_allow_critical: bool | None = None
     smtp_host: str | None = Field(None, max_length=512)
     smtp_port: int | None = Field(None, ge=1, le=65535)
     smtp_user: str | None = Field(None, max_length=512)
@@ -205,6 +211,27 @@ class SettingsUpdatePayload(BaseModel):
             raise ValueError("new_api_base_url must not contain credentials, query or fragment")
         return value.strip().rstrip("/")
 
+    @field_validator("notification_quiet_hours_timezone")
+    @classmethod
+    def validate_quiet_hours_timezone(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        try:
+            ZoneInfo(value)
+        except ZoneInfoNotFoundError as error:
+            raise ValueError("notification_quiet_hours_timezone is invalid") from error
+        return value
+
+    @model_validator(mode="after")
+    def validate_quiet_hours_window(self) -> "SettingsUpdatePayload":
+        if (
+            self.notification_quiet_hours_start is not None
+            and self.notification_quiet_hours_end is not None
+            and self.notification_quiet_hours_start == self.notification_quiet_hours_end
+        ):
+            raise ValueError("quiet hours start and end must be different")
+        return self
+
     @field_validator("wecom_webhook_url")
     @classmethod
     def validate_wecom_webhook_url(cls, value: str | None) -> str | None:
@@ -239,6 +266,26 @@ class NotificationTestPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     channel: str = Field(pattern="^(email|wecom_app|wecom_webhook|feishu_app|feishu_webhook)$")
+
+
+class NotificationIdsPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    ids: list[int] = Field(min_length=1, max_length=100)
+
+    @field_validator("ids")
+    @classmethod
+    def validate_ids(cls, value: list[int]) -> list[int]:
+        normalized = list(dict.fromkeys(value))
+        if len(normalized) != len(value) or any(item <= 0 for item in normalized):
+            raise ValueError("ids must contain unique positive integers")
+        return normalized
+
+
+class IncidentAcknowledgePayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    note: str = Field("", max_length=1000)
 
 
 class KeyUsageQueryPayload(BaseModel):
@@ -396,6 +443,10 @@ class ChannelSettingsPayload(BaseModel):
     max_output_tokens: int | None = Field(None, ge=1, le=4096)
     alert_enabled: bool | None = None
     maintenance_mode: bool | None = None
+    maintenance_window_enabled: bool | None = None
+    maintenance_window_start: int | None = Field(None, ge=0)
+    maintenance_window_end: int | None = Field(None, ge=0)
+    maintenance_window_reason: str | None = Field(None, max_length=256)
 
     @field_validator("probe_path")
     @classmethod
@@ -649,6 +700,11 @@ class Runtime:
             "database_maintenance_interval_seconds": env_int("DATABASE_MAINTENANCE_INTERVAL_SECONDS", 21600),
             "database_max_mb": env_int("DATABASE_MAX_MB", 2048),
             "notification_max_attempts": env_int("NOTIFICATION_MAX_ATTEMPTS", 8),
+            "notification_quiet_hours_enabled": env_bool("NOTIFICATION_QUIET_HOURS_ENABLED", False),
+            "notification_quiet_hours_start": os.getenv("NOTIFICATION_QUIET_HOURS_START", "22:00"),
+            "notification_quiet_hours_end": os.getenv("NOTIFICATION_QUIET_HOURS_END", "08:00"),
+            "notification_quiet_hours_timezone": os.getenv("NOTIFICATION_QUIET_HOURS_TIMEZONE", "Asia/Shanghai"),
+            "notification_quiet_hours_allow_critical": env_bool("NOTIFICATION_QUIET_HOURS_ALLOW_CRITICAL", True),
             "smtp_host": os.getenv("SMTP_HOST", ""),
             "smtp_port": env_int("SMTP_PORT", 25),
             "smtp_user": os.getenv("SMTP_USER", ""),
@@ -1995,6 +2051,131 @@ def incidents(
         limit=limit,
         offset=offset,
     )
+
+
+@app.post("/api/incidents/{incident_id}/acknowledge")
+def acknowledge_incident(
+    incident_id: int,
+    payload: IncidentAcknowledgePayload,
+    request: Request,
+    user: OperatorUser,
+) -> dict[str, Any]:
+    store = StateStore(runtime.state_db)
+    try:
+        incident = store.acknowledge_incident(
+            incident_id,
+            actor=str(user["username"]),
+            note=payload.note,
+        )
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    finally:
+        store.connection.close()
+    if runtime.settings is not None:
+        runtime.settings.record_audit(
+            str(user["username"]),
+            "incident.acknowledge",
+            str(incident_id),
+            {"acknowledged": False},
+            {
+                "acknowledged": True,
+                "note": payload.note,
+            },
+            runtime.remote_addr(request),
+        )
+    return {"item": incident}
+
+
+@app.get("/api/notifications/outbox")
+def notification_outbox(
+    _: AdminUser,
+    status: str = Query("all", pattern="^(all|pending|sending|delivered|dead|cancelled)$"),
+    destination: str = Query("all", max_length=128),
+    query: str = Query("", alias="q", max_length=200),
+    limit: int = Query(50, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+) -> dict[str, Any]:
+    store = StateStore(runtime.state_db)
+    try:
+        return store.notifications(
+            status=status,
+            destination=destination,
+            query=query,
+            limit=limit,
+            offset=offset,
+        )
+    finally:
+        store.connection.close()
+
+
+def mutate_notification_outbox(
+    action: str,
+    ids: list[int],
+    request: Request,
+    user: dict[str, Any],
+) -> dict[str, Any]:
+    store = StateStore(runtime.state_db)
+    try:
+        before = [store.notification(notification_id) for notification_id in ids]
+        if action == "retry":
+            updated = store.retry_notifications(ids)
+        elif action == "cancel":
+            updated = store.cancel_notifications(ids)
+        else:
+            raise ValueError("unsupported notification action")
+        after = [store.notification(notification_id) for notification_id in ids]
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    finally:
+        store.connection.close()
+    if runtime.settings is not None:
+        runtime.settings.record_audit(
+            str(user["username"]),
+            f"notification.{action}",
+            ",".join(str(notification_id) for notification_id in ids),
+            [{"id": item["id"], "status": item["status"], "attempts": item["attempts"]} for item in before],
+            [{"id": item["id"], "status": item["status"], "attempts": item["attempts"]} for item in after],
+            runtime.remote_addr(request),
+        )
+    return {"updated": updated, "items": after}
+
+
+@app.post("/api/notifications/outbox/retry")
+def retry_notification_batch(
+    payload: NotificationIdsPayload,
+    request: Request,
+    user: AdminUser,
+) -> dict[str, Any]:
+    return mutate_notification_outbox("retry", payload.ids, request, user)
+
+
+@app.post("/api/notifications/outbox/cancel")
+def cancel_notification_batch(
+    payload: NotificationIdsPayload,
+    request: Request,
+    user: AdminUser,
+) -> dict[str, Any]:
+    return mutate_notification_outbox("cancel", payload.ids, request, user)
+
+
+@app.post("/api/notifications/outbox/{notification_id}/retry")
+def retry_notification(
+    notification_id: int,
+    request: Request,
+    user: AdminUser,
+) -> dict[str, Any]:
+    return mutate_notification_outbox("retry", [notification_id], request, user)
+
+
+@app.post("/api/notifications/outbox/{notification_id}/cancel")
+def cancel_notification(
+    notification_id: int,
+    request: Request,
+    user: AdminUser,
+) -> dict[str, Any]:
+    return mutate_notification_outbox("cancel", [notification_id], request, user)
 
 
 @app.get("/api/settings")

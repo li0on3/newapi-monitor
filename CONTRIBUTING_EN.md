@@ -13,7 +13,10 @@ python -m pip install -r requirements.txt
 python -m unittest discover -s tests -v
 cd web
 bun install --frozen-lockfile
+bun run test
 bun run build
+bun run test:e2e
+bun run test:e2e:fullstack
 ```
 
 ## Change Requirements
