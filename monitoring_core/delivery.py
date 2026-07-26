@@ -28,11 +28,17 @@ class AlertPublisher:
             return []
         subject = "；".join(event.title for event in notifiable)
         body = "\n\n".join(f"[{event.title}]\n{event.body}" for event in notifiable)
+        priorities = {"info": 0, "warning": 1, "critical": 2}
+        priority = max(
+            (str(event.severity) for event in notifiable),
+            key=lambda value: priorities.get(value, 0),
+        )
         return self.store.enqueue_notifications(
             subject,
             body,
             self.destinations,
             incident_ids=incident_ids,
+            priority=priority,
             now=now,
         )
 
@@ -49,23 +55,38 @@ class AlertPublisher:
             body,
             self.destinations,
             incident_ids=(),
+            priority="info",
             now=now,
         )
 
 
 class NotificationOutboxWorker:
-    def __init__(self, store: Any, dispatcher: Any, max_attempts: int = 8):
+    def __init__(
+        self,
+        store: Any,
+        dispatcher: Any,
+        max_attempts: int = 8,
+        quiet_until: Any | None = None,
+    ):
         self.store = store
         self.dispatcher = dispatcher
         self.max_attempts = max(1, int(max_attempts))
+        self.quiet_until = quiet_until
 
     def run_once(self, now: int | None = None, limit: int = 20) -> dict[str, int]:
         delivered = 0
         failed = 0
+        deferred = 0
         for item in self.store.claim_due_notifications(now=now, limit=limit):
             notification_id = int(item["id"])
             destination = str(item["destination"])
             attempt = int(item["attempts"])
+            if self.quiet_until is not None:
+                defer_until = self.quiet_until(str(item.get("priority") or "info"), now)
+                if defer_until is not None:
+                    deferred += 1
+                    self.store.defer_notification(notification_id, int(defer_until), now=now)
+                    continue
             try:
                 self.dispatcher.send(
                     str(item["subject"]),
@@ -123,4 +144,7 @@ class NotificationOutboxWorker:
                     ],
                     now=now,
                 )
-        return {"delivered": delivered, "failed": failed}
+        result = {"delivered": delivered, "failed": failed}
+        if deferred:
+            result["deferred"] = deferred
+        return result

@@ -480,7 +480,8 @@ class DashboardRepository:
                 """
                 SELECT id, incident_key, kind, severity, title, body, resolution_body,
                        legacy_cause_missing, status,
-                       started_at, updated_at, resolved_at, last_notified_at, metadata_json
+                       started_at, updated_at, resolved_at, last_notified_at, metadata_json,
+                       acknowledged_at, acknowledged_by, acknowledgement_note
                 FROM incidents
                 ORDER BY CASE status WHEN 'open' THEN 0 ELSE 1 END,
                          updated_at DESC, id DESC

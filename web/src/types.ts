@@ -52,6 +52,10 @@ export type ChannelMonitorConfig = {
   max_output_tokens?: number;
   alert_enabled?: boolean;
   maintenance_mode?: boolean;
+  maintenance_window_enabled?: boolean;
+  maintenance_window_start?: number;
+  maintenance_window_end?: number;
+  maintenance_window_reason?: string;
 };
 
 export type AuthUser = {
@@ -239,6 +243,9 @@ export type Incident = {
   updated_at: number;
   resolved_at: number | null;
   last_notified_at: number;
+  acknowledged_at: number | null;
+  acknowledged_by: string;
+  acknowledgement_note: string;
   metadata?: {
     provider?: string;
     official_id?: string;

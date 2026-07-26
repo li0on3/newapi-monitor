@@ -36,6 +36,8 @@ Every screenshot below is generated from the built-in synthetic demo dataset. It
 - Queries quota, model restrictions, and recent calls by API key without persisting the key or putting it in URLs or audit records.
 - Alerts when 3 of the latest 5 or 5 of the latest 10 requests exceed the latency threshold; a single critical sample can alert immediately.
 - Persists alerts to a SQLite delivery outbox before sending them independently to each destination. Failed deliveries use exponential backoff, survive process restarts, and become visible dead letters after the configured attempt limit.
+- Gives administrators an Alert Delivery Center with pending, sending, delivered, dead-letter, and cancelled filters, full failure and retry context, single or bulk retry/cancel actions, and dead-letter recovery.
+- Supports incident acknowledgement, global quiet hours, and scheduled per-channel maintenance windows. Quiet hours defer rather than discard messages, and monitoring resumes automatically when maintenance ends.
 - Monitors host CPU, memory, disk, and Docker container status, resource use, restarts, and OOM events.
 - Detects stale collectors so a live dashboard cannot silently hide a stopped collection pipeline.
 - Supports email, WeCom applications, WeCom group bots, Feishu applications, and Feishu group bots with independent delivery and real test alerts.
@@ -89,6 +91,7 @@ Publish `/monitor/` through an HTTPS reverse proxy and forward every nested path
 /monitor/system/providers       Upstream provider settings
 /monitor/system/console         New API page settings
 /monitor/console                Overview
+/monitor/deliveries             Alert Delivery Center (administrators only)
 /monitor/console/analytics      Analytics
 /monitor/console/keys           API keys
 /monitor/console/logs           Usage logs
@@ -185,6 +188,7 @@ bun run test
 bun run build
 bunx playwright install chromium
 bun run test:e2e
+bun run test:e2e:fullstack
 
 cd ..
 docker compose --env-file .env.example config --quiet

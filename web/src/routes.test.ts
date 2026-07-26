@@ -20,6 +20,14 @@ describe('dashboard routes', () => {
     })
   })
 
+  test('routes the administrator delivery center to a stable deep link', () => {
+    expect(readRoute('/monitor/deliveries')).toEqual({
+      tab: 'deliveries',
+      settingsPage: 'status',
+      consolePage: 'overview',
+    })
+  })
+
   test('routes each customer console page to a stable deep link', () => {
     expect(readRoute('/monitor/console')).toEqual({
       tab: 'console',

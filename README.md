@@ -35,6 +35,8 @@
 - 支持按 API Key 即时查询真实额度、模型限制和最近调用详情；Key 仅在单次请求内存中转发，不落库、不进入 URL 和配置审计。
 - 最近 5 次中 3 次或最近 10 次中 5 次超过慢请求阈值时告警；单次超过严重阈值立即告警。
 - 告警先持久化到 SQLite 投递队列，再按通知渠道独立发送；失败自动指数退避重试，进程重启不会丢失，超过尝试上限进入死信并触发平台自检降级。
+- 管理员可在告警投递中心按待投递、发送中、已送达、死信和已取消筛选，查看失败原因、尝试次数与下次重试时间，并执行单条/批量重试、取消和死信恢复。
+- 支持事件确认、全局静默时段和按渠道设置计划维护窗口；静默只延后投递，维护窗口结束后自动恢复探测与告警。
 - 宿主机 CPU、内存、磁盘以及 Docker 容器资源、状态、重启和 OOM 监控。
 - 渠道、日志、资源和渠道同步采集器的新鲜度自检，防止“监控页面还活着但数据已经停止更新”。
 - 邮件、企业微信自建应用、企业微信群机器人、飞书自建应用和飞书群机器人多渠道通知；单个渠道故障不阻断其他渠道，支持页面配置与真实测试。
@@ -99,6 +101,7 @@ sudo monitorctl reset-admin
 /monitor/logs                   使用日志
 /monitor/resources              机器资源
 /monitor/incidents              事件
+/monitor/deliveries             告警投递中心（仅管理员）
 /monitor/channels               渠道配置
 /monitor/upstream-status        OpenAI 官方状态
 /monitor/system                 系统配置
@@ -225,6 +228,7 @@ bun run test
 bun run build
 bunx playwright install chromium
 bun run test:e2e
+bun run test:e2e:fullstack
 
 cd ..
 docker compose --env-file .env.example config --quiet

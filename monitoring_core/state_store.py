@@ -16,6 +16,7 @@ from monitoring_core.alerting import (
     is_channel_test_log,
     summarize_logs,
 )
+from monitoring_core.policies import channel_maintenance_state
 
 class StateStore:
     def __init__(self, path: str):
@@ -110,7 +111,10 @@ class StateStore:
                 updated_at INTEGER NOT NULL,
                 resolved_at INTEGER,
                 last_notified_at INTEGER NOT NULL,
-                metadata_json TEXT NOT NULL DEFAULT '{}'
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                acknowledged_at INTEGER,
+                acknowledged_by TEXT NOT NULL DEFAULT '',
+                acknowledgement_note TEXT NOT NULL DEFAULT ''
             );
             CREATE INDEX IF NOT EXISTS idx_incident_status_time ON incidents(status, updated_at);
             CREATE INDEX IF NOT EXISTS idx_incident_key ON incidents(incident_key, id);
@@ -129,7 +133,8 @@ class StateStore:
                 last_error TEXT NOT NULL DEFAULT '',
                 created_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL,
-                delivered_at INTEGER
+                delivered_at INTEGER,
+                priority TEXT NOT NULL DEFAULT 'info'
             );
             CREATE INDEX IF NOT EXISTS idx_notification_outbox_due
                 ON notification_outbox(status, next_attempt_at, id);
@@ -177,6 +182,21 @@ class StateStore:
         if "metadata_json" not in incident_columns:
             self.connection.execute(
                 "ALTER TABLE incidents ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}'"
+            )
+        for column, declaration in (
+            ("acknowledged_at", "INTEGER"),
+            ("acknowledged_by", "TEXT NOT NULL DEFAULT ''"),
+            ("acknowledgement_note", "TEXT NOT NULL DEFAULT ''"),
+        ):
+            if column not in incident_columns:
+                self.connection.execute(f"ALTER TABLE incidents ADD COLUMN {column} {declaration}")
+        outbox_columns = {
+            str(row["name"])
+            for row in self.connection.execute("PRAGMA table_info(notification_outbox)").fetchall()
+        }
+        if "priority" not in outbox_columns:
+            self.connection.execute(
+                "ALTER TABLE notification_outbox ADD COLUMN priority TEXT NOT NULL DEFAULT 'info'"
             )
         self.connection.commit()
 
@@ -499,6 +519,7 @@ class StateStore:
         body: str,
         destinations: Iterable[str],
         incident_ids: Iterable[int] = (),
+        priority: str = "info",
         now: int | None = None,
     ) -> list[int]:
         timestamp = int(time.time()) if now is None else int(now)
@@ -513,8 +534,8 @@ class StateStore:
                 INSERT INTO notification_outbox(
                     delivery_key, destination, subject, body, incident_ids_json,
                     status, attempts, next_attempt_at, lease_until, last_error,
-                    created_at, updated_at, delivered_at
-                ) VALUES (?, ?, ?, ?, ?, 'pending', 0, ?, NULL, '', ?, ?, NULL)
+                    created_at, updated_at, delivered_at, priority
+                ) VALUES (?, ?, ?, ?, ?, 'pending', 0, ?, NULL, '', ?, ?, NULL, ?)
                 """,
                 (
                     f"{batch_key}:{destination}",
@@ -525,6 +546,7 @@ class StateStore:
                     timestamp,
                     timestamp,
                     timestamp,
+                    priority if priority in {"info", "warning", "critical"} else "info",
                 ),
             )
             notification_ids.append(int(cursor.lastrowid))
@@ -592,15 +614,18 @@ class StateStore:
         ).fetchone()
         if row is None:
             return
-        self.connection.execute(
+        cursor = self.connection.execute(
             """
             UPDATE notification_outbox
             SET status = 'delivered', delivered_at = ?, updated_at = ?,
                 lease_until = NULL, last_error = ''
-            WHERE id = ?
+            WHERE id = ? AND status = 'sending'
             """,
             (timestamp, timestamp, int(notification_id)),
         )
+        if cursor.rowcount != 1:
+            self.connection.commit()
+            return
         try:
             incident_ids = [int(item) for item in json.loads(str(row["incident_ids_json"]))]
         except (TypeError, ValueError, json.JSONDecodeError):
@@ -627,7 +652,7 @@ class StateStore:
             UPDATE notification_outbox
             SET status = ?, next_attempt_at = ?, lease_until = NULL,
                 last_error = ?, updated_at = ?
-            WHERE id = ?
+            WHERE id = ? AND status = 'sending'
             """,
             (
                 "dead" if dead else "pending",
@@ -638,6 +663,186 @@ class StateStore:
             ),
         )
         self.connection.commit()
+
+    def notification(self, notification_id: int) -> dict[str, Any]:
+        row = self.connection.execute(
+            "SELECT * FROM notification_outbox WHERE id = ?",
+            (int(notification_id),),
+        ).fetchone()
+        if row is None:
+            raise KeyError("notification not found")
+        return self._notification_dict(row)
+
+    def notifications(
+        self,
+        status: str = "all",
+        destination: str = "all",
+        query: str = "",
+        limit: int = 50,
+        offset: int = 0,
+        now: int | None = None,
+    ) -> dict[str, Any]:
+        timestamp = int(time.time()) if now is None else int(now)
+        allowed_statuses = {"pending", "sending", "delivered", "dead", "cancelled"}
+        if status != "all" and status not in allowed_statuses:
+            raise ValueError("invalid notification status")
+        where: list[str] = []
+        parameters: list[Any] = []
+        if status != "all":
+            where.append("status = ?")
+            parameters.append(status)
+        if destination != "all":
+            where.append("destination = ?")
+            parameters.append(destination)
+        normalized_query = query.strip()
+        if normalized_query:
+            where.append("(subject LIKE ? OR body LIKE ? OR last_error LIKE ? OR delivery_key LIKE ?)")
+            pattern = f"%{normalized_query}%"
+            parameters.extend([pattern, pattern, pattern, pattern])
+        clause = f"WHERE {' AND '.join(where)}" if where else ""
+        page_limit = max(1, min(int(limit), 100))
+        page_offset = max(0, int(offset))
+        total = int(self.connection.execute(
+            f"SELECT COUNT(*) FROM notification_outbox {clause}",
+            parameters,
+        ).fetchone()[0])
+        rows = self.connection.execute(
+            f"SELECT * FROM notification_outbox {clause} ORDER BY updated_at DESC, id DESC LIMIT ? OFFSET ?",
+            [*parameters, page_limit, page_offset],
+        ).fetchall()
+        count_rows = self.connection.execute(
+            "SELECT status, COUNT(*) AS total FROM notification_outbox GROUP BY status"
+        ).fetchall()
+        destination_rows = self.connection.execute(
+            "SELECT DISTINCT destination FROM notification_outbox ORDER BY destination"
+        ).fetchall()
+        counts = {item: 0 for item in allowed_statuses}
+        counts.update({str(row["status"]): int(row["total"]) for row in count_rows})
+        return {
+            "generated_at": timestamp,
+            "total": total,
+            "limit": page_limit,
+            "offset": page_offset,
+            "counts": counts,
+            "destinations": [str(row["destination"]) for row in destination_rows],
+            "items": [self._notification_dict(row) for row in rows],
+        }
+
+    def retry_notifications(self, notification_ids: Iterable[int], now: int | None = None) -> int:
+        timestamp = int(time.time()) if now is None else int(now)
+        ids = self._validated_notification_ids(notification_ids)
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            rows = self._notification_rows(ids)
+            blocked = [str(row["status"]) for row in rows if str(row["status"]) not in {"pending", "dead", "cancelled"}]
+            if blocked:
+                raise ValueError(f"cannot retry notification in {blocked[0]} status")
+            placeholders = ",".join("?" for _ in ids)
+            cursor = self.connection.execute(
+                f"""
+                UPDATE notification_outbox
+                SET status = 'pending', attempts = 0, next_attempt_at = ?, lease_until = NULL,
+                    last_error = '', delivered_at = NULL, updated_at = ?
+                WHERE id IN ({placeholders}) AND status IN ('pending', 'dead', 'cancelled')
+                """,
+                [timestamp, timestamp, *ids],
+            )
+            if cursor.rowcount != len(ids):
+                raise ValueError("notification status changed during retry")
+            self.connection.commit()
+            return int(cursor.rowcount)
+        except Exception:
+            self.connection.rollback()
+            raise
+
+    def cancel_notifications(self, notification_ids: Iterable[int], now: int | None = None) -> int:
+        timestamp = int(time.time()) if now is None else int(now)
+        ids = self._validated_notification_ids(notification_ids)
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            rows = self._notification_rows(ids)
+            blocked = [str(row["status"]) for row in rows if str(row["status"]) not in {"pending", "dead"}]
+            if blocked:
+                raise ValueError(f"cannot cancel notification in {blocked[0]} status")
+            placeholders = ",".join("?" for _ in ids)
+            cursor = self.connection.execute(
+                f"""
+                UPDATE notification_outbox
+                SET status = 'cancelled', lease_until = NULL, updated_at = ?,
+                    last_error = CASE WHEN last_error = '' THEN 'cancelled by administrator' ELSE last_error END
+                WHERE id IN ({placeholders}) AND status IN ('pending', 'dead')
+                """,
+                [timestamp, *ids],
+            )
+            if cursor.rowcount != len(ids):
+                raise ValueError("notification status changed during cancellation")
+            self.connection.commit()
+            return int(cursor.rowcount)
+        except Exception:
+            self.connection.rollback()
+            raise
+
+    def defer_notification(self, notification_id: int, next_attempt_at: int, now: int | None = None) -> None:
+        timestamp = int(time.time()) if now is None else int(now)
+        self.connection.execute(
+            """
+            UPDATE notification_outbox
+            SET status = 'pending', attempts = CASE WHEN attempts > 0 THEN attempts - 1 ELSE 0 END,
+                next_attempt_at = ?, lease_until = NULL, updated_at = ?
+            WHERE id = ? AND status = 'sending'
+            """,
+            (max(timestamp + 1, int(next_attempt_at)), timestamp, int(notification_id)),
+        )
+        self.connection.commit()
+
+    def acknowledge_incident(
+        self,
+        incident_id: int,
+        actor: str,
+        note: str = "",
+        now: int | None = None,
+    ) -> dict[str, Any]:
+        timestamp = int(time.time()) if now is None else int(now)
+        cursor = self.connection.execute(
+            """
+            UPDATE incidents
+            SET acknowledged_at = ?, acknowledged_by = ?, acknowledgement_note = ?
+            WHERE id = ?
+            """,
+            (timestamp, actor.strip()[:128], note.strip()[:1000], int(incident_id)),
+        )
+        if cursor.rowcount != 1:
+            self.connection.rollback()
+            raise KeyError("incident not found")
+        self.connection.commit()
+        row = self.connection.execute("SELECT * FROM incidents WHERE id = ?", (int(incident_id),)).fetchone()
+        return dict(row)
+
+    @staticmethod
+    def _notification_dict(row: sqlite3.Row) -> dict[str, Any]:
+        item = dict(row)
+        try:
+            item["incident_ids"] = [int(value) for value in json.loads(str(item.pop("incident_ids_json")))]
+        except (TypeError, ValueError, json.JSONDecodeError):
+            item["incident_ids"] = []
+        return item
+
+    @staticmethod
+    def _validated_notification_ids(notification_ids: Iterable[int]) -> list[int]:
+        ids = list(dict.fromkeys(int(value) for value in notification_ids if int(value) > 0))
+        if not ids or len(ids) > 100:
+            raise ValueError("provide between 1 and 100 notification IDs")
+        return ids
+
+    def _notification_rows(self, ids: list[int]) -> list[sqlite3.Row]:
+        placeholders = ",".join("?" for _ in ids)
+        rows = self.connection.execute(
+            f"SELECT id, status FROM notification_outbox WHERE id IN ({placeholders})",
+            ids,
+        ).fetchall()
+        if len(rows) != len(ids):
+            raise KeyError("notification not found")
+        return rows
 
     def cancel_disabled_notifications(self, active_destinations: Iterable[str], now: int | None = None) -> int:
         timestamp = int(time.time()) if now is None else int(now)
@@ -708,12 +913,12 @@ class StateStore:
                 continue
             config = dict(settings.get(channel_id) or {})
             enabled = int(channel.get("status") or 0) == 1
-            maintenance = bool(config.get("maintenance_mode"))
+            maintenance, maintenance_reason = channel_maintenance_state(config, now=timestamp)
             alert_enabled = bool(config.get("alert_enabled", True))
             if not enabled:
                 reason = "渠道已在 New API 中禁用，该事件因监控范围变更结束。"
             elif maintenance:
-                reason = "渠道已进入维护模式，该事件因监控范围变更结束。"
+                reason = f"渠道已进入维护状态（{maintenance_reason}），该事件因监控范围变更结束。"
             elif not alert_enabled:
                 reason = "渠道告警已关闭，该事件因监控范围变更结束。"
             else:
@@ -756,15 +961,20 @@ class StateStore:
     def active_channel_ids(
         self,
         channel_settings: dict[int, dict[str, Any]] | None = None,
+        now: int | None = None,
     ) -> set[int]:
         settings = channel_settings or {}
+        timestamp = int(time.time()) if now is None else int(now)
         rows = self.connection.execute(
             "SELECT channel_id FROM channels WHERE status = 1"
         ).fetchall()
         return {
             int(row["channel_id"])
             for row in rows
-            if not bool((settings.get(int(row["channel_id"])) or {}).get("maintenance_mode"))
+            if not channel_maintenance_state(
+                settings.get(int(row["channel_id"])) or {},
+                now=timestamp,
+            )[0]
             and bool((settings.get(int(row["channel_id"])) or {}).get("alert_enabled", True))
         }
 

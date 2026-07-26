@@ -167,6 +167,38 @@ class DashboardApiModelTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             NotificationTestPayload.model_validate({"channel": "unknown"})
 
+    def test_quiet_hours_and_maintenance_windows_are_bounded(self):
+        settings = SettingsUpdatePayload.model_validate(
+            {
+                "notification_quiet_hours_enabled": True,
+                "notification_quiet_hours_start": "22:00",
+                "notification_quiet_hours_end": "08:00",
+                "notification_quiet_hours_timezone": "Asia/Shanghai",
+            }
+        )
+        self.assertTrue(settings.notification_quiet_hours_enabled)
+        with self.assertRaises(ValidationError):
+            SettingsUpdatePayload.model_validate(
+                {
+                    "notification_quiet_hours_start": "22:00",
+                    "notification_quiet_hours_end": "22:00",
+                }
+            )
+        with self.assertRaises(ValidationError):
+            SettingsUpdatePayload.model_validate(
+                {"notification_quiet_hours_timezone": "Invalid/Timezone"}
+            )
+
+        channel = ChannelSettingsPayload.model_validate(
+            {
+                "maintenance_window_enabled": True,
+                "maintenance_window_start": 100,
+                "maintenance_window_end": 200,
+                "maintenance_window_reason": "upstream upgrade",
+            }
+        )
+        self.assertEqual(200, channel.maintenance_window_end)
+
     def test_openai_status_settings_are_bounded(self):
         settings = SettingsUpdatePayload.model_validate(
             {

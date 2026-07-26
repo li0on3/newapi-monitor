@@ -4,6 +4,25 @@
 
 ## Unreleased
 
+## 1.9.0 - 2026-07-26
+
+### Added
+
+- Added an administrator Alert Delivery Center with pending, sending, delivered, dead-letter, and cancelled filters plus full errors, attempt counts, retry schedules, message bodies, and related incidents.
+- Added single and bulk retry, cancellation, and dead-letter recovery with state restrictions, bounded batches, and configuration audit records.
+- Added incident acknowledgement, global quiet hours, and scheduled per-channel maintenance windows. Critical alerts can bypass quiet hours, and probes resume automatically after maintenance.
+- Added real FastAPI + SQLite + React Playwright E2E coverage for login, delivery operations, incident acknowledgement, dynamic settings, and channel maintenance configuration.
+
+### Changed
+
+- Settings now submit only changed fields so inactive notification-channel placeholders cannot block unrelated updates.
+- Delivery records now carry priority, and quiet-hour deferrals return to pending without consuming an attempt.
+
+### Security
+
+- Delivery bodies and failure details are administrator-only. Mutations still require the same-origin request marker and reject sending or delivered records.
+- Retry and cancellation use immediate SQLite transactions and conditional status updates to prevent races with the delivery worker.
+
 ## 1.8.0 - 2026-07-25
 
 ### Added
