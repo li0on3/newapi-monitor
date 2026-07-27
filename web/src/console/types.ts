@@ -69,6 +69,7 @@ export type ConsoleKeyGroupWorkspace = {
   start_timestamp: number
   end_timestamp: number
   days: number
+  all_time: boolean
   quota_per_unit: number
   usage_attribution: 'current_multi_membership'
   summary: { requests: number; quota: number; tokens: number; models: number; keys: number; groups: number }

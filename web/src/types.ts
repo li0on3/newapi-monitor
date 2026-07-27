@@ -20,6 +20,9 @@ export type Channel = {
   history: Observation[];
   availability: {
     window_seconds: number;
+    start_timestamp: number;
+    end_timestamp: number;
+    all_time: boolean;
     total: number;
     successes: number;
     percentage: number | null;

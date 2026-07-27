@@ -1,19 +1,12 @@
 import { ChevronDown, ChevronRight, Download, Filter, Hash, Layers3, RefreshCw, Search, Sigma, Timer } from 'lucide-react'
 import { FormEvent, useCallback, useEffect, useState } from 'react'
 import { getLanguage, t } from '../i18n'
+import { TimeRangeControl } from '../TimeRangeControl'
+import { dateRangeQuery, presetRange, rangeLabel, type TimeRange } from '../time-range'
 import { consoleApi } from './api'
 import { ConsoleBadge, ConsoleEmpty, ConsoleError, ConsoleLoading, ConsoleMetric } from './ConsoleCommon'
 import type { ConsoleLogPage } from './types'
 import { compactNumber, durationText, logsToCsv, quotaText } from './utils'
-
-function dateInput(timestamp: number) {
-  const date = new Date(timestamp * 1000)
-  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
-}
-
-function timestamp(value: string, end = false) {
-  return Math.floor(new Date(`${value}T${end ? '23:59:59' : '00:00:00'}`).getTime() / 1000)
-}
 
 function fullTime(value: number) {
   return new Intl.DateTimeFormat(getLanguage() === 'en' ? 'en-US' : 'zh-CN', {
@@ -27,12 +20,12 @@ function logType(value: number) {
 }
 
 export function ConsoleLogs({ globalScope }: { globalScope: boolean }) {
-  const now = Math.floor(Date.now() / 1000)
   const [filters, setFilters] = useState({
-    startDate: dateInput(now - 6 * 86400), endDate: dateInput(now), logType: '0',
-    username: '', tokenName: '', modelName: '', requestId: '', group: '',
+    logType: '0', username: '', tokenName: '', modelName: '', requestId: '', group: '',
   })
   const [applied, setApplied] = useState(filters)
+  const [range, setRange] = useState<TimeRange>(() => presetRange(7))
+  const [appliedRange, setAppliedRange] = useState(range)
   const [page, setPage] = useState(1)
   const [data, setData] = useState<ConsoleLogPage | null>(null)
   const [error, setError] = useState('')
@@ -45,7 +38,7 @@ export function ConsoleLogs({ globalScope }: { globalScope: boolean }) {
     try {
       setData(await consoleApi.logs({
         page, page_size: 30, log_type: Number(applied.logType),
-        start_timestamp: timestamp(applied.startDate), end_timestamp: timestamp(applied.endDate, true),
+        ...dateRangeQuery(appliedRange),
         username: globalScope ? applied.username.trim() : undefined,
         token_name: applied.tokenName.trim(), model_name: applied.modelName.trim(),
         request_id: applied.requestId.trim(), group: applied.group.trim(),
@@ -56,10 +49,10 @@ export function ConsoleLogs({ globalScope }: { globalScope: boolean }) {
     } finally {
       setLoading(false)
     }
-  }, [applied, globalScope, page])
+  }, [applied, appliedRange, globalScope, page])
 
   useEffect(() => { void load() }, [load])
-  const submit = (event: FormEvent) => { event.preventDefault(); setPage(1); setApplied({ ...filters }) }
+  const submit = (event: FormEvent) => { event.preventDefault(); setPage(1); setApplied({ ...filters }); setAppliedRange(range) }
   const pageCount = Math.max(1, Math.ceil((data?.total || 0) / (data?.page_size || 30)))
 
   const exportCsv = () => {
@@ -76,9 +69,8 @@ export function ConsoleLogs({ globalScope }: { globalScope: boolean }) {
   return <div className="console-page console-logs-page">
     <form className="console-log-filters" onSubmit={submit}>
       <div className="console-filter-title"><Filter size={17} /><span><strong>{t('日志筛选')}</strong><small>{globalScope ? t('支持全局账号与调用维度检索') : t('只查询当前账号的真实调用日志')}</small></span></div>
+      <TimeRangeControl value={range} onChange={setRange} />
       <div className="console-log-filter-grid">
-        <label><span>{t('开始日期')}</span><input type="date" value={filters.startDate} max={filters.endDate} onChange={(event) => setFilters({ ...filters, startDate: event.target.value })} /></label>
-        <label><span>{t('结束日期')}</span><input type="date" value={filters.endDate} min={filters.startDate} onChange={(event) => setFilters({ ...filters, endDate: event.target.value })} /></label>
         <label><span>{t('日志类型')}</span><select value={filters.logType} onChange={(event) => setFilters({ ...filters, logType: event.target.value })}><option value="0">{t('全部')}</option><option value="2">{t('消费')}</option><option value="5">{t('错误')}</option><option value="1">{t('充值')}</option><option value="6">{t('退款')}</option><option value="3">{t('管理')}</option></select></label>
         {globalScope && <label><span>{t('用户名')}</span><input value={filters.username} maxLength={128} placeholder={t('留空查看全部')} onChange={(event) => setFilters({ ...filters, username: event.target.value })} /></label>}
         <label><span>{t('模型')}</span><input value={filters.modelName} maxLength={256} placeholder="gpt-5.4" onChange={(event) => setFilters({ ...filters, modelName: event.target.value })} /></label>
@@ -94,7 +86,7 @@ export function ConsoleLogs({ globalScope }: { globalScope: boolean }) {
       {!data.stat_filters_complete && <div className="console-inline-warning">{t('请求 ID 筛选时聚合指标不可用')}</div>}
       <section className="console-metric-grid console-log-metrics">
         <ConsoleMetric icon={<Layers3 size={19} />} label={t('匹配记录')} value={compactNumber(data.total)} detail={data.scope === 'global' ? t('全局日志') : t('当前账号日志')} tone="blue" />
-        <ConsoleMetric icon={<Sigma size={19} />} label={t('额度消耗')} value={data.stat ? quotaText(data.stat.quota, data.quota_per_unit) : '—'} detail={`${applied.startDate} → ${applied.endDate}`} tone="amber" />
+        <ConsoleMetric icon={<Sigma size={19} />} label={t('额度消耗')} value={data.stat ? quotaText(data.stat.quota, data.quota_per_unit) : '—'} detail={rangeLabel(appliedRange, t('创建至今'))} tone="amber" />
         <ConsoleMetric icon={<Timer size={19} />} label="RPM" value={data.stat ? compactNumber(data.stat.rpm) : '—'} detail={t('筛选范围统计')} tone="green" />
         <ConsoleMetric icon={<Hash size={19} />} label="TPM" value={data.stat ? compactNumber(data.stat.tpm) : '—'} detail={t('筛选范围统计')} />
       </section>

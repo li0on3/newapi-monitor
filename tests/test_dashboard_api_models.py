@@ -341,8 +341,7 @@ class DashboardApiModelTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             SettingsUpdatePayload.model_validate({"console_reveal_attempts_per_minute": 31})
 
-        with self.assertRaises(HTTPException):
-            console_time_range(1, 1 + 30 * 86400 + 1, 1, 7)
+        self.assertEqual((1, 1 + 30 * 86400 + 1), console_time_range(1, 1 + 30 * 86400 + 1, 1, 7))
 
 
 if __name__ == "__main__":

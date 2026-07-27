@@ -26,7 +26,8 @@ export const consoleApi = {
   keys: (filters: Record<string, string | number | undefined>) =>
     api<ConsoleTokenPage>(`console/keys?${queryString(filters)}`),
   keyOptions: () => api<{ models: string[]; groups: string[]; quota_per_unit: number }>('console/keys/options'),
-  keyGroups: (days: number) => api<ConsoleKeyGroupWorkspace>(`console/key-groups?days=${days}`),
+  keyGroups: (filters: Record<string, string | number | undefined>) =>
+    api<ConsoleKeyGroupWorkspace>(`console/key-groups?${queryString(filters)}`),
   createKeyGroup: (payload: { name: string; color: ConsoleKeyGroupColor }) =>
     api<{ item: ConsoleKeyGroupRecord }>('console/key-groups', { method: 'POST', body: JSON.stringify(payload) }),
   updateKeyGroup: (id: number, payload: { name: string; color: ConsoleKeyGroupColor }) =>

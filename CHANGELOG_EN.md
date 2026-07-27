@@ -4,6 +4,16 @@
 
 ## Unreleased
 
+### Added
+
+- Added a shared time-range selector with today, last 7/30/90 days, custom dates, and lifetime “since creation” queries.
+- Usage logs, analytics, key-group usage, monitor logs, host resources, incidents, and alert deliveries now have independent query ranges.
+
+### Changed
+
+- Removed the hard-coded 366-day administrator and 30-day user history caps. Long ranges remain bounded through server pagination or resource bucketing instead of loading every detail row at once.
+- Added historical pagination to monitor logs and automatic time-bucket aggregation to resource history queries.
+
 ## 1.9.0 - 2026-07-26
 
 ### Added

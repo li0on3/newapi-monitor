@@ -43,6 +43,8 @@ import {
   X,
   XCircle,
 } from 'lucide-react';
+import { TimeRangeControl } from './TimeRangeControl';
+import { appendDateRange, presetRange, rangeLabel, type TimeRange } from './time-range';
 import { FormEvent, PointerEvent as ReactPointerEvent, ReactNode, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { api, ApiError } from './api';
@@ -703,7 +705,7 @@ function HistoryBars({ channel }: { channel: Channel }) {
   );
 }
 
-function ChannelCard({ channel, onOpen }: { channel: Channel; onOpen: () => void }) {
+function ChannelCard({ channel, onOpen, availabilityLabel }: { channel: Channel; onOpen: () => void; availabilityLabel: string }) {
   const latest = channel.latest;
   const stale = latest ? Date.now() / 1000 - latest.observed_at > 12 * 60 : true;
   const delayed = Boolean(latest && latest.success && (latest.elapsed_ms > 30_000 || (latest.frt_ms || 0) > 30_000));
@@ -724,7 +726,7 @@ function ChannelCard({ channel, onOpen }: { channel: Channel; onOpen: () => void
         <div><span><Network size={14} />{t("首字响应")}</span><strong>{formatDuration(latest?.frt_ms)}</strong></div>
       </div>
       <div className="availability-row">
-        <div><span>{t("可用率（7天）")}</span><small>{channel.availability.successes}/{channel.availability.total} {t("成功")}</small></div>
+        <div><span>{t('可用率')} · {availabilityLabel}</span><small>{channel.availability.successes}/{channel.availability.total} {t("成功")}</small></div>
         <strong className={tone === 'bad' ? 'text-bad' : tone === 'warn' ? 'text-warn' : 'text-ok'}>{channel.availability.percentage == null ? '—' : `${channel.availability.percentage.toFixed(2)}%`}</strong>
       </div>
       <div className="usage-strip"><span>{t("24H 请求")} <b>{channel.usage_24h.requests}</b></span><span>P95 <b>{channel.usage_24h.p95_seconds.toFixed(2)}s</b></span><span>{t("慢请求")} <b className={channel.usage_24h.slow ? 'text-warn' : ''}>{channel.usage_24h.slow}</b></span></div>
@@ -833,7 +835,7 @@ function ProviderStatusView({ status, summary, onOverview }: { status: ProviderS
   );
 }
 
-function Overview({ summary, channels, onChannel, onProviderStatus, showProviderStatus }: { summary: Summary; channels: Channel[]; onChannel: (channel: Channel) => void; onProviderStatus: () => void; showProviderStatus: boolean }) {
+function Overview({ summary, channels, range, onRange, onChannel, onProviderStatus, showProviderStatus }: { summary: Summary; channels: Channel[]; range: TimeRange; onRange: (range: TimeRange) => void; onChannel: (channel: Channel) => void; onProviderStatus: () => void; showProviderStatus: boolean }) {
   const resourceAge = summary.resources.created_at ? Math.floor(Date.now() / 1000 - summary.resources.created_at) : null;
   return (
     <>
@@ -843,9 +845,9 @@ function Overview({ summary, channels, onChannel, onProviderStatus, showProvider
         <MetricCard icon={<AlertTriangle />} label={t("慢请求")} value={`${summary.requests.slow}`} detail={`${t('总耗时')} / ${t('首字')} > ${SLOW_SECONDS}s · ${summary.requests.slow_ratio.toFixed(1)}%`} tone={summary.requests.slow ? 'warn' : 'ok'} />
         <MetricCard icon={<Server />} label={t("机器资源")} value={`MEM ${formatPercent(summary.resources.system_memory)}`} detail={resourceAge == null ? t('等待资源样本') : `${resourceAge}s ${t('前更新')} · DISK ${formatPercent(summary.resources.system_disk)}`} tone={(summary.resources.system_memory || 0) > 85 ? 'bad' : 'neutral'} />
       </section>
-      <div className="section-heading channel-section-heading"><div><span className="eyebrow">LIVE CHANNEL MATRIX</span><h2>{t("渠道运行状态")}</h2></div><div className="channel-heading-aside">{showProviderStatus && summary.provider_status && <ProviderStatusHint status={summary.provider_status} onOpen={onProviderStatus} />}<div className="legend"><span><i className="legend-ok" />{t("正常")}</span><span><i className="legend-warn" />{t("延迟")}</span><span><i className="legend-bad" />{t("异常")}</span></div></div></div>
+      <div className="section-heading channel-section-heading"><div><span className="eyebrow">LIVE CHANNEL MATRIX</span><h2>{t("渠道运行状态")}</h2><TimeRangeControl compact value={range} onChange={onRange} /></div><div className="channel-heading-aside">{showProviderStatus && summary.provider_status && <ProviderStatusHint status={summary.provider_status} onOpen={onProviderStatus} />}<div className="legend"><span><i className="legend-ok" />{t("正常")}</span><span><i className="legend-warn" />{t("延迟")}</span><span><i className="legend-bad" />{t("异常")}</span></div></div></div>
       <section className="channel-grid">
-        {channels.map((channel) => <ChannelCard key={channel.channel_id} channel={channel} onOpen={() => onChannel(channel)} />)}
+        {channels.map((channel) => <ChannelCard key={channel.channel_id} channel={channel} availabilityLabel={rangeLabel(range, t('创建至今'))} onOpen={() => onChannel(channel)} />)}
         {!channels.length && <div className="empty-state"><Database size={28} /><strong>{t("等待渠道同步")}</strong><span>{t("首次状态同步完成后将在这里展示可用渠道。")}</span></div>}
       </section>
     </>
@@ -860,11 +862,15 @@ function LogsView({ channels }: { channels: Channel[] }) {
   const [model, setModel] = useState('');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [range, setRange] = useState<TimeRange>(() => presetRange(7));
+  const [page, setPage] = useState(0);
+  const pageSize = 200;
 
   const load = useCallback(async () => {
     setLoading(true);
     setError('');
-    const params = new URLSearchParams({ limit: '200', slow_only: String(slowOnly) });
+    const params = new URLSearchParams({ limit: String(pageSize), offset: String(page * pageSize), slow_only: String(slowOnly) });
+    appendDateRange(params, range);
     if (channelId) params.set('channel_id', channelId);
     if (model.trim()) params.set('model_name', model.trim());
     try {
@@ -876,13 +882,16 @@ function LogsView({ channels }: { channels: Channel[] }) {
     } finally {
       setLoading(false);
     }
-  }, [channelId, model, slowOnly]);
+  }, [channelId, model, page, range, slowOnly]);
+
+  useEffect(() => { setPage(0); }, [channelId, model, range, slowOnly]);
 
   useEffect(() => { void load(); }, [load]);
   return (
     <section>
       <div className="section-heading"><div><span className="eyebrow">REAL CONSUMPTION LOGS</span><h2>{t("真实使用日志耗时")}</h2></div><span className="source-note">{t("仅保存耗时元数据，不保存提示词或响应正文")}</span></div>
       <div className="filter-bar">
+        <TimeRangeControl value={range} onChange={setRange} />
         <label><span>{t("渠道")}</span><select value={channelId} onChange={(event) => setChannelId(event.target.value)}><option value="">{t("全部渠道")}</option>{channels.map((channel) => <option key={channel.channel_id} value={channel.channel_id}>{channel.name}</option>)}</select></label>
         <label><span>{t("模型精确匹配")}</span><div className="filter-input"><Search size={15} /><input value={model} onChange={(event) => setModel(event.target.value)} placeholder={t("例如 gpt-5.6-sol")} /></div></label>
         <label className="check-label"><input type="checkbox" checked={slowOnly} onChange={(event) => setSlowOnly(event.target.checked)} /><span>{t("只看超过 60 秒")}</span></label>
@@ -890,7 +899,7 @@ function LogsView({ channels }: { channels: Channel[] }) {
       </div>
       {error && <div className="inline-error"><AlertTriangle size={16} />{error}</div>}
       <div className="table-shell">
-        <div className="table-meta">{t("匹配")} {total} {t("条，显示最近")} {items.length} {t("条")}</div>
+        <div className="table-meta">{t("匹配")} {total} {t("条，当前页")} {items.length} {t("条")}</div>
         <div className="table-scroll"><table><thead><tr><th>{t("时间")}</th><th>{t("渠道 / 模型")}</th><th>{t("用户 / 令牌")}</th><th>{t("总耗时")}</th><th>{t("首字")}</th><th>{t("模式")}</th><th>{t("请求 ID")}</th></tr></thead><tbody>
           {items.map((item) => {
             const slow = item.use_time > SLOW_SECONDS || (item.frt_ms || 0) > SLOW_SECONDS * 1000;
@@ -898,6 +907,7 @@ function LogsView({ channels }: { channels: Channel[] }) {
           })}
           {!loading && !items.length && <tr><td colSpan={7}><div className="empty-row">{t("当前筛选条件下暂无日志")}</div></td></tr>}
         </tbody></table></div>
+        <div className="console-pagination"><span>{page + 1} / {Math.max(1, Math.ceil(total / pageSize))}</span><div><button type="button" disabled={page === 0 || loading} onClick={() => setPage((value) => Math.max(0, value - 1))}>{t('上一页')}</button><button type="button" disabled={(page + 1) * pageSize >= total || loading} onClick={() => setPage((value) => value + 1)}>{t('下一页')}</button></div></div>
       </div>
     </section>
   );
@@ -1043,17 +1053,18 @@ function MetricChart({ samples, field, color, label, description, threshold, ico
 function ResourcesView() {
   const [samples, setSamples] = useState<ResourceSample[]>([]);
   const [error, setError] = useState('');
-  const [hours, setHours] = useState(24);
+  const [range, setRange] = useState<TimeRange>(() => presetRange(1));
   const [loading, setLoading] = useState(false);
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const payload = await api<{ samples: ResourceSample[] }>(`resources?hours=${hours}`);
+      const parameters = appendDateRange(new URLSearchParams(), range);
+      const payload = await api<{ samples: ResourceSample[] }>(`resources?${parameters.toString()}`);
       setSamples(payload.samples);
       setError('');
     } catch (requestError) { setError(requestError instanceof Error ? requestError.message : t('资源加载失败')); }
     finally { setLoading(false); }
-  }, [hours]);
+  }, [range]);
   useEffect(() => { void load(); const timer = window.setInterval(() => void load(), REFRESH_SECONDS * 1000); return () => window.clearInterval(timer); }, [load]);
   const latest = samples[samples.length - 1];
   const containers = latest?.containers || {};
@@ -1062,7 +1073,7 @@ function ResourcesView() {
   const resourceLabel = resourceTone === 'bad' ? t('资源压力较高') : resourceTone === 'warn' ? t('资源需要关注') : t('资源运行平稳');
   return (
     <section>
-      <div className="section-heading resource-heading"><div><span className="eyebrow">HOST & CONTAINER TELEMETRY</span><h2>{t("机器资源")}</h2></div><div className="resource-controls"><span className="source-note"><i className={loading ? 'source-pulse source-pulse-loading' : 'source-pulse'} />{t("15 秒采样 ·")} {samples.length} {t("个数据点")}</span><div className="segmented range-switch" aria-label={t("资源趋势时间范围")}>{[1, 6, 24].map((value) => <button key={value} className={hours === value ? 'active' : ''} onClick={() => setHours(value)}>{value}H</button>)}</div></div></div>
+      <div className="section-heading resource-heading"><div><span className="eyebrow">HOST & CONTAINER TELEMETRY</span><h2>{t("机器资源")}</h2></div><div className="resource-controls"><span className="source-note"><i className={loading ? 'source-pulse source-pulse-loading' : 'source-pulse'} />{t("15 秒采样 ·")} {samples.length} {t("个数据点")}</span><TimeRangeControl compact value={range} onChange={setRange} /></div></div>
       {error && <div className="inline-error"><AlertTriangle size={16} />{error}</div>}
       <div className={`resource-insight resource-insight-${resourceTone}`}><div className="resource-insight-mark"><Activity size={22} /></div><div><span>RESOURCE SIGNAL</span><strong>{resourceLabel}</strong><small>{latest ? t('最后采样 {{time}}', { time: formatFullTime(latest.created_at) }) : t('正在等待第一批资源样本')}</small></div><div className="resource-insight-score"><span>{t("最高负载")}</span><strong>{latest ? `${highest.toFixed(1)}%` : '—'}</strong></div></div>
       <div className="metrics-grid resource-metrics"><MetricCard icon={<Cpu />} label="CPU" value={formatPercent(latest?.system_cpu)} detail={t("告警阈值 85%")} tone={(latest?.system_cpu || 0) > 85 ? 'bad' : 'neutral'} /><MetricCard icon={<MemoryStick />} label={t("内存")} value={formatPercent(latest?.system_memory)} detail={t('可用 {{value}} GB', { value: latest?.system_available_mb ? (latest.system_available_mb / 1024).toFixed(2) : '—' })} tone={(latest?.system_memory || 0) > 85 ? 'bad' : 'neutral'} /><MetricCard icon={<HardDrive />} label={t("系统盘")} value={formatPercent(latest?.system_disk)} detail={t("告警阈值 80%")} tone={(latest?.system_disk || 0) > 80 ? 'bad' : 'neutral'} /><MetricCard icon={<CircleGauge />} label="Swap" value={formatPercent(latest?.system_swap)} detail={t('最后采样 {{time}}', { time: formatTime(latest?.created_at || 0) })} /></div>
@@ -1106,7 +1117,7 @@ function IncidentsView() {
   const [status, setStatus] = useState<'all' | 'open' | 'resolved'>('all');
   const [severity, setSeverity] = useState('all');
   const [category, setCategory] = useState('all');
-  const [windowHours, setWindowHours] = useState(168);
+  const [range, setRange] = useState<TimeRange>(() => presetRange(7));
   const [search, setSearch] = useState('');
   const [query, setQuery] = useState('');
   const [page, setPage] = useState(0);
@@ -1122,7 +1133,7 @@ function IncidentsView() {
     const timer = window.setTimeout(() => setQuery(search.trim()), 250);
     return () => window.clearTimeout(timer);
   }, [search]);
-  useEffect(() => { setPage(0); }, [status, severity, category, windowHours, query]);
+  useEffect(() => { setPage(0); }, [status, severity, category, range, query]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -1130,10 +1141,10 @@ function IncidentsView() {
       status,
       severity,
       category,
-      window_hours: String(windowHours),
       limit: String(pageSize),
       offset: String(page * pageSize),
     });
+    appendDateRange(parameters, range);
     if (query) parameters.set('q', query);
     try {
       const payload = await api<IncidentPayload>(`incidents?${parameters.toString()}`);
@@ -1146,7 +1157,7 @@ function IncidentsView() {
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : t('事件加载失败'));
     } finally { setLoading(false); }
-  }, [category, page, query, severity, status, windowHours]);
+  }, [category, page, query, range, severity, status]);
 
   useEffect(() => {
     void load();
@@ -1159,7 +1170,7 @@ function IncidentsView() {
     setStatus('all');
     setSeverity('all');
     setCategory('all');
-    setWindowHours(168);
+    setRange(presetRange(7));
     setSearch('');
     setQuery('');
   };
@@ -1200,7 +1211,7 @@ function IncidentsView() {
         <div className="segmented incident-status-filter" aria-label={t("事件状态")}>{([['all', t('全部')], ['open', t('未恢复')], ['resolved', t('已恢复')]] as const).map(([value, label]) => <button key={value} className={status === value ? 'active' : ''} onClick={() => setStatus(value)}>{label}</button>)}</div>
         <label><span>{t("级别")}</span><select value={severity} onChange={(event) => setSeverity(event.target.value)}><option value="all">{t("全部级别")}</option><option value="critical">{t("严重")}</option><option value="warning">{t("警告")}</option><option value="info">{t("信息")}</option></select></label>
         <label><span>{t("类型")}</span><select value={category} onChange={(event) => setCategory(event.target.value)}>{Object.entries(INCIDENT_CATEGORIES).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
-        <label><span>{t("时间范围")}</span><select value={windowHours} onChange={(event) => setWindowHours(Number(event.target.value))}><option value={24}>{t("最近 24 小时")}</option><option value={168}>{t("最近 7 天")}</option><option value={720}>{t("最近 30 天")}</option><option value={0}>{t("全部历史")}</option></select></label>
+        <TimeRangeControl compact value={range} onChange={setRange} />
         <button className="incident-clear" onClick={clearFilters}><X size={14} />{t("重置")}</button>
       </div>
 
@@ -1260,6 +1271,7 @@ export default function App() {
   const [route, setRoute] = useState<AppRoute>(() => readRoute());
   const [summary, setSummary] = useState<Summary | null>(null);
   const [channels, setChannels] = useState<Channel[]>([]);
+  const [overviewRange, setOverviewRange] = useState<TimeRange>(() => presetRange(7));
   const [selectedChannel, setSelectedChannel] = useState<Channel | null>(null);
   const [error, setError] = useState('');
   const [refreshing, setRefreshing] = useState(false);
@@ -1302,7 +1314,8 @@ export default function App() {
   const loadCore = useCallback(async () => {
     setRefreshing(true);
     try {
-      const [summaryPayload, channelPayload] = await Promise.all([api<Summary>('dashboard/summary'), api<{ items: Channel[] }>('channels')]);
+      const channelParameters = appendDateRange(new URLSearchParams(), overviewRange);
+      const [summaryPayload, channelPayload] = await Promise.all([api<Summary>('dashboard/summary'), api<{ items: Channel[] }>(`channels?${channelParameters.toString()}`)]);
       setSummary(summaryPayload);
       const enabledChannels = channelPayload.items.filter((channel) => channel.enabled);
       setChannels(enabledChannels);
@@ -1315,7 +1328,7 @@ export default function App() {
       if (requestError instanceof ApiError && requestError.status === 401) setAuthState('guest');
       else setError(requestError instanceof Error ? requestError.message : t('监控数据加载失败'));
     } finally { setRefreshing(false); }
-  }, [refreshSeconds]);
+  }, [overviewRange, refreshSeconds]);
 
   useEffect(() => { if (authState !== 'ready' || tab === 'console' || (!elevated && tab !== 'overview')) return; void loadCore(); const timer = window.setInterval(() => void loadCore(), refreshSeconds * 1000); return () => window.clearInterval(timer); }, [authState, elevated, loadCore, refreshSeconds, tab]);
   useEffect(() => { if (authState !== 'ready') return; const timer = window.setInterval(() => setCountdown((value) => value <= 1 ? refreshSeconds : value - 1), 1000); return () => window.clearInterval(timer); }, [authState, refreshSeconds]);
@@ -1393,7 +1406,7 @@ export default function App() {
         <div className="app-canvas">
           <main className="content">{tab === 'console' && user?.console_available ? <ConsoleShell page={route.consolePage} pages={user.console_pages || {}} globalScope={Boolean(user.console_global_scope)} customerView={customerView} onNavigate={(consolePage) => navigate({ tab: 'console', settingsPage: 'status', consolePage })} /> : <><section className="hero"><div><div className="eyebrow">OPERATIONS / REAL-TIME</div><h1>{t("服务运行态势")}</h1><p>{t("真实渠道探测、真实消费日志、主机与容器资源。")}</p></div><div className={`overall-status overall-${overall.tone}`}><span className="status-beacon" /><div><small>OVERALL STATUS</small><strong>{overall.label}</strong></div><span>{summary ? formatTime(summary.generated_at) : t('同步中')}</span></div></section>
             {error && <div className="inline-error"><AlertTriangle size={16} />{error}<button onClick={() => void loadCore()}>{t("重试")}</button></div>}
-            {summary ? <>{tab === 'overview' && <Overview summary={summary} channels={channels} onChannel={setSelectedChannel} showProviderStatus={elevated} onProviderStatus={() => navigate({ tab: 'providerStatus', settingsPage: 'status', consolePage: 'overview' })} />}{tab === 'providerStatus' && summary.provider_status && <ProviderStatusView status={summary.provider_status} summary={summary} onOverview={() => navigate({ tab: 'overview', settingsPage: 'status', consolePage: 'overview' })} />}{tab === 'providerStatus' && !summary.provider_status && <div className="empty-state provider-unavailable"><Cloud size={28} /><strong>{t('官方状态当前不可见')}</strong><span>{t('该功能可能已关闭，或当前角色没有查看权限。')}</span><button className="secondary-button" type="button" onClick={() => navigate({ tab: 'overview', settingsPage: 'status', consolePage: 'overview' })}>{t('返回渠道总览')}</button></div>}{tab === 'keyUsage' && user?.key_usage_available && <KeyUsageView />}{tab === 'logs' && elevated && <LogsView channels={channels} />}{tab === 'resources' && elevated && <ResourcesView />}{tab === 'incidents' && elevated && <IncidentsView />}{tab === 'deliveries' && user?.role === 'admin' && <DeliveriesView />}{tab === 'channels' && elevated && <ChannelSettingsView />}{tab === 'settings' && user?.role === 'admin' && <SettingsView activePage={route.settingsPage} onActivePageChange={(settingsPage) => navigate({ tab: 'settings', settingsPage, consolePage: 'overview' })} />}</> : <div className="loading-panel"><RefreshCw className="spin" /><span>{t("正在读取第一批监控数据")}</span></div>}</>}
+            {summary ? <>{tab === 'overview' && <Overview summary={summary} channels={channels} range={overviewRange} onRange={setOverviewRange} onChannel={setSelectedChannel} showProviderStatus={elevated} onProviderStatus={() => navigate({ tab: 'providerStatus', settingsPage: 'status', consolePage: 'overview' })} />}{tab === 'providerStatus' && summary.provider_status && <ProviderStatusView status={summary.provider_status} summary={summary} onOverview={() => navigate({ tab: 'overview', settingsPage: 'status', consolePage: 'overview' })} />}{tab === 'providerStatus' && !summary.provider_status && <div className="empty-state provider-unavailable"><Cloud size={28} /><strong>{t('官方状态当前不可见')}</strong><span>{t('该功能可能已关闭，或当前角色没有查看权限。')}</span><button className="secondary-button" type="button" onClick={() => navigate({ tab: 'overview', settingsPage: 'status', consolePage: 'overview' })}>{t('返回渠道总览')}</button></div>}{tab === 'keyUsage' && user?.key_usage_available && <KeyUsageView />}{tab === 'logs' && elevated && <LogsView channels={channels} />}{tab === 'resources' && elevated && <ResourcesView />}{tab === 'incidents' && elevated && <IncidentsView />}{tab === 'deliveries' && user?.role === 'admin' && <DeliveriesView />}{tab === 'channels' && elevated && <ChannelSettingsView />}{tab === 'settings' && user?.role === 'admin' && <SettingsView activePage={route.settingsPage} onActivePageChange={(settingsPage) => navigate({ tab: 'settings', settingsPage, consolePage: 'overview' })} />}</> : <div className="loading-panel"><RefreshCw className="spin" /><span>{t("正在读取第一批监控数据")}</span></div>}</>}
           </main>
           <footer><span>{customerView ? t('数据源：真实调用、渠道探测与资源采集') : <>{t("数据源：New API 管理接口 / 真实 Relay 请求 / Linux")} & Docker / OpenAI Status</>}</span><span>{t("告警阈值：总耗时或首字")} &gt; {t("60s，3/5 或 5/10 触发")}</span></footer>
         </div>

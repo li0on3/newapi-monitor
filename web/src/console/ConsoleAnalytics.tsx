@@ -1,41 +1,30 @@
 import { BarChart3, CircleDollarSign, Filter, Layers3, RefreshCw, Sigma, Users } from 'lucide-react'
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { t } from '../i18n'
+import { TimeRangeControl } from '../TimeRangeControl'
+import { dateRangeQuery, presetRange, rangeLabel, type TimeRange } from '../time-range'
 import { AnalyticsTrendChart } from './AnalyticsTrendChart'
 import { consoleApi } from './api'
 import { ConsoleBadge, ConsoleEmpty, ConsoleError, ConsoleLoading, ConsoleMetric } from './ConsoleCommon'
 import type { ConsoleAnalytics as ConsoleAnalyticsData } from './types'
 import { compactNumber, quotaText } from './utils'
 
-function dateInput(timestamp: number) {
-  const date = new Date(timestamp * 1000)
-  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
-}
-
-function startOfDay(value: string) {
-  return Math.floor(new Date(`${value}T00:00:00`).getTime() / 1000)
-}
-
 export function ConsoleAnalytics({ globalScope }: { globalScope: boolean }) {
-  const now = Math.floor(Date.now() / 1000)
-  const [startDate, setStartDate] = useState(dateInput(now - 6 * 86400))
-  const [endDate, setEndDate] = useState(dateInput(now))
+  const [range, setRange] = useState<TimeRange>(() => presetRange(7))
   const [username, setUsername] = useState('')
   const [data, setData] = useState<ConsoleAnalyticsData | null>(null)
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
   const requestSequence = useRef(0)
 
-  const load = useCallback(async (range?: { startDate: string; endDate: string }) => {
+  const load = useCallback(async (requestedRange?: TimeRange) => {
     const requestId = ++requestSequence.current
-    const requestedStart = range?.startDate || startDate
-    const requestedEnd = range?.endDate || endDate
+    const selectedRange = requestedRange || range
     setLoading(true)
     setError('')
     try {
       const response = await consoleApi.analytics({
-        start_timestamp: startOfDay(requestedStart),
-        end_timestamp: startOfDay(requestedEnd) + 86399,
+        ...dateRangeQuery(selectedRange),
         username: globalScope ? username.trim() : undefined,
       })
       if (requestId === requestSequence.current) setData(response)
@@ -44,16 +33,7 @@ export function ConsoleAnalytics({ globalScope }: { globalScope: boolean }) {
     } finally {
       if (requestId === requestSequence.current) setLoading(false)
     }
-  }, [endDate, globalScope, startDate, username])
-
-  const applyRange = (days: number) => {
-    const current = Math.floor(Date.now() / 1000)
-    const nextStart = dateInput(current - (days - 1) * 86400)
-    const nextEnd = dateInput(current)
-    setStartDate(nextStart)
-    setEndDate(nextEnd)
-    void load({ startDate: nextStart, endDate: nextEnd })
-  }
+  }, [globalScope, range, username])
 
   useEffect(() => { void load() }, [])
   const modelRows = useMemo(() => {
@@ -73,13 +53,7 @@ export function ConsoleAnalytics({ globalScope }: { globalScope: boolean }) {
   return <div className="console-page console-analytics-page">
     <form className="console-filter-bar" onSubmit={submit}>
       <div className="console-filter-title"><Filter size={17} /><span><strong>{t('分析范围')}</strong><small>{globalScope ? t('管理员可按用户名筛选全局数据') : t('仅展示当前账号的数据')}</small></span></div>
-      <div className="analytics-range-presets" aria-label={t('快捷日期范围')}>{[1, 7, 30].map((days) => {
-        const current = Math.floor(Date.now() / 1000)
-        const active = startDate === dateInput(current - (days - 1) * 86400) && endDate === dateInput(current)
-        return <button className={active ? 'active' : ''} type="button" aria-pressed={active} disabled={loading && active} key={days} onClick={() => applyRange(days)}>{days === 1 ? t('今天') : t('近 {{days}} 天', { days })}</button>
-      })}</div>
-      <label><span>{t('开始日期')}</span><input type="date" value={startDate} max={endDate} onChange={(event) => setStartDate(event.target.value)} /></label>
-      <label><span>{t('结束日期')}</span><input type="date" value={endDate} min={startDate} onChange={(event) => setEndDate(event.target.value)} /></label>
+      <TimeRangeControl compact value={range} onChange={setRange} />
       {globalScope && <label><span>{t('用户名')}</span><input value={username} maxLength={128} placeholder={t('留空查看全部')} onChange={(event) => setUsername(event.target.value)} /></label>}
       <button className="primary-button console-filter-submit" type="submit" disabled={loading}><RefreshCw className={loading ? 'spin' : ''} size={15} />{t('应用筛选')}</button>
     </form>
@@ -90,7 +64,7 @@ export function ConsoleAnalytics({ globalScope }: { globalScope: boolean }) {
         <ConsoleMetric icon={<BarChart3 size={19} />} label={t('请求数')} value={compactNumber(data.summary.requests)} detail={`${data.summary.models} ${t('个模型')}`} tone="blue" />
         <ConsoleMetric icon={<Sigma size={19} />} label={t('Token 用量')} value={compactNumber(data.summary.tokens)} detail={`TPM ${compactNumber(data.stat.tpm)}`} tone="green" />
         <ConsoleMetric icon={<CircleDollarSign size={19} />} label={t('额度消耗')} value={quotaText(data.summary.quota, data.quota_per_unit)} detail={`RPM ${compactNumber(data.stat.rpm)}`} tone="amber" />
-        <ConsoleMetric icon={<Users size={19} />} label={t('数据范围')} value={data.scope === 'global' ? t('全局') : t('当前账号')} detail={`${dateInput(data.start_timestamp)} → ${dateInput(data.end_timestamp)}`} />
+        <ConsoleMetric icon={<Users size={19} />} label={t('数据范围')} value={range.mode === 'all' ? t('累计/历史总量') : data.scope === 'global' ? t('全局') : t('当前账号')} detail={rangeLabel(range, t('创建至今'))} />
       </section>
 
       <section className="console-panel console-chart-panel">
