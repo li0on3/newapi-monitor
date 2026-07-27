@@ -67,6 +67,13 @@ class NotificationOutboxOperationsTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "delivered"):
             self.store.retry_notifications([pending_id], now=130)
 
+    def test_delivery_history_supports_custom_time_ranges(self):
+        self.store.enqueue_notifications("old", "body", ["email"], now=100)
+        self.store.enqueue_notifications("new", "body", ["email"], now=200)
+        payload = self.store.notifications(start_timestamp=150, end_timestamp=250, now=300)
+        self.assertEqual(1, payload["total"])
+        self.assertEqual("new", payload["items"][0]["subject"])
+
     def test_acknowledge_incident_records_actor_note_and_time(self):
         incident_id = self.store.record_alert_events(
             [newapi_monitor.AlertEvent("channel_failed", "渠道异常", "upstream 502", key="channel:7")],

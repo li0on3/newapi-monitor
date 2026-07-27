@@ -27,6 +27,7 @@ from dashboard_newapi_console import NewAPIConsoleClient, NewAPIConsoleError
 from dashboard_settings import SECRET_KEYS, SettingsStore
 from dashboard_setup import NewAPIProvisioner, SetupError, verify_setup_token
 from dashboard_sso import NewAPISessionVerifier
+from dashboard_time_range import resolve_time_range
 from newapi_monitor import Config, DEFAULT_OPENAI_COMPONENT_NAMES, MonitorApp, NotificationDispatcher, OpenAIStatusClient, StateStore, env_bool, env_int
 
 
@@ -1256,16 +1257,20 @@ def console_time_range(
     end_timestamp: int | None,
     source_role: int,
     default_days: int,
+    all_time: bool = False,
 ) -> tuple[int, int]:
-    now = int(time.time())
-    end = end_timestamp or now
-    start = start_timestamp or end - max(1, min(default_days, 30)) * 86400
-    if start <= 0 or end <= 0 or start > end:
-        raise HTTPException(status_code=422, detail="invalid time range")
-    max_seconds = 366 * 86400 if source_role >= 10 else 30 * 86400
-    if end - start > max_seconds:
-        raise HTTPException(status_code=422, detail="time range is too large")
-    return start, end
+    del source_role
+    try:
+        start, end, _ = resolve_time_range(
+            start_timestamp,
+            end_timestamp,
+            default_seconds=max(1, int(default_days)) * 86400,
+            all_time=all_time,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail="invalid time range") from error
+    # New API treats zero as an omitted filter, so epoch second 1 represents all history.
+    return max(1, start), end
 
 
 def console_rate_limit(
@@ -1339,6 +1344,7 @@ def get_console_analytics(
     start_timestamp: int | None = Query(None, ge=1),
     end_timestamp: int | None = Query(None, ge=1),
     username: str = Query("", max_length=128),
+    all_time: bool = False,
 ) -> dict[str, Any]:
     values = console_values()
     session_cookie, user_id = console_identity(request, user, values, "analytics")
@@ -1350,6 +1356,7 @@ def get_console_analytics(
         end_timestamp,
         source_role,
         int(values.get("console_default_days", 7)),
+        all_time,
     )
     client = console_client(values)
     try:
@@ -1412,12 +1419,20 @@ def get_console_key_options(request: Request, user: AuthenticatedUser) -> dict[s
 def get_console_key_groups(
     request: Request,
     user: AuthenticatedUser,
-    days: int = Query(7, ge=1, le=30),
+    days: int | None = Query(None, ge=1),
+    start_timestamp: int | None = None,
+    end_timestamp: int | None = None,
+    all_time: bool = False,
 ) -> dict[str, Any]:
     values = console_values()
     session_cookie, user_id = console_identity(request, user, values, "keys")
-    end_timestamp = int(time.time())
-    start_timestamp = end_timestamp - days * 86400
+    start_timestamp, end_timestamp = console_time_range(
+        start_timestamp,
+        end_timestamp,
+        int(user.get("source_role") or 0),
+        days or int(values.get("console_default_days", 7)),
+        all_time,
+    )
     client = console_client(values)
     try:
         tokens = client.list_all_tokens(session_cookie, user_id)
@@ -1434,7 +1449,8 @@ def get_console_key_groups(
         start_timestamp=start_timestamp,
         end_timestamp=end_timestamp,
     )
-    result["days"] = days
+    result["days"] = max(1, round((end_timestamp - start_timestamp + 1) / 86400))
+    result["all_time"] = all_time
     result["quota_per_unit"] = quota_per_unit
     return result
 
@@ -1779,6 +1795,7 @@ def get_console_logs(
     log_type: int = Query(0, ge=0, le=7),
     start_timestamp: int | None = Query(None, ge=1),
     end_timestamp: int | None = Query(None, ge=1),
+    all_time: bool = False,
     username: str = Query("", max_length=128),
     token_name: str = Query("", max_length=128),
     model_name: str = Query("", max_length=256),
@@ -1797,6 +1814,7 @@ def get_console_logs(
         end_timestamp,
         source_role,
         int(values.get("console_default_days", 7)),
+        all_time,
     )
     filters = {
         "type": log_type,
@@ -1968,8 +1986,23 @@ def test_openai_provider_status(_: AdminUser) -> dict[str, Any]:
 
 
 @app.get("/api/channels")
-def channels(user: AuthenticatedUser) -> dict[str, Any]:
-    items = repository().channels()
+def channels(
+    user: AuthenticatedUser,
+    start_timestamp: int | None = None,
+    end_timestamp: int | None = None,
+    all_time: bool = False,
+) -> dict[str, Any]:
+    try:
+        start, end, is_all = resolve_time_range(
+            start_timestamp, end_timestamp, default_seconds=7 * 86400, all_time=all_time,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    items = repository().channels(
+        availability_start_timestamp=start,
+        availability_end_timestamp=end,
+        availability_all_time=is_all,
+    )
     if runtime.settings is None:
         if user["role"] == "viewer":
             raise HTTPException(status_code=503, detail="channel visibility settings are unavailable")
@@ -2009,7 +2042,16 @@ def logs(
     model_name: str = Query("", max_length=256),
     username: str = Query("", max_length=128),
     slow_only: bool = False,
+    start_timestamp: int | None = Query(None, ge=1),
+    end_timestamp: int | None = Query(None, ge=1),
+    all_time: bool = False,
 ) -> dict[str, Any]:
+    try:
+        start, end, _ = resolve_time_range(
+            start_timestamp, end_timestamp, default_seconds=7 * 86400, all_time=all_time,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
     return repository().logs(
         limit=limit,
         offset=offset,
@@ -2017,15 +2059,29 @@ def logs(
         model_name=model_name,
         username=username,
         slow_only=slow_only,
+        start_timestamp=start,
+        end_timestamp=end,
     )
 
 
 @app.get("/api/resources")
 def resources(
     _: OperatorUser,
-    hours: int = Query(24, ge=1, le=168),
+    hours: int | None = Query(None, ge=1),
+    start_timestamp: int | None = Query(None, ge=1),
+    end_timestamp: int | None = Query(None, ge=1),
+    all_time: bool = False,
 ) -> dict[str, Any]:
-    return repository().resources(hours=hours)
+    try:
+        start, end, is_all = resolve_time_range(
+            start_timestamp,
+            end_timestamp,
+            default_seconds=(hours or 24) * 3600,
+            all_time=all_time,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    return repository().resources(start_timestamp=start, end_timestamp=end, all_time=is_all)
 
 
 @app.get("/api/incidents")
@@ -2039,15 +2095,29 @@ def incidents(
     ),
     query: str = Query("", alias="q", max_length=200),
     window_hours: int = Query(0, ge=0, le=8760),
+    start_timestamp: int | None = Query(None, ge=1),
+    end_timestamp: int | None = Query(None, ge=1),
+    all_time: bool = False,
     limit: int = Query(50, ge=1, le=100),
     offset: int = Query(0, ge=0),
 ) -> dict[str, Any]:
+    try:
+        start, end, _ = resolve_time_range(
+            start_timestamp,
+            end_timestamp,
+            default_seconds=(window_hours or 24 * 365 * 100) * 3600,
+            all_time=all_time or (not window_hours and start_timestamp is None and end_timestamp is None),
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
     return repository().incidents(
         status=status,
         severity=severity,
         category=category,
         query=query,
         window_hours=window_hours,
+        start_timestamp=start,
+        end_timestamp=end,
         limit=limit,
         offset=offset,
     )
@@ -2094,7 +2164,16 @@ def notification_outbox(
     query: str = Query("", alias="q", max_length=200),
     limit: int = Query(50, ge=1, le=100),
     offset: int = Query(0, ge=0),
+    start_timestamp: int | None = Query(None, ge=1),
+    end_timestamp: int | None = Query(None, ge=1),
+    all_time: bool = False,
 ) -> dict[str, Any]:
+    try:
+        start, end, _ = resolve_time_range(
+            start_timestamp, end_timestamp, default_seconds=30 * 86400, all_time=all_time,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
     store = StateStore(runtime.state_db)
     try:
         return store.notifications(
@@ -2103,6 +2182,8 @@ def notification_outbox(
             query=query,
             limit=limit,
             offset=offset,
+            start_timestamp=start,
+            end_timestamp=end,
         )
     finally:
         store.connection.close()

@@ -21,6 +21,8 @@ import {
 } from 'lucide-react'
 import { FormEvent, useCallback, useEffect, useMemo, useState } from 'react'
 import { getLanguage, t } from '../i18n'
+import { TimeRangeControl } from '../TimeRangeControl'
+import { dateRangeQuery, presetRange, type TimeRange } from '../time-range'
 import { consoleApi } from './api'
 import { ConsoleBadge, ConsoleEmpty, ConsoleError, ConsoleLoading } from './ConsoleCommon'
 import type {
@@ -74,7 +76,7 @@ export function ConsoleKeys() {
   const [data, setData] = useState<ConsoleTokenPage | null>(null)
   const [workspace, setWorkspace] = useState<ConsoleKeyGroupWorkspace | null>(null)
   const [page, setPage] = useState(1)
-  const [usageDays, setUsageDays] = useState(7)
+  const [usageRange, setUsageRange] = useState<TimeRange>(() => presetRange(7))
   const [keyword, setKeyword] = useState('')
   const [query, setQuery] = useState('')
   const [error, setError] = useState('')
@@ -95,7 +97,7 @@ export function ConsoleKeys() {
     setError('')
     const [keyResult, groupResult] = await Promise.allSettled([
       consoleApi.keys({ page, page_size: 20, keyword: query }),
-      consoleApi.keyGroups(usageDays),
+      consoleApi.keyGroups(dateRangeQuery(usageRange)),
     ])
     if (keyResult.status === 'fulfilled') {
       setData(keyResult.value)
@@ -118,7 +120,7 @@ export function ConsoleKeys() {
     else if (keyFailure) setError(t('密钥列表加载失败：{{message}}', { message: keyFailure }))
     else if (groupFailure) setError(t('密钥列表可用，但分组用量加载失败：{{message}}', { message: groupFailure }))
     setLoading(false)
-  }, [page, query, usageDays])
+  }, [page, query, usageRange])
 
   useEffect(() => { void load() }, [load])
   const pageCount = Math.max(1, Math.ceil((data?.total || 0) / (data?.page_size || 20)))
@@ -296,15 +298,15 @@ export function ConsoleKeys() {
     {workspace && <>
       <section className="console-metric-grid key-usage-metrics">
         <article className="console-metric console-metric-green"><span className="console-metric-icon"><KeyRound size={18} /></span><div><small>{t('个人密钥')}</small><strong>{integer(workspace.summary.keys)}</strong><p>{t('当前账号')}</p></div></article>
-        <article className="console-metric console-metric-blue"><span className="console-metric-icon"><Activity size={18} /></span><div><small>{t('{{days}} 天请求', { days: workspace.days })}</small><strong>{integer(workspace.summary.requests)}</strong><p>{t('{{models}} 个调用模型', { models: workspace.summary.models })}</p></div></article>
-        <article className="console-metric console-metric-amber"><span className="console-metric-icon"><Coins size={18} /></span><div><small>{t('{{days}} 天用量', { days: workspace.days })}</small><strong>{quotaText(workspace.summary.quota, quotaUnit)}</strong><p>{t('{{tokens}} Tokens', { tokens: integer(workspace.summary.tokens) })}</p></div></article>
+        <article className="console-metric console-metric-blue"><span className="console-metric-icon"><Activity size={18} /></span><div><small>{workspace.all_time ? t('累计/历史总量') : t('{{days}} 天请求', { days: workspace.days })}</small><strong>{integer(workspace.summary.requests)}</strong><p>{t('{{models}} 个调用模型', { models: workspace.summary.models })}</p></div></article>
+        <article className="console-metric console-metric-amber"><span className="console-metric-icon"><Coins size={18} /></span><div><small>{workspace.all_time ? t('累计/历史总量') : t('{{days}} 天用量', { days: workspace.days })}</small><strong>{quotaText(workspace.summary.quota, quotaUnit)}</strong><p>{t('{{tokens}} Tokens', { tokens: integer(workspace.summary.tokens) })}</p></div></article>
         <article className="console-metric"><span className="console-metric-icon"><Layers3 size={18} /></span><div><small>{t('密钥分组')}</small><strong>{integer(workspace.summary.groups)}</strong><p>{t('{{count}} 个密钥未分组', { count: workspace.ungrouped.key_count })}</p></div></article>
       </section>
 
       <section className="console-panel key-group-overview">
         <div className="console-panel-head key-group-overview-head">
           <div><span className="eyebrow">KEY USAGE GROUPS</span><h3>{t('分组密钥用量')}</h3><p>{t('点击任意分组即可添加或移除密钥；一个密钥可以同时属于多个分组。')}</p></div>
-          <div className="key-group-head-actions"><div className="key-usage-range" aria-label={t('统计周期')}>{[1, 7, 30].map((days) => <button key={days} className={usageDays === days ? 'active' : ''} type="button" onClick={() => setUsageDays(days)}>{days}{t('天')}</button>)}</div><button type="button" onClick={() => setGroupManager(true)}><FolderCog size={14} />{t('管理分组')}</button></div>
+          <div className="key-group-head-actions"><TimeRangeControl compact value={usageRange} onChange={setUsageRange} /><button type="button" onClick={() => setGroupManager(true)}><FolderCog size={14} />{t('管理分组')}</button></div>
         </div>
         <div className="key-group-card-grid">
           <article className="key-group-card key-group-card-slate"><div className="key-group-card-title"><span className="key-group-color-dot" /><div><strong>{t('未分组')}</strong><small>{t('个人或尚未归类的密钥')}</small></div><b>{workspace.ungrouped.key_count}</b></div><div className="key-group-card-usage"><span><small>{t('请求')}</small><strong>{integer(workspace.ungrouped.usage.requests)}</strong></span><span><small>{t('用量')}</small><strong>{quotaText(workspace.ungrouped.usage.quota, quotaUnit)}</strong></span></div></article>
@@ -325,7 +327,7 @@ export function ConsoleKeys() {
     {error && <div className="console-inline-warning">{error}<button type="button" onClick={() => setError('')}><X size={14} /></button></div>}
     {loading && !data ? <ConsoleLoading /> : !data ? <ConsoleError message={error} retry={() => void load()} /> : <section className="console-panel console-table-panel">
       <div className="console-panel-head"><div><span className="eyebrow">API CREDENTIALS</span><h3>{t('个人密钥与用量')}</h3><p>{t('密钥操作即时生效；本平台只保存自定义分组关系，不保存密钥明文。')}</p></div><ConsoleBadge tone="blue">{data.total}</ConsoleBadge></div>
-      {data.items.length ? <div className="console-table-scroll"><table className="console-table console-key-usage-table"><thead><tr><th><input aria-label={t('全选')} type="checkbox" checked={allSelected} onChange={(event) => setSelected(event.target.checked ? new Set(data.items.map((item) => item.id)) : new Set())} /></th><th>{t('名称与密钥')}</th><th>{t('状态')}</th><th>{t('密钥分组')}</th><th>{t('{{days}} 天用量', { days: workspace?.days || usageDays })}</th><th>{t('额度')}</th><th>{t('模型与路由')}</th><th>{t('最后使用')}</th><th>{t('操作')}</th></tr></thead><tbody>{data.items.map((item) => {
+      {data.items.length ? <div className="console-table-scroll"><table className="console-table console-key-usage-table"><thead><tr><th><input aria-label={t('全选')} type="checkbox" checked={allSelected} onChange={(event) => setSelected(event.target.checked ? new Set(data.items.map((item) => item.id)) : new Set())} /></th><th>{t('名称与密钥')}</th><th>{t('状态')}</th><th>{t('密钥分组')}</th><th>{workspace?.all_time ? t('累计/历史总量') : t('{{days}} 天用量', { days: workspace?.days || 7 })}</th><th>{t('额度')}</th><th>{t('模型与路由')}</th><th>{t('最后使用')}</th><th>{t('操作')}</th></tr></thead><tbody>{data.items.map((item) => {
         const status = keyStatus(item.status)
         const usage = workspace?.token_usage[String(item.id)]
         return <tr key={item.id}>

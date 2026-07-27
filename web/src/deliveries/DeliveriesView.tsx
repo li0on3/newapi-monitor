@@ -16,6 +16,8 @@ import {
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { api } from '../api';
 import { getLanguage, t } from '../i18n';
+import { TimeRangeControl } from '../TimeRangeControl';
+import { appendDateRange, presetRange, type TimeRange } from '../time-range';
 
 type DeliveryStatus = 'pending' | 'sending' | 'delivered' | 'dead' | 'cancelled';
 
@@ -88,6 +90,7 @@ export function DeliveriesView() {
   const [loading, setLoading] = useState(false);
   const [action, setAction] = useState<'retry' | 'cancel' | null>(null);
   const [error, setError] = useState('');
+  const [range, setRange] = useState<TimeRange>(() => presetRange(30));
 
   useEffect(() => {
     const timer = window.setTimeout(() => setQuery(search.trim()), 250);
@@ -97,6 +100,7 @@ export function DeliveriesView() {
   const load = useCallback(async () => {
     setLoading(true);
     const parameters = new URLSearchParams({ status, destination, limit: '100', offset: '0' });
+    appendDateRange(parameters, range);
     if (query) parameters.set('q', query);
     try {
       const result = await api<DeliveryPayload>(`notifications/outbox?${parameters.toString()}`);
@@ -109,7 +113,7 @@ export function DeliveriesView() {
     } finally {
       setLoading(false);
     }
-  }, [destination, query, status]);
+  }, [destination, query, range, status]);
 
   useEffect(() => {
     void load();
@@ -165,6 +169,7 @@ export function DeliveriesView() {
     </div>
 
     <div className="delivery-command-bar">
+      <TimeRangeControl compact value={range} onChange={setRange} />
       <label className="delivery-search"><Search size={15} /><input aria-label={t('搜索投递记录')} value={search} onChange={(event) => setSearch(event.target.value)} placeholder={t('搜索标题、正文、失败原因或投递标识')} />{search && <button type="button" onClick={() => setSearch('')}><X size={14} /></button>}</label>
       <div className="segmented delivery-status-tabs">{statuses.map((item) => <button type="button" key={item} className={status === item ? 'active' : ''} onClick={() => setStatus(item)}>{t(STATUS_LABELS[item])}{item !== 'all' && <small>{counts[item]}</small>}</button>)}</div>
       <label><span>{t('通知渠道')}</span><select value={destination} onChange={(event) => setDestination(event.target.value)}><option value="all">{t('全部渠道')}</option>{payload?.destinations.map((item) => <option key={item} value={item}>{item}</option>)}</select></label>

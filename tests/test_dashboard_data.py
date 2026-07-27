@@ -109,6 +109,12 @@ class DashboardRepositoryTests(unittest.TestCase):
         store.connection.close()
         self.repository = DashboardRepository(self.db_path, slow_seconds=60)
 
+    def test_logs_support_arbitrary_time_ranges(self):
+        repository = DashboardRepository(self.db_path)
+        result = repository.logs(start_timestamp=1_205, end_timestamp=1_220)
+        self.assertEqual(1, result["total"])
+        self.assertEqual("request-2", result["items"][0]["request_id"])
+
     def tearDown(self):
         self.temp_dir.cleanup()
 

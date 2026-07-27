@@ -169,8 +169,18 @@ class DashboardRepository:
         now: int | None = None,
         history_limit: int = 60,
         availability_window_seconds: int = 7 * 86400,
+        availability_start_timestamp: int | None = None,
+        availability_end_timestamp: int | None = None,
+        availability_all_time: bool = False,
     ) -> list[dict[str, Any]]:
         current_time = int(time.time()) if now is None else now
+        availability_end = int(availability_end_timestamp or current_time)
+        availability_start = (
+            0 if availability_all_time else
+            int(availability_start_timestamp) if availability_start_timestamp is not None else
+            availability_end - availability_window_seconds
+        )
+        availability_window_seconds = max(1, availability_end - availability_start + 1)
         history_limit = max(1, min(history_limit, 500))
         with self._connect() as connection:
             channel_rows = connection.execute(
@@ -225,9 +235,9 @@ class DashboardRepository:
                         SELECT COUNT(*) AS total,
                                SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END) AS successes
                         FROM channel_observations
-                        WHERE channel_id = ? AND source = ? AND observed_at >= ?
+                        WHERE channel_id = ? AND source = ? AND observed_at >= ? AND observed_at <= ?
                         """,
-                        (channel_id, latest_source, current_time - availability_window_seconds),
+                        (channel_id, latest_source, availability_start, availability_end),
                     ).fetchone()
                 else:
                     observations = []
@@ -262,6 +272,9 @@ class DashboardRepository:
                         "history": history,
                         "availability": {
                             "window_seconds": availability_window_seconds,
+                            "start_timestamp": availability_start,
+                            "end_timestamp": availability_end,
+                            "all_time": availability_all_time,
                             "total": availability_total,
                             "successes": availability_successes,
                             "percentage": round(availability_successes / availability_total * 100, 2)
@@ -299,6 +312,8 @@ class DashboardRepository:
         username: str = "",
         slow_only: bool = False,
         slow_seconds: float | None = None,
+        start_timestamp: int | None = None,
+        end_timestamp: int | None = None,
     ) -> dict[str, Any]:
         page_limit = max(1, min(limit, 200))
         page_offset = max(0, offset)
@@ -317,6 +332,12 @@ class DashboardRepository:
         if slow_only:
             clauses.append("(use_time > ? OR COALESCE(frt_ms, 0) > ?)")
             parameters.extend((threshold, threshold * 1000.0))
+        if start_timestamp is not None and int(start_timestamp) > 0:
+            clauses.append("created_at >= ?")
+            parameters.append(int(start_timestamp))
+        if end_timestamp is not None and int(end_timestamp) > 0:
+            clauses.append("created_at <= ?")
+            parameters.append(int(end_timestamp))
         where = " WHERE " + " AND ".join(clauses) if clauses else ""
         with self._connect() as connection:
             total = int(
@@ -343,12 +364,29 @@ class DashboardRepository:
             "items": [dict(row) for row in rows],
         }
 
-    def resources(self, now: int | None = None, hours: int = 24, limit: int = 1440) -> dict[str, Any]:
+    def resources(
+        self,
+        now: int | None = None,
+        hours: int = 24,
+        limit: int = 1440,
+        start_timestamp: int | None = None,
+        end_timestamp: int | None = None,
+        all_time: bool = False,
+    ) -> dict[str, Any]:
         current_time = int(time.time()) if now is None else now
-        requested_hours = max(1, min(int(hours), 24 * 90))
         sample_limit = max(1, min(limit, 5000))
-        requested_start = current_time - requested_hours * 3600
-        bucket_seconds = max(1, math.ceil(requested_hours * 3600 / sample_limit))
+        requested_end = int(end_timestamp or current_time)
+        requested_start = int(start_timestamp) if start_timestamp is not None else requested_end - max(1, int(hours)) * 3600
+        with self._connect() as connection:
+            if all_time:
+                bounds = connection.execute(
+                    "SELECT MIN(created_at) AS first_at, MAX(created_at) AS last_at FROM resource_samples"
+                ).fetchone()
+                requested_start = int(bounds["first_at"] or requested_end)
+                requested_end = min(requested_end, int(bounds["last_at"] or requested_end))
+        requested_seconds = max(1, requested_end - requested_start + 1)
+        requested_hours = max(1, math.ceil(requested_seconds / 3600))
+        bucket_seconds = max(1, math.ceil(requested_seconds / sample_limit))
         if bucket_seconds > 15:
             bucket_seconds = math.ceil(bucket_seconds / 15) * 15
         with self._connect() as connection:
@@ -386,7 +424,7 @@ class DashboardRepository:
                     requested_start,
                     bucket_seconds,
                     requested_start,
-                    current_time,
+                    requested_end,
                     sample_limit,
                 ),
             ).fetchall()
@@ -398,11 +436,13 @@ class DashboardRepository:
         actual_start = int(samples[0]["created_at"]) if samples else 0
         actual_end = int(samples[-1]["created_at"]) if samples else 0
         covered_seconds = max(0, actual_end - actual_start + bucket_seconds) if samples else 0
-        coverage_ratio = min(1.0, covered_seconds / (requested_hours * 3600))
+        coverage_ratio = min(1.0, covered_seconds / requested_seconds)
         return {
             "generated_at": current_time,
             "hours": requested_hours,
             "requested_start": requested_start,
+            "requested_end": requested_end,
+            "all_time": all_time,
             "actual_start": actual_start,
             "actual_end": actual_end,
             "coverage_ratio": round(coverage_ratio, 4),
@@ -468,6 +508,8 @@ class DashboardRepository:
         category: str = "all",
         query: str = "",
         window_hours: int = 0,
+        start_timestamp: int | None = None,
+        end_timestamp: int | None = None,
         limit: int = 50,
         offset: int = 0,
         now: int | None = None,
@@ -489,7 +531,10 @@ class DashboardRepository:
             ).fetchall()
 
         normalized_query = query.strip().casefold()
-        minimum_started_at = current_time - max(0, window_hours) * 3600 if window_hours else 0
+        minimum_started_at = int(start_timestamp or 0)
+        if not minimum_started_at and window_hours:
+            minimum_started_at = current_time - max(0, window_hours) * 3600
+        maximum_started_at = int(end_timestamp or current_time)
         prepared: list[dict[str, Any]] = []
         for row in rows:
             item = dict(row)
@@ -499,6 +544,8 @@ class DashboardRepository:
             if category != "all" and item_category != category:
                 continue
             if minimum_started_at and int(item["started_at"]) < minimum_started_at:
+                continue
+            if maximum_started_at and int(item["started_at"]) > maximum_started_at:
                 continue
             if normalized_query:
                 searchable = "\n".join(

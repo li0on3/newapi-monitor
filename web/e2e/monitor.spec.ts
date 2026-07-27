@@ -142,7 +142,8 @@ test('管理员可访问运维模块且路由具有独立 URL', async ({ page })
   await page.getByRole('button', { name: '机器资源' }).click();
   await expect(page).toHaveURL(/\/monitor\/resources$/);
   await expect(page.getByRole('heading', { name: '机器资源' })).toBeVisible();
-  await expect(page.getByRole('button', { name: '24H' })).toHaveClass(/active/);
+  await expect(page.getByRole('button', { name: '今天' })).toHaveClass(/active/);
+  await expect(page.getByRole('button', { name: '创建至今' })).toBeVisible();
 
   await page.getByRole('button', { name: '系统配置' }).click();
   await expect(page).toHaveURL(/\/monitor\/system$/);
