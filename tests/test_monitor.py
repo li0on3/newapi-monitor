@@ -167,39 +167,65 @@ class ServiceStateTrackerTests(unittest.TestCase):
 
 
 class ChannelStateTrackerTests(unittest.TestCase):
-    def test_requires_two_failures_before_alerting(self):
-        tracker = ChannelStateTracker(failure_threshold=2, recovery_threshold=2)
+    def test_requires_five_consecutive_failures_before_alerting(self):
+        tracker = ChannelStateTracker(recovery_threshold=5)
         failed = ChannelObservation(1, "mock", False, 0.4, "upstream 500")
 
-        self.assertEqual([], tracker.evaluate([failed]))
+        for _ in range(4):
+            self.assertEqual([], tracker.evaluate([failed]))
         alerts = tracker.evaluate([failed])
 
         self.assertEqual(1, len(alerts))
         self.assertEqual("channel_failed", alerts[0].kind)
-        self.assertEqual("warning", alerts[0].severity)
+        self.assertEqual("critical", alerts[0].severity)
 
-    def test_requires_two_successes_before_recovery(self):
-        tracker = ChannelStateTracker(failure_threshold=2, recovery_threshold=2)
+    def test_triggers_when_five_of_ten_probes_fail(self):
+        tracker = ChannelStateTracker(recovery_threshold=5)
         healthy = ChannelObservation(1, "mock", True, 0.2, "")
         failed = ChannelObservation(1, "mock", False, 0.4, "upstream 500")
 
-        self.assertEqual([], tracker.evaluate([healthy]))
-        self.assertEqual([], tracker.evaluate([failed]))
+        alerts = []
+        for observation in [failed, healthy] * 5:
+            alerts.extend(tracker.evaluate([observation]))
+
+        self.assertEqual(1, len(alerts))
+        self.assertIn("最近10次探测失败 5 次", alerts[0].body)
+
+    def test_four_of_ten_failures_do_not_alert(self):
+        tracker = ChannelStateTracker(recovery_threshold=5)
+        healthy = ChannelObservation(1, "mock", True, 0.2, "")
+        failed = ChannelObservation(1, "mock", False, 0.4, "upstream 500")
+
+        alerts = []
+        sequence = [failed, healthy, failed, healthy, failed, healthy, failed, healthy, healthy, healthy]
+        for observation in sequence:
+            alerts.extend(tracker.evaluate([observation]))
+
+        self.assertEqual([], alerts)
+
+    def test_requires_five_successes_before_recovery(self):
+        tracker = ChannelStateTracker(recovery_threshold=5)
+        healthy = ChannelObservation(1, "mock", True, 0.2, "")
+        failed = ChannelObservation(1, "mock", False, 0.4, "upstream 500")
+
+        for _ in range(4):
+            self.assertEqual([], tracker.evaluate([failed]))
         alerts = tracker.evaluate([failed])
         self.assertEqual(1, len(alerts))
         self.assertEqual("channel_failed", alerts[0].kind)
 
-        self.assertEqual([], tracker.evaluate([failed]))
-        self.assertEqual([], tracker.evaluate([healthy]))
+        for _ in range(4):
+            self.assertEqual([], tracker.evaluate([healthy]))
         alerts = tracker.evaluate([healthy])
         self.assertEqual(1, len(alerts))
         self.assertEqual("channel_recovered", alerts[0].kind)
 
     def test_persistent_failure_is_critical(self):
-        tracker = ChannelStateTracker(failure_threshold=2, recovery_threshold=2)
+        tracker = ChannelStateTracker(recovery_threshold=5)
         failed = ChannelObservation(1, "mock", False, 0.4, "invalid model configuration")
 
-        tracker.evaluate([failed])
+        for _ in range(4):
+            tracker.evaluate([failed])
         alerts = tracker.evaluate([failed])
 
         self.assertEqual("critical", alerts[0].severity)
@@ -296,43 +322,48 @@ class NewAPIClientLogTests(unittest.TestCase):
 
 
 class LatencyWindowTests(unittest.TestCase):
-    def test_triggers_when_three_of_last_five_are_slow(self):
-        decision = evaluate_latency_window(
-            [
-                {"use_time": 61, "frt_ms": None},
-                {"use_time": 10, "frt_ms": 1000},
-                {"use_time": 62, "frt_ms": None},
-                {"use_time": 20, "frt_ms": 2000},
-                {"use_time": 63, "frt_ms": None},
-            ]
-        )
-
-        self.assertTrue(decision.triggered)
-        self.assertFalse(decision.critical)
-        self.assertEqual(3, decision.bad_last5)
-
-    def test_triggers_when_five_of_last_ten_are_slow(self):
+    def test_triggers_only_when_fifteen_of_twenty_first_responses_exceed_fifteen_seconds(self):
         samples = [
-            {"use_time": value, "frt_ms": None}
-            for value in (61, 10, 62, 20, 30, 63, 40, 64, 50, 65)
+            {"use_time": 300, "frt_ms": 16_000 if index < 15 else 1_000}
+            for index in range(20)
         ]
 
         decision = evaluate_latency_window(samples)
 
         self.assertTrue(decision.triggered)
-        self.assertEqual(2, decision.bad_last5)
-        self.assertEqual(5, decision.bad_last10)
-
-    def test_single_extreme_sample_is_critical(self):
-        decision = evaluate_latency_window([{"use_time": 181, "frt_ms": 1000}])
-
-        self.assertTrue(decision.triggered)
         self.assertTrue(decision.critical)
+        self.assertEqual(15, decision.bad_count)
+        self.assertEqual(20, decision.sample_count)
 
-    def test_tracker_sends_recovery_after_five_normal_samples(self):
+    def test_does_not_trigger_for_total_duration_or_isolated_first_response_spikes(self):
+        samples = [
+            {"use_time": 600, "frt_ms": 16_000 if index < 14 else 1_000}
+            for index in range(20)
+        ]
+
+        decision = evaluate_latency_window(samples)
+
+        self.assertFalse(decision.triggered)
+        self.assertEqual(14, decision.bad_count)
+
+    def test_ignores_samples_without_first_response_measurements(self):
+        decision = evaluate_latency_window(
+            [{"use_time": 600, "frt_ms": None} for _ in range(20)]
+        )
+
+        self.assertFalse(decision.triggered)
+        self.assertEqual(0, decision.sample_count)
+
+    def test_tracker_sends_recovery_after_ten_normal_first_responses(self):
         tracker = LatencyStateTracker()
-        slow_samples = [{"use_time": value, "frt_ms": None} for value in (61, 62, 63, 10, 20)]
-        normal_samples = [{"use_time": 10, "frt_ms": 1000} for _ in range(5)]
+        slow_samples = [
+            {"sample_key": str(index), "use_time": 20, "frt_ms": 16_000 if index < 15 else 1_000}
+            for index in range(20)
+        ]
+        normal_samples = [
+            {"sample_key": f"normal-{index}", "use_time": 10, "frt_ms": 1_000}
+            for index in range(10)
+        ]
 
         alerts = tracker.evaluate("4:gpt-test", "mock/gpt-test", slow_samples, now=100)
         self.assertEqual("latency_high", alerts[0].kind)
@@ -493,14 +524,18 @@ class ConfigTests(unittest.TestCase):
         config = Config.from_values(
             {
                 "channel_probe_concurrency": 4,
-                "channel_failure_threshold": 3,
-                "channel_recovery_threshold": 2,
+                "channel_consecutive_failure_threshold": 5,
+                "channel_failure_window_size": 10,
+                "channel_failure_window_threshold": 5,
+                "channel_recovery_success_threshold": 5,
             }
         )
 
         self.assertEqual(4, config.channel_probe_concurrency)
-        self.assertEqual(3, config.channel_failure_threshold)
-        self.assertEqual(2, config.channel_recovery_threshold)
+        self.assertEqual(5, config.channel_consecutive_failure_threshold)
+        self.assertEqual(10, config.channel_failure_window_size)
+        self.assertEqual(5, config.channel_failure_window_threshold)
+        self.assertEqual(5, config.channel_recovery_success_threshold)
 
     def test_dynamic_resource_thresholds_are_loaded(self):
         config = Config.from_values({"system_cpu_threshold": 72, "system_memory_threshold": 74})
@@ -812,8 +847,10 @@ class ChannelProbeWorkerTests(unittest.TestCase):
             real_probe_rules={},
             channel_settings={},
             channel_slow_seconds=60,
-            channel_failure_threshold=2,
-            channel_recovery_threshold=2,
+            channel_consecutive_failure_threshold=5,
+            channel_failure_window_size=10,
+            channel_failure_window_threshold=5,
+            channel_recovery_success_threshold=5,
             channel_probe_concurrency=3,
         )
         published = []
@@ -863,8 +900,10 @@ class ChannelProbeWorkerTests(unittest.TestCase):
             },
             channel_settings={},
             channel_slow_seconds=60,
-            channel_failure_threshold=2,
-            channel_recovery_threshold=2,
+            channel_consecutive_failure_threshold=5,
+            channel_failure_window_size=10,
+            channel_failure_window_threshold=5,
+            channel_recovery_success_threshold=5,
             channel_probe_concurrency=3,
         )
         worker = worker_class(

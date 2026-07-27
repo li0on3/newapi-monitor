@@ -24,8 +24,10 @@ class LatencyStateMachineP0Tests(unittest.TestCase):
         ]
 
     def test_active_incident_does_not_remind_without_a_new_sample(self):
-        tracker = newapi_monitor.LatencyStateTracker(reminder_seconds=30)
-        bad = self.samples([61, 62, 63, 10, 20])
+        tracker = newapi_monitor.LatencyStateTracker()
+        bad = self.samples([20] * 20)
+        for index, sample in enumerate(bad):
+            sample["frt_ms"] = 16_000 if index < 15 else 1_000
 
         first = tracker.evaluate("1:gpt", "channel/gpt", bad, now=100)
         repeated = tracker.evaluate("1:gpt", "channel/gpt", bad, now=200)
@@ -33,11 +35,15 @@ class LatencyStateMachineP0Tests(unittest.TestCase):
         self.assertEqual("latency_high", first[0].kind)
         self.assertEqual([], repeated)
 
-    def test_five_new_healthy_samples_recover_even_when_older_hard_limit_remains(self):
-        tracker = newapi_monitor.LatencyStateTracker(reminder_seconds=30)
-        initial = self.samples([306, 20, 20, 20, 20], start_id=100)
+    def test_ten_new_healthy_first_responses_recover_even_when_older_slow_samples_remain(self):
+        tracker = newapi_monitor.LatencyStateTracker()
+        initial = self.samples([20] * 20, start_id=100)
+        for index, sample in enumerate(initial):
+            sample["frt_ms"] = 16_000 if index < 15 else 1_000
         tracker.evaluate("1:gpt", "channel/gpt", initial, now=100)
-        recovered_window = self.samples([38, 5, 3, 7, 4, 306, 20, 20, 20, 20], start_id=105)
+        recovered_window = self.samples([20] * 20, start_id=110)
+        for index, sample in enumerate(recovered_window):
+            sample["frt_ms"] = 1_000 if index < 10 else 16_000
 
         events = tracker.evaluate("1:gpt", "channel/gpt", recovered_window, now=200)
 
@@ -180,8 +186,10 @@ class NotificationOutboxP0Tests(unittest.TestCase):
             real_probe_rules={},
             channel_settings={},
             channel_slow_seconds=60,
-            channel_failure_threshold=1,
-            channel_recovery_threshold=1,
+            channel_consecutive_failure_threshold=1,
+            channel_failure_window_size=5,
+            channel_failure_window_threshold=1,
+            channel_recovery_success_threshold=1,
             channel_probe_concurrency=1,
         )
         client = mock.Mock()
@@ -340,8 +348,10 @@ class ChannelSyncP0Tests(unittest.TestCase):
             real_probe_rules={1: newapi_monitor.RealProbeRule(1, "gpt", "/v1/responses", "responses")},
             channel_settings={},
             channel_slow_seconds=5,
-            channel_failure_threshold=1,
-            channel_recovery_threshold=1,
+            channel_consecutive_failure_threshold=1,
+            channel_failure_window_size=5,
+            channel_failure_window_threshold=1,
+            channel_recovery_success_threshold=1,
             channel_probe_concurrency=1,
         )
         relay = mock.Mock()

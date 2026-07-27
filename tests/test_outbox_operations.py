@@ -91,6 +91,27 @@ class NotificationOutboxOperationsTests(unittest.TestCase):
         self.assertEqual("已联系上游", acknowledged["acknowledgement_note"])
         self.assertEqual(120, acknowledged["acknowledged_at"])
 
+    def test_experience_policy_records_all_events_but_only_notifies_channel_and_latency(self):
+        publisher = newapi_monitor.AlertPublisher(
+            self.store,
+            ["wecom_webhook"],
+            notifiable_kinds={"channel_failed", "channel_recovered", "latency_high", "latency_recovered"},
+        )
+
+        notification_ids = publisher.publish(
+            [
+                newapi_monitor.AlertEvent("resource_high", "资源异常", "CPU 95%", key="resource:cpu"),
+                newapi_monitor.AlertEvent("channel_failed", "渠道不可用", "5/5 failed", key="channel:7"),
+            ],
+            now=100,
+        )
+
+        self.assertEqual(2, self.store.connection.execute("SELECT COUNT(*) FROM incidents").fetchone()[0])
+        self.assertEqual(1, len(notification_ids))
+        notification = self.store.notification(notification_ids[0])
+        self.assertEqual("渠道不可用", notification["subject"])
+        self.assertNotIn("资源异常", notification["body"])
+
 
 class NotificationPolicyTests(unittest.TestCase):
     def test_quiet_hours_defer_noncritical_until_window_end(self):

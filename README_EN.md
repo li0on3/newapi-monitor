@@ -34,7 +34,8 @@ Every screenshot below is generated from the built-in synthetic demo dataset. It
 - Performs real probes through OpenAI Responses, Chat Completions, and Anthropic Messages.
 - Analyzes total latency, time to first token, users, tokens, models, and channels from real New API usage logs.
 - Queries quota, model restrictions, and recent calls by API key without persisting the key or putting it in URLs or audit records.
-- Alerts when 3 of the latest 5 or 5 of the latest 10 requests exceed the latency threshold; a single critical sample can alert immediately.
+- Uses a low-noise severe-experience policy by default: alerts only when at least 15 of the latest 20 measurable requests take over 15 seconds to produce the first token. A long total duration alone never triggers an alert.
+- Alerts for channel unavailability only after 5 consecutive failed probes, or at least 5 failures in the latest 10 probes. Resource, collector, and provider-status anomalies remain visible as incidents but are not sent externally by default.
 - Persists alerts to a SQLite delivery outbox before sending them independently to each destination. Failed deliveries use exponential backoff, survive process restarts, and become visible dead letters after the configured attempt limit.
 - Gives administrators an Alert Delivery Center with pending, sending, delivered, dead-letter, and cancelled filters, full failure and retry context, single or bulk retry/cancel actions, and dead-letter recovery.
 - Supports incident acknowledgement, global quiet hours, and scheduled per-channel maintenance windows. Quiet hours defer rather than discard messages, and monitoring resumes automatically when maintenance ends.
@@ -125,9 +126,12 @@ HTTP 503 is returned when SQLite is unavailable, the monitoring worker has stopp
 | Real channel probes | 5 minutes |
 | OpenAI official status | 60 seconds |
 | Slow request | Any latency metric over 60 seconds |
-| Window alert | 3 of 5, or 5 of 10 |
-| Single critical alert | Over 180 seconds |
-| Resource alert | Threshold sustained for 180 seconds |
+| Slow-request display | Total or first-token latency above 60 seconds; dashboard statistics only |
+| Severe first-token alert | At least 15 of the latest 20 measurable requests exceed 15 seconds |
+| First-token recovery | 10 consecutive first-token responses at or below 15 seconds |
+| Channel unavailable | 5 consecutive failures, or at least 5 failures in the latest 10 probes |
+| Channel recovery | 5 consecutive successful probes |
+| Other anomalies | Retained as incidents; not sent externally in severe-experience mode |
 | Raw sample retention | 90 days |
 | Resolved incident retention | 365 days |
 | Delivered/dead-letter retention | 30 days |

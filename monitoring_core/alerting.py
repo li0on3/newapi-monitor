@@ -48,9 +48,7 @@ class LatencyWindowDecision:
     triggered: bool
     critical: bool
     sample_count: int
-    bad_last5: int
-    bad_last10: int
-    max_total_seconds: float
+    bad_count: int
     max_frt_ms: float
     reason: str
 
@@ -179,44 +177,28 @@ def summarize_logs(logs: Iterable[dict[str, Any]], slow_seconds: float) -> list[
 
 def evaluate_latency_window(
     samples: Iterable[dict[str, Any]],
-    slow_seconds: float = 60.0,
-    hard_limit_seconds: float = 180.0,
+    first_response_seconds: float = 15.0,
+    window_size: int = 20,
+    failure_threshold: int = 15,
 ) -> LatencyWindowDecision:
-    recent = list(samples)[:10]
-    slow_limit_ms = slow_seconds * 1000.0
-    hard_limit_ms = hard_limit_seconds * 1000.0
-
-    def is_bad(sample: dict[str, Any]) -> bool:
-        use_time = float(sample.get("use_time") or 0)
-        frt_ms = float(sample.get("frt_ms") or 0)
-        return use_time > slow_seconds or frt_ms > slow_limit_ms
-
-    bad_flags = [is_bad(sample) for sample in recent]
-    bad_last5 = sum(bad_flags[:5])
-    bad_last10 = sum(bad_flags[:10])
-    max_total = max((float(sample.get("use_time") or 0) for sample in recent), default=0.0)
+    measured = [sample for sample in samples if float(sample.get("frt_ms") or 0) > 0]
+    recent = measured[:max(1, int(window_size))]
+    threshold = max(1, min(int(failure_threshold), max(1, int(window_size))))
+    slow_limit_ms = first_response_seconds * 1000.0
+    bad_count = sum(float(sample.get("frt_ms") or 0) > slow_limit_ms for sample in recent)
     max_frt = max((float(sample.get("frt_ms") or 0) for sample in recent), default=0.0)
-    critical = max_total > hard_limit_seconds or max_frt > hard_limit_ms
-    three_of_five = len(recent) >= 5 and bad_last5 >= 3
-    five_of_ten = len(recent) >= 10 and bad_last10 >= 5
-    triggered = critical or three_of_five or five_of_ten
-
-    reasons: list[str] = []
-    if critical:
-        reasons.append(f"单次超过 {hard_limit_seconds:.0f}s")
-    if three_of_five:
-        reasons.append(f"近5次有{bad_last5}次超过 {slow_seconds:.0f}s")
-    if five_of_ten:
-        reasons.append(f"近10次有{bad_last10}次超过 {slow_seconds:.0f}s")
+    triggered = len(recent) >= window_size and bad_count >= threshold
+    reason = (
+        f"最近{window_size}次可测请求中有{bad_count}次首字超过 {first_response_seconds:.0f}s"
+        if triggered else ""
+    )
     return LatencyWindowDecision(
         triggered=triggered,
-        critical=critical,
+        critical=triggered,
         sample_count=len(recent),
-        bad_last5=bad_last5,
-        bad_last10=bad_last10,
-        max_total_seconds=max_total,
+        bad_count=bad_count,
         max_frt_ms=max_frt,
-        reason="；".join(reasons),
+        reason=reason,
     )
 
 
@@ -224,14 +206,16 @@ class LatencyStateTracker:
     def __init__(
         self,
         states: dict[str, dict[str, Any]] | None = None,
-        slow_seconds: float = 60.0,
-        hard_limit_seconds: float = 180.0,
-        reminder_seconds: int = 1800,
+        first_response_seconds: float = 15.0,
+        window_size: int = 20,
+        failure_threshold: int = 15,
+        recovery_threshold: int = 10,
     ):
         self.states = dict(states or {})
-        self.slow_seconds = slow_seconds
-        self.hard_limit_seconds = hard_limit_seconds
-        self.reminder_seconds = reminder_seconds
+        self.first_response_seconds = first_response_seconds
+        self.window_size = max(1, int(window_size))
+        self.failure_threshold = max(1, min(int(failure_threshold), self.window_size))
+        self.recovery_threshold = max(1, int(recovery_threshold))
 
     def evaluate(
         self,
@@ -241,35 +225,52 @@ class LatencyStateTracker:
         now: float | None = None,
     ) -> list[AlertEvent]:
         current_time = time.time() if now is None else now
-        recent = list(samples)[:10]
+        recent = [sample for sample in samples if float(sample.get("frt_ms") or 0) > 0][
+            :self.window_size
+        ]
         newest_sample_key = self._sample_key(recent[0]) if recent else ""
-        decision = evaluate_latency_window(recent, self.slow_seconds, self.hard_limit_seconds)
+        decision = evaluate_latency_window(
+            recent,
+            self.first_response_seconds,
+            self.window_size,
+            self.failure_threshold,
+        )
         state = dict(
             self.states.get(key)
             or {
                 "active": False,
-                "last_notified": 0.0,
                 "last_sample_key": "",
-                "notified_before": False,
+                "healthy_samples": 0,
+                "policy_version": 2,
             }
         )
+        if int(state.get("policy_version") or 0) != 2:
+            state = {
+                "active": False,
+                "last_sample_key": "",
+                "healthy_samples": 0,
+                "policy_version": 2,
+            }
         events: list[AlertEvent] = []
 
         if newest_sample_key and newest_sample_key == str(state.get("last_sample_key") or ""):
             return events
 
         state["last_sample_key"] = newest_sample_key
-        last_five = recent[:5]
-        five_healthy = len(last_five) >= 5 and all(
-            not self._sample_is_bad(sample) for sample in last_five
+        healthy_window = (
+            len(recent) >= self.recovery_threshold
+            and all(not self._sample_is_bad(sample) for sample in recent[:self.recovery_threshold])
         )
 
-        if state.get("active") and five_healthy:
+        if state.get("active") and healthy_window:
             events.append(
                 AlertEvent(
                     kind="latency_recovered",
                     title=f"耗时恢复：{label}",
-                    body="最近连续5次新请求均未超过耗时阈值。",
+                    body=(
+                        f"最近连续 {self.recovery_threshold} 次可测请求的首字耗时均不超过 "
+                        f"{self.first_response_seconds:.0f}s，用户交互延迟已恢复。"
+                    ),
                     key=f"latency:{key}",
                     severity="info",
                     recovery=True,
@@ -277,44 +278,37 @@ class LatencyStateTracker:
             )
             state = {
                 "active": False,
-                "last_notified": current_time,
                 "last_sample_key": newest_sample_key,
-                "notified_before": False,
+                "healthy_samples": 0,
+                "policy_version": 2,
             }
-        elif decision.triggered:
-            should_notify = not state["active"] or current_time - float(state["last_notified"]) >= self.reminder_seconds
-            if should_notify:
-                state["active"] = True
-                state["last_notified"] = current_time
-                values = ", ".join(
-                    f"{float(sample.get('use_time') or 0):.0f}s/"
-                    f"{float(sample.get('frt_ms') or 0) / 1000.0:.1f}s"
-                    for sample in recent
+        elif decision.triggered and not state.get("active"):
+            state["active"] = True
+            values = ", ".join(
+                f"{float(sample.get('frt_ms') or 0) / 1000.0:.1f}s" for sample in recent
+            )
+            events.append(
+                AlertEvent(
+                    kind="latency_high",
+                    title=f"首字响应严重变慢：{label}",
+                    body=(
+                        f"触发条件：{decision.reason}\n"
+                        f"影响判断：{decision.bad_count}/{decision.sample_count} 次请求需要等待超过 "
+                        f"{self.first_response_seconds:.0f}s 才收到首个 token，已明显影响连续使用体验。\n"
+                        f"窗口最大首字耗时：{decision.max_frt_ms / 1000.0:.1f}s\n"
+                        f"最近 {decision.sample_count} 次首字耗时：{values}\n"
+                        "后续动作：系统持续观察；连续恢复后只发送一次恢复通知，不重复提醒。"
+                    ),
+                    key=f"latency:{key}",
+                    severity="critical",
                 )
-                events.append(
-                    AlertEvent(
-                        kind="latency_high" if not state.get("notified_before") else "latency_reminder",
-                        title=f"耗时异常：{label}",
-                        body=(
-                            f"规则：{decision.reason}\n"
-                            f"最大总耗时：{decision.max_total_seconds:.0f}s\n"
-                            f"最大首字耗时：{decision.max_frt_ms / 1000.0:.1f}s\n"
-                            f"最近请求（总耗时/首字）：{values}"
-                        ),
-                        key=f"latency:{key}",
-                        severity="critical" if decision.critical else "warning",
-                    )
-                )
-                state["notified_before"] = True
+            )
 
         self.states[key] = state
         return events
 
     def _sample_is_bad(self, sample: dict[str, Any]) -> bool:
-        return (
-            float(sample.get("use_time") or 0) > self.slow_seconds
-            or float(sample.get("frt_ms") or 0) > self.slow_seconds * 1000.0
-        )
+        return float(sample.get("frt_ms") or 0) > self.first_response_seconds * 1000.0
 
     @staticmethod
     def _sample_key(sample: dict[str, Any]) -> str:
@@ -331,11 +325,17 @@ class ChannelStateTracker:
     def __init__(
         self,
         states: dict[str, Any] | None = None,
-        failure_threshold: int = 2,
-        recovery_threshold: int = 2,
+        consecutive_failure_threshold: int = 5,
+        failure_window_size: int = 10,
+        failure_window_threshold: int = 5,
+        recovery_threshold: int = 5,
     ):
         self.states = dict(states or {})
-        self.failure_threshold = max(1, failure_threshold)
+        self.consecutive_failure_threshold = max(1, int(consecutive_failure_threshold))
+        self.failure_window_size = max(self.consecutive_failure_threshold, int(failure_window_size))
+        self.failure_window_threshold = max(
+            1, min(int(failure_window_threshold), self.failure_window_size)
+        )
         self.recovery_threshold = max(1, recovery_threshold)
 
     @staticmethod
@@ -357,36 +357,92 @@ class ChannelStateTracker:
     @staticmethod
     def _normalize_state(raw: Any) -> dict[str, Any]:
         if isinstance(raw, dict):
+            if int(raw.get("policy_version") or 0) != 2:
+                return {
+                    "status": "unknown",
+                    "history": [],
+                    "successes": 0,
+                    "failure_class": "",
+                    "policy_version": 2,
+                }
             return {
                 "status": str(raw.get("status") or "unknown"),
-                "failures": max(0, int(raw.get("failures") or 0)),
+                "history": [bool(item) for item in list(raw.get("history") or [])[-10:]],
                 "successes": max(0, int(raw.get("successes") or 0)),
                 "failure_class": str(raw.get("failure_class") or ""),
+                "policy_version": 2,
             }
-        if raw in {"ok", "failed"}:
-            return {"status": raw, "failures": 0, "successes": 0, "failure_class": ""}
-        return {"status": "unknown", "failures": 0, "successes": 0, "failure_class": ""}
+        return {
+            "status": "unknown",
+            "history": [],
+            "successes": 0,
+            "failure_class": "",
+            "policy_version": 2,
+        }
 
     def evaluate(self, observations: Iterable[ChannelObservation]) -> list[AlertEvent]:
         events: list[AlertEvent] = []
         for observation in observations:
             key = str(observation.channel_id)
             state = self._normalize_state(self.states.get(key))
+            history = list(state.get("history") or [])
+            history.append(not observation.success)
+            state["history"] = history[-self.failure_window_size:]
+            recent = list(state["history"])
+            consecutive_failed = (
+                len(recent) >= self.consecutive_failure_threshold
+                and all(recent[-self.consecutive_failure_threshold:])
+            )
+            failures_in_window = sum(recent[-self.failure_window_size:])
+            window_failed = (
+                len(recent) >= self.failure_window_size
+                and failures_in_window >= self.failure_window_threshold
+            )
+            if state["status"] != "failed" and (consecutive_failed or window_failed):
+                state["status"] = "failed"
+                trigger = (
+                    f"最近连续 {self.consecutive_failure_threshold} 次探测全部失败"
+                    if consecutive_failed
+                    else f"最近{self.failure_window_size}次探测失败 {failures_in_window} 次"
+                )
+                results = "、".join("失败" if failed else "成功" for failed in recent)
+                events.append(
+                    AlertEvent(
+                        kind="channel_failed",
+                        title=f"渠道持续不可用：{observation.name}",
+                        body=(
+                            f"触发条件：{trigger}\n"
+                            f"最近探测结果：{results}\n"
+                            f"当前探测耗时：{observation.elapsed_seconds:.3f}s\n"
+                            f"最近错误：{observation.message or '未知错误'}\n"
+                            "影响判断：连续或高比例失败，渠道已无法稳定承载请求。\n"
+                            f"恢复条件：连续 {self.recovery_threshold} 次探测成功后发送一次恢复通知。"
+                        ),
+                        key=f"channel:{observation.channel_id}",
+                        severity="critical",
+                    )
+                )
             if observation.success:
-                state["failures"] = 0
                 state["failure_class"] = ""
                 if state["status"] == "failed":
                     state["successes"] += 1
                     if state["successes"] >= self.recovery_threshold:
-                        state = {"status": "ok", "failures": 0, "successes": 0, "failure_class": ""}
+                        state = {
+                            "status": "ok",
+                            "history": state["history"],
+                            "successes": 0,
+                            "failure_class": "",
+                            "policy_version": 2,
+                        }
                         events.append(
                             AlertEvent(
                                 kind="channel_recovered",
                                 title=f"渠道恢复：{observation.name}",
                                 body=(
                                     f"渠道ID：{observation.channel_id}\n"
-                                    f"已连续成功 {self.recovery_threshold} 次\n"
-                                    f"探测耗时：{observation.elapsed_seconds:.3f}s"
+                                    f"恢复依据：最近连续 {self.recovery_threshold} 次真实探测均成功\n"
+                                    f"当前探测耗时：{observation.elapsed_seconds:.3f}s\n"
+                                    "用户影响：渠道已重新满足稳定可用条件。"
                                 ),
                                 key=f"channel:{observation.channel_id}",
                                 severity="info",
@@ -394,29 +450,13 @@ class ChannelStateTracker:
                             )
                         )
                 else:
-                    state = {"status": "ok", "failures": 0, "successes": 0, "failure_class": ""}
+                    state["status"] = "ok"
+                    state["successes"] = 0
                 self.states[key] = state
                 continue
 
             state["successes"] = 0
-            state["failures"] += 1
             state["failure_class"] = self.failure_class(observation.message)
-            if state["status"] != "failed" and state["failures"] >= self.failure_threshold:
-                state["status"] = "failed"
-                events.append(
-                    AlertEvent(
-                        kind="channel_failed",
-                        title=f"渠道异常：{observation.name}",
-                        body=(
-                            f"渠道ID：{observation.channel_id}\n"
-                            f"已连续失败 {state['failures']} 次\n"
-                            f"探测耗时：{observation.elapsed_seconds:.3f}s\n"
-                            f"错误：{observation.message or '未知错误'}"
-                        ),
-                        key=f"channel:{observation.channel_id}",
-                        severity="warning" if state["failure_class"] == "transient" else "critical",
-                    )
-                )
             self.states[key] = state
         return events
 
