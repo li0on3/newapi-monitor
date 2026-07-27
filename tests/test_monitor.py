@@ -190,6 +190,7 @@ class ChannelStateTrackerTests(unittest.TestCase):
 
         self.assertEqual(1, len(alerts))
         self.assertIn("最近10次探测失败 5 次", alerts[0].body)
+        self.assertIn("upstream 500", alerts[0].body)
 
     def test_four_of_ten_failures_do_not_alert(self):
         tracker = ChannelStateTracker(recovery_threshold=5)
