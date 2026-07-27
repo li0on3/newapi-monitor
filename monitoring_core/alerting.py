@@ -224,7 +224,6 @@ class LatencyStateTracker:
         samples: Iterable[dict[str, Any]],
         now: float | None = None,
     ) -> list[AlertEvent]:
-        current_time = time.time() if now is None else now
         recent = [sample for sample in samples if float(sample.get("frt_ms") or 0) > 0][
             :self.window_size
         ]
@@ -363,6 +362,8 @@ class ChannelStateTracker:
                     "history": [],
                     "successes": 0,
                     "failure_class": "",
+                    "last_error": "",
+                    "last_failure_elapsed": 0.0,
                     "policy_version": 2,
                 }
             return {
@@ -370,6 +371,8 @@ class ChannelStateTracker:
                 "history": [bool(item) for item in list(raw.get("history") or [])[-10:]],
                 "successes": max(0, int(raw.get("successes") or 0)),
                 "failure_class": str(raw.get("failure_class") or ""),
+                "last_error": str(raw.get("last_error") or ""),
+                "last_failure_elapsed": float(raw.get("last_failure_elapsed") or 0),
                 "policy_version": 2,
             }
         return {
@@ -377,6 +380,8 @@ class ChannelStateTracker:
             "history": [],
             "successes": 0,
             "failure_class": "",
+            "last_error": "",
+            "last_failure_elapsed": 0.0,
             "policy_version": 2,
         }
 
@@ -388,6 +393,10 @@ class ChannelStateTracker:
             history = list(state.get("history") or [])
             history.append(not observation.success)
             state["history"] = history[-self.failure_window_size:]
+            if not observation.success:
+                state["failure_class"] = self.failure_class(observation.message)
+                state["last_error"] = observation.message or "未知错误"
+                state["last_failure_elapsed"] = observation.elapsed_seconds
             recent = list(state["history"])
             consecutive_failed = (
                 len(recent) >= self.consecutive_failure_threshold
@@ -413,8 +422,8 @@ class ChannelStateTracker:
                         body=(
                             f"触发条件：{trigger}\n"
                             f"最近探测结果：{results}\n"
-                            f"当前探测耗时：{observation.elapsed_seconds:.3f}s\n"
-                            f"最近错误：{observation.message or '未知错误'}\n"
+                            f"最近失败探测耗时：{float(state['last_failure_elapsed']):.3f}s\n"
+                            f"最近错误：{state['last_error'] or '未知错误'}\n"
                             "影响判断：连续或高比例失败，渠道已无法稳定承载请求。\n"
                             f"恢复条件：连续 {self.recovery_threshold} 次探测成功后发送一次恢复通知。"
                         ),
@@ -432,6 +441,8 @@ class ChannelStateTracker:
                             "history": state["history"],
                             "successes": 0,
                             "failure_class": "",
+                            "last_error": "",
+                            "last_failure_elapsed": 0.0,
                             "policy_version": 2,
                         }
                         events.append(
@@ -456,7 +467,6 @@ class ChannelStateTracker:
                 continue
 
             state["successes"] = 0
-            state["failure_class"] = self.failure_class(observation.message)
             self.states[key] = state
         return events
 
