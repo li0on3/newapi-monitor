@@ -4,6 +4,19 @@
 
 ## Unreleased
 
+## 1.10.0 - 2026-07-27
+
+### Changed
+
+- Enabled a low-noise severe-experience policy by default. Only sustained channel unavailability, sustained severe first-token latency, and their recovery notices are sent externally; resource, collector, New API management, and provider-status anomalies remain in the incident center.
+- First-token latency now triggers only when at least 15 of the latest 20 measurable requests exceed 15 seconds. Single long total durations, 3-of-5, 5-of-10, and periodic reminders no longer alert.
+- Channel unavailability now requires 5 consecutive failures or at least 5 failures in the latest 10 probes, and recovers after 5 consecutive successes.
+- Alert content now explains the trigger, user impact, sample window, latest error, and recovery condition consistently across all notification destinations.
+
+### Fixed
+
+- Legacy alert state is reset to the new policy on first load, preventing historical two-failure or single-long-request state from firing immediately after upgrade.
+
 ### Added
 
 - Added a shared time-range selector with today, last 7/30/90 days, custom dates, and lifetime “since creation” queries.

@@ -94,16 +94,20 @@ class SettingsUpdatePayload(BaseModel):
     channel_sync_interval_seconds: int | None = Field(None, ge=2, le=3600)
     channel_interval_seconds: int | None = Field(None, ge=5, le=86400)
     channel_probe_concurrency: int | None = Field(None, ge=1, le=16)
-    channel_failure_threshold: int | None = Field(None, ge=1, le=10)
-    channel_recovery_threshold: int | None = Field(None, ge=1, le=10)
+    channel_consecutive_failure_threshold: int | None = Field(None, ge=1, le=10)
+    channel_failure_window_size: int | None = Field(None, ge=5, le=50)
+    channel_failure_window_threshold: int | None = Field(None, ge=1, le=50)
+    channel_recovery_success_threshold: int | None = Field(None, ge=1, le=20)
     log_interval_seconds: int | None = Field(None, ge=5, le=3600)
     resource_interval_seconds: int | None = Field(None, ge=5, le=3600)
     report_interval_seconds: int | None = Field(None, ge=60, le=604800)
     log_overlap_seconds: int | None = Field(None, ge=1, le=3600)
     log_initial_lookback_seconds: int | None = Field(None, ge=60, le=2592000)
     slow_request_seconds: float | None = Field(None, gt=0, le=86400)
-    latency_hard_limit_seconds: float | None = Field(None, gt=0, le=86400)
-    latency_reminder_seconds: int | None = Field(None, ge=60, le=604800)
+    latency_first_response_seconds: float | None = Field(None, gt=0, le=3600)
+    latency_window_size: int | None = Field(None, ge=5, le=100)
+    latency_failure_threshold: int | None = Field(None, ge=1, le=100)
+    latency_recovery_success_threshold: int | None = Field(None, ge=1, le=50)
     channel_slow_seconds: float | None = Field(None, gt=0, le=3600)
     resource_sustain_seconds: int | None = Field(None, ge=5, le=86400)
     system_cpu_threshold: float | None = Field(None, gt=0, le=100)
@@ -126,6 +130,7 @@ class SettingsUpdatePayload(BaseModel):
     notification_quiet_hours_end: str | None = Field(None, pattern="^(?:[01]\\d|2[0-3]):[0-5]\\d$")
     notification_quiet_hours_timezone: str | None = Field(None, min_length=1, max_length=128)
     notification_quiet_hours_allow_critical: bool | None = None
+    experience_alerts_only: bool | None = None
     smtp_host: str | None = Field(None, max_length=512)
     smtp_port: int | None = Field(None, ge=1, le=65535)
     smtp_user: str | None = Field(None, max_length=512)
@@ -674,16 +679,20 @@ class Runtime:
             "channel_sync_interval_seconds": env_int("CHANNEL_SYNC_INTERVAL_SECONDS", 5),
             "channel_interval_seconds": env_int("CHANNEL_INTERVAL_SECONDS", 300),
             "channel_probe_concurrency": env_int("CHANNEL_PROBE_CONCURRENCY", 3),
-            "channel_failure_threshold": env_int("CHANNEL_FAILURE_THRESHOLD", 2),
-            "channel_recovery_threshold": env_int("CHANNEL_RECOVERY_THRESHOLD", 2),
+            "channel_consecutive_failure_threshold": env_int("CHANNEL_CONSECUTIVE_FAILURE_THRESHOLD", 5),
+            "channel_failure_window_size": env_int("CHANNEL_FAILURE_WINDOW_SIZE", 10),
+            "channel_failure_window_threshold": env_int("CHANNEL_FAILURE_WINDOW_THRESHOLD", 5),
+            "channel_recovery_success_threshold": env_int("CHANNEL_RECOVERY_SUCCESS_THRESHOLD", 5),
             "log_interval_seconds": env_int("LOG_INTERVAL_SECONDS", 300),
             "resource_interval_seconds": env_int("RESOURCE_INTERVAL_SECONDS", 60),
             "report_interval_seconds": env_int("REPORT_INTERVAL_SECONDS", 86400),
             "log_overlap_seconds": env_int("LOG_OVERLAP_SECONDS", 60),
             "log_initial_lookback_seconds": env_int("LOG_INITIAL_LOOKBACK_SECONDS", 3600),
             "slow_request_seconds": float(os.getenv("SLOW_REQUEST_SECONDS", "60")),
-            "latency_hard_limit_seconds": float(os.getenv("LATENCY_HARD_LIMIT_SECONDS", "180")),
-            "latency_reminder_seconds": env_int("LATENCY_REMINDER_SECONDS", 1800),
+            "latency_first_response_seconds": float(os.getenv("LATENCY_FIRST_RESPONSE_SECONDS", "15")),
+            "latency_window_size": env_int("LATENCY_WINDOW_SIZE", 20),
+            "latency_failure_threshold": env_int("LATENCY_FAILURE_THRESHOLD", 15),
+            "latency_recovery_success_threshold": env_int("LATENCY_RECOVERY_SUCCESS_THRESHOLD", 10),
             "channel_slow_seconds": float(os.getenv("CHANNEL_SLOW_SECONDS", "30")),
             "resource_sustain_seconds": env_int("RESOURCE_SUSTAIN_SECONDS", 600),
             "system_cpu_threshold": float(os.getenv("SYSTEM_CPU_THRESHOLD", "85")),
@@ -706,6 +715,7 @@ class Runtime:
             "notification_quiet_hours_end": os.getenv("NOTIFICATION_QUIET_HOURS_END", "08:00"),
             "notification_quiet_hours_timezone": os.getenv("NOTIFICATION_QUIET_HOURS_TIMEZONE", "Asia/Shanghai"),
             "notification_quiet_hours_allow_critical": env_bool("NOTIFICATION_QUIET_HOURS_ALLOW_CRITICAL", True),
+            "experience_alerts_only": env_bool("EXPERIENCE_ALERTS_ONLY", True),
             "smtp_host": os.getenv("SMTP_HOST", ""),
             "smtp_port": env_int("SMTP_PORT", 25),
             "smtp_user": os.getenv("SMTP_USER", ""),
@@ -2281,7 +2291,10 @@ def update_settings(payload: SettingsUpdatePayload, request: Request, user: Admi
         for key in (
             "dashboard_refresh_seconds", "channel_sync_interval_seconds", "channel_interval_seconds",
             "log_interval_seconds", "resource_interval_seconds", "report_interval_seconds",
-            "log_overlap_seconds", "log_initial_lookback_seconds", "latency_reminder_seconds",
+            "log_overlap_seconds", "log_initial_lookback_seconds", "latency_window_size",
+            "latency_failure_threshold", "latency_recovery_success_threshold",
+            "channel_consecutive_failure_threshold", "channel_failure_window_size",
+            "channel_failure_window_threshold", "channel_recovery_success_threshold",
             "resource_sustain_seconds", "retention_days", "smtp_port",
             "incident_retention_days", "notification_retention_days",
             "database_maintenance_interval_seconds", "database_max_mb",
@@ -2292,7 +2305,7 @@ def update_settings(payload: SettingsUpdatePayload, request: Request, user: Admi
             if int(candidate[key]) <= 0:
                 raise ValueError(f"{key} must be greater than zero")
         for key in (
-            "slow_request_seconds", "latency_hard_limit_seconds", "channel_slow_seconds",
+            "slow_request_seconds", "latency_first_response_seconds", "channel_slow_seconds",
             "system_cpu_threshold", "system_memory_threshold", "system_disk_threshold",
             "container_cpu_threshold", "container_memory_threshold",
         ):

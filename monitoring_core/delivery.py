@@ -14,16 +14,29 @@ def delivery_backoff_seconds(attempt: int) -> int:
 
 
 class AlertPublisher:
-    def __init__(self, store: Any, destinations: Iterable[str]):
+    def __init__(
+        self,
+        store: Any,
+        destinations: Iterable[str],
+        notifiable_kinds: Iterable[str] | None = None,
+    ):
         self.store = store
         self.destinations = tuple(dict.fromkeys(str(item) for item in destinations if str(item)))
+        self.notifiable_kinds = (
+            frozenset(str(item) for item in notifiable_kinds if str(item))
+            if notifiable_kinds is not None else None
+        )
 
     def publish(self, events: Iterable[AlertEvent], now: int | None = None) -> list[int]:
         items = list(events)
         if not items:
             return []
         incident_ids = self.store.record_alert_events(items, now=now)
-        notifiable = [event for event in items if event.notify]
+        notifiable = [
+            event for event in items
+            if event.notify
+            and (self.notifiable_kinds is None or event.kind in self.notifiable_kinds)
+        ]
         if not notifiable or not self.destinations:
             return []
         subject = "；".join(event.title for event in notifiable)

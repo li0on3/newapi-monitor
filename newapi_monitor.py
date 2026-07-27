@@ -563,16 +563,20 @@ class Config:
     channel_sync_interval_seconds: int
     channel_interval_seconds: int
     channel_probe_concurrency: int
-    channel_failure_threshold: int
-    channel_recovery_threshold: int
+    channel_consecutive_failure_threshold: int
+    channel_failure_window_size: int
+    channel_failure_window_threshold: int
+    channel_recovery_success_threshold: int
     log_interval_seconds: int
     resource_interval_seconds: int
     report_interval_seconds: int
     log_overlap_seconds: int
     log_initial_lookback_seconds: int
     slow_request_seconds: float
-    latency_hard_limit_seconds: float
-    latency_reminder_seconds: int
+    latency_first_response_seconds: float
+    latency_window_size: int
+    latency_failure_threshold: int
+    latency_recovery_success_threshold: int
     channel_slow_seconds: float
     resource_sustain_seconds: int
     system_cpu_threshold: float
@@ -597,6 +601,7 @@ class Config:
     notification_quiet_hours_end: str
     notification_quiet_hours_timezone: str
     notification_quiet_hours_allow_critical: bool
+    experience_alerts_only: bool
     smtp_host: str
     smtp_port: int
     smtp_user: str
@@ -698,16 +703,20 @@ class Config:
             channel_sync_interval_seconds=int(value("channel_sync_interval_seconds", "CHANNEL_SYNC_INTERVAL_SECONDS", 5)),
             channel_interval_seconds=int(value("channel_interval_seconds", "CHANNEL_INTERVAL_SECONDS", 300)),
             channel_probe_concurrency=max(1, min(16, int(value("channel_probe_concurrency", "CHANNEL_PROBE_CONCURRENCY", 3)))),
-            channel_failure_threshold=max(1, min(10, int(value("channel_failure_threshold", "CHANNEL_FAILURE_THRESHOLD", 2)))),
-            channel_recovery_threshold=max(1, min(10, int(value("channel_recovery_threshold", "CHANNEL_RECOVERY_THRESHOLD", 2)))),
+            channel_consecutive_failure_threshold=max(1, min(10, int(value("channel_consecutive_failure_threshold", "CHANNEL_CONSECUTIVE_FAILURE_THRESHOLD", 5)))),
+            channel_failure_window_size=max(5, min(50, int(value("channel_failure_window_size", "CHANNEL_FAILURE_WINDOW_SIZE", 10)))),
+            channel_failure_window_threshold=max(1, min(50, int(value("channel_failure_window_threshold", "CHANNEL_FAILURE_WINDOW_THRESHOLD", 5)))),
+            channel_recovery_success_threshold=max(1, min(20, int(value("channel_recovery_success_threshold", "CHANNEL_RECOVERY_SUCCESS_THRESHOLD", 5)))),
             log_interval_seconds=int(value("log_interval_seconds", "LOG_INTERVAL_SECONDS", 300)),
             resource_interval_seconds=int(value("resource_interval_seconds", "RESOURCE_INTERVAL_SECONDS", 60)),
             report_interval_seconds=int(value("report_interval_seconds", "REPORT_INTERVAL_SECONDS", 86400)),
             log_overlap_seconds=int(value("log_overlap_seconds", "LOG_OVERLAP_SECONDS", 60)),
             log_initial_lookback_seconds=int(value("log_initial_lookback_seconds", "LOG_INITIAL_LOOKBACK_SECONDS", 3600)),
             slow_request_seconds=float(value("slow_request_seconds", "SLOW_REQUEST_SECONDS", 60.0)),
-            latency_hard_limit_seconds=float(value("latency_hard_limit_seconds", "LATENCY_HARD_LIMIT_SECONDS", 180.0)),
-            latency_reminder_seconds=int(value("latency_reminder_seconds", "LATENCY_REMINDER_SECONDS", 1800)),
+            latency_first_response_seconds=float(value("latency_first_response_seconds", "LATENCY_FIRST_RESPONSE_SECONDS", 15.0)),
+            latency_window_size=max(5, min(100, int(value("latency_window_size", "LATENCY_WINDOW_SIZE", 20)))),
+            latency_failure_threshold=max(1, min(100, int(value("latency_failure_threshold", "LATENCY_FAILURE_THRESHOLD", 15)))),
+            latency_recovery_success_threshold=max(1, min(50, int(value("latency_recovery_success_threshold", "LATENCY_RECOVERY_SUCCESS_THRESHOLD", 10)))),
             channel_slow_seconds=float(value("channel_slow_seconds", "CHANNEL_SLOW_SECONDS", 30.0)),
             resource_sustain_seconds=int(value("resource_sustain_seconds", "RESOURCE_SUSTAIN_SECONDS", 600)),
             system_cpu_threshold=float(value("system_cpu_threshold", "SYSTEM_CPU_THRESHOLD", 85.0)),
@@ -743,6 +752,7 @@ class Config:
             notification_quiet_hours_end=str(value("notification_quiet_hours_end", "NOTIFICATION_QUIET_HOURS_END", "08:00")),
             notification_quiet_hours_timezone=str(value("notification_quiet_hours_timezone", "NOTIFICATION_QUIET_HOURS_TIMEZONE", "Asia/Shanghai")),
             notification_quiet_hours_allow_critical=bool(value("notification_quiet_hours_allow_critical", "NOTIFICATION_QUIET_HOURS_ALLOW_CRITICAL", True)),
+            experience_alerts_only=bool(value("experience_alerts_only", "EXPERIENCE_ALERTS_ONLY", True)),
             smtp_host=str(value("smtp_host", "SMTP_HOST", "")),
             smtp_port=int(value("smtp_port", "SMTP_PORT", 25)),
             smtp_user=str(value("smtp_user", "SMTP_USER", "")),
@@ -796,6 +806,10 @@ class Config:
 
     def validate(self) -> None:
         missing = []
+        if self.channel_failure_window_threshold > self.channel_failure_window_size:
+            raise ValueError("CHANNEL_FAILURE_WINDOW_THRESHOLD must not exceed window size")
+        if self.latency_failure_threshold > self.latency_window_size:
+            raise ValueError("LATENCY_FAILURE_THRESHOLD must not exceed window size")
         if not self.access_token:
             missing.append("NEW_API_ACCESS_TOKEN")
         if self.user_id <= 0:
@@ -1640,12 +1654,14 @@ class ChannelProbeWorker:
         self.stale_after_seconds = stale_after_seconds
         self.channel_tracker = ChannelStateTracker(
             self.store.get_json("channel_states", {}),
-            failure_threshold=config.channel_failure_threshold,
-            recovery_threshold=config.channel_recovery_threshold,
+            consecutive_failure_threshold=config.channel_consecutive_failure_threshold,
+            failure_window_size=config.channel_failure_window_size,
+            failure_window_threshold=config.channel_failure_window_threshold,
+            recovery_threshold=config.channel_recovery_success_threshold,
         )
         self.credential_tracker = ProbeCredentialStateTracker(
             self.store.get_json("probe_credential_state", {}),
-            recovery_threshold=config.channel_recovery_threshold,
+            recovery_threshold=config.channel_recovery_success_threshold,
         )
 
     def _probe_channel(self, channel: dict[str, Any]) -> ChannelObservation:
@@ -1789,7 +1805,14 @@ class MonitorApp:
             )
             self.store.set_json("openai_status_state", {})
         self.notifier = NotificationDispatcher(config)
-        self.alert_publisher = AlertPublisher(self.store, self.notifier.destinations)
+        self.alert_publisher = AlertPublisher(
+            self.store,
+            self.notifier.destinations,
+            notifiable_kinds=(
+                {"channel_failed", "channel_recovered", "latency_high", "latency_recovered"}
+                if config.experience_alerts_only else None
+            ),
+        )
         cancelled_notifications = self.store.cancel_disabled_notifications(self.notifier.destinations)
         if cancelled_notifications:
             LOGGER.info(
@@ -1825,9 +1848,10 @@ class MonitorApp:
         self.service_tracker = ServiceStateTracker(str(self.store.get_json("service_state", "unknown")))
         self.latency_tracker = LatencyStateTracker(
             self.store.get_json("latency_states", {}),
-            slow_seconds=config.slow_request_seconds,
-            hard_limit_seconds=config.latency_hard_limit_seconds,
-            reminder_seconds=config.latency_reminder_seconds,
+            first_response_seconds=config.latency_first_response_seconds,
+            window_size=config.latency_window_size,
+            failure_threshold=config.latency_failure_threshold,
+            recovery_threshold=config.latency_recovery_success_threshold,
         )
         thresholds = {
             "system_cpu": config.system_cpu_threshold,
