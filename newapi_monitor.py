@@ -883,28 +883,62 @@ class NewAPIClient:
         return payload
 
     def get_channels(self) -> list[dict[str, Any]]:
-        payload = self._request("/api/channel/?page=1&page_size=1000")
-        data = payload.get("data")
-        if not isinstance(data, dict):
-            raise RuntimeError("New API channel response has no data object")
-        items = data.get("items")
-        if not isinstance(items, list):
-            raise RuntimeError("New API channel response has no items list")
-        try:
-            total = int(data.get("total") if data.get("total") is not None else len(items))
-        except (TypeError, ValueError) as error:
-            raise RuntimeError("New API channel response has an invalid total") from error
-        if not items and total != 0:
-            raise RuntimeError("New API channel response is incomplete: total is non-zero but items is empty")
         normalized: list[dict[str, Any]] = []
-        for item in items:
-            if not isinstance(item, dict):
-                raise RuntimeError("New API channel response contains a non-object item")
-            channel_id = int(item.get("id") or 0)
-            if channel_id <= 0 or "status" not in item:
-                raise RuntimeError("New API channel response contains an invalid channel item")
-            normalized.append(item)
-        return normalized
+        seen_ids: set[int] = set()
+        expected_total: int | None = None
+        page_size = 100
+        page = 1
+        while True:
+            query = urllib.parse.urlencode({"p": page, "page_size": page_size})
+            payload = self._request(f"/api/channel/?{query}")
+            data = payload.get("data")
+            if not isinstance(data, dict):
+                raise RuntimeError("New API channel response has no data object")
+            items = data.get("items")
+            if not isinstance(items, list):
+                raise RuntimeError("New API channel response has no items list")
+            raw_total = data.get("total")
+            if raw_total is not None:
+                try:
+                    page_total = int(raw_total)
+                except (TypeError, ValueError) as error:
+                    raise RuntimeError("New API channel response has an invalid total") from error
+                if page_total < 0 or page_total > 10_000:
+                    raise RuntimeError("New API channel response total is outside the supported range")
+                if expected_total is None:
+                    expected_total = page_total
+                elif expected_total != page_total:
+                    raise RuntimeError("New API channel response changed while pagination was in progress")
+
+            if not items:
+                if expected_total is not None and len(normalized) != expected_total:
+                    raise RuntimeError("New API channel response is incomplete")
+                return normalized
+
+            for item in items:
+                if not isinstance(item, dict):
+                    raise RuntimeError("New API channel response contains a non-object item")
+                try:
+                    channel_id = int(item.get("id") or 0)
+                except (TypeError, ValueError) as error:
+                    raise RuntimeError("New API channel response contains an invalid channel item") from error
+                if channel_id <= 0 or "status" not in item or channel_id in seen_ids:
+                    raise RuntimeError("New API channel response contains an invalid channel item")
+                seen_ids.add(channel_id)
+                normalized.append(item)
+
+            if len(normalized) > 10_000:
+                raise RuntimeError("New API channel response exceeds the supported channel limit")
+            if expected_total is not None:
+                if len(normalized) > expected_total:
+                    raise RuntimeError("New API channel response contains more items than total")
+                if len(normalized) == expected_total:
+                    return normalized
+                if len(items) < page_size:
+                    raise RuntimeError("New API channel response is incomplete")
+            elif len(items) < page_size:
+                return normalized
+            page += 1
 
     def test_channel(self, channel_id: int) -> dict[str, Any]:
         return self._request(f"/api/channel/test/{channel_id}", allow_failure=True)

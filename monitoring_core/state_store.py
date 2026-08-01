@@ -59,6 +59,14 @@ class StateStore:
             """
             CREATE INDEX IF NOT EXISTS idx_latency_created_at ON latency_samples(created_at);
             CREATE INDEX IF NOT EXISTS idx_latency_channel_model ON latency_samples(channel_id, model_name, created_at);
+            CREATE INDEX IF NOT EXISTS idx_latency_created_key
+                ON latency_samples(created_at DESC, sample_key DESC);
+            CREATE INDEX IF NOT EXISTS idx_latency_channel_created_key
+                ON latency_samples(channel_id, created_at DESC, sample_key DESC);
+            CREATE INDEX IF NOT EXISTS idx_latency_model_created_key
+                ON latency_samples(model_name, created_at DESC, sample_key DESC);
+            CREATE INDEX IF NOT EXISTS idx_latency_username_created_key
+                ON latency_samples(username, created_at DESC, sample_key DESC);
 
             CREATE TABLE IF NOT EXISTS channels (
                 channel_id INTEGER PRIMARY KEY,
@@ -84,6 +92,8 @@ class StateStore:
             );
             CREATE INDEX IF NOT EXISTS idx_channel_observation_time
                 ON channel_observations(channel_id, observed_at);
+            CREATE INDEX IF NOT EXISTS idx_channel_observation_source_time
+                ON channel_observations(channel_id, source, observed_at DESC, id DESC);
 
             CREATE TABLE IF NOT EXISTS resource_samples (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -118,6 +128,7 @@ class StateStore:
             );
             CREATE INDEX IF NOT EXISTS idx_incident_status_time ON incidents(status, updated_at);
             CREATE INDEX IF NOT EXISTS idx_incident_key ON incidents(incident_key, id);
+            CREATE INDEX IF NOT EXISTS idx_incident_started_at ON incidents(started_at DESC, id DESC);
 
             CREATE TABLE IF NOT EXISTS notification_outbox (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,

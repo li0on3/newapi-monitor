@@ -116,6 +116,8 @@ Before the first-run wizard is completed, health returns HTTP 200 with `{"status
 
 HTTP 503 is returned when SQLite is unavailable, the monitoring worker has stopped, a collector has exceeded its dynamic stale threshold, the database exceeds its configured capacity, dead letters exist, or pending delivery is older than 15 minutes.
 
+The overview also validates channel-catalog freshness. When synchronization is stale, the last snapshot remains available for diagnosis but is marked unknown instead of being presented as current health, with a direct interruption notice.
+
 ## Default Policy
 
 | Item | Default |
@@ -158,6 +160,7 @@ HTTP 503 is returned when SQLite is unavailable, the monitoring worker has stopp
 - Each OpenAI collection cycle only reads the fixed official `https://status.openai.com/api/v2/summary.json`, enforces response-size and timeout limits, and never accepts a configurable URL, preventing SSRF abuse.
 - Only the latest official-status snapshot is retained; incident progress is stored separately in the incident workspace, preventing unbounded SQLite growth at a 60-second polling interval.
 - Raw samples, resolved incidents, and notification delivery records have independent retention policies. Periodic pruning and WAL checkpoints bound storage growth, while System Settings shows database/WAL size, pending deliveries, and dead letters.
+- Log history uses ordered composite indexes for time and filter dimensions. Resource history aggregates bounded numeric buckets and returns the end-of-range container snapshot only on the final point, so long ranges do not depend on a large temporary filesystem.
 
 See [New API pages architecture](docs/CUSTOMER_CONSOLE_EN.md) for API mapping, permission boundaries, and compatibility policy. See [SECURITY_EN.md](SECURITY_EN.md) for the wider security boundary, [ROADMAP_EN.md](ROADMAP_EN.md) for planned work, and [GITHUB_GUIDE_EN.md](GITHUB_GUIDE_EN.md) for the protected-branch workflow.
 

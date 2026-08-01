@@ -128,6 +128,14 @@ export type KeyUsageResult = {
 
 export type Summary = {
   generated_at: number;
+  channel_sync: {
+    status: 'ok' | 'starting' | 'stale' | 'unknown';
+    age_seconds: number;
+    stale_after_seconds?: number;
+    last_success_at?: number;
+    consecutive_failures?: number;
+    last_error?: string;
+  };
   channels: {
     total: number;
     healthy: number;

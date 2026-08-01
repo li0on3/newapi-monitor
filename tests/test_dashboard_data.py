@@ -214,6 +214,24 @@ class DashboardRepositoryTests(unittest.TestCase):
         self.assertEqual(0, summary["channels"]["failed"])
         self.assertEqual(2, summary["channels"]["unknown"])
 
+    def test_summary_does_not_present_a_stale_channel_snapshot_as_current(self):
+        store = StateStore(self.db_path)
+        store.record_collector_result(
+            "channel_sync",
+            False,
+            "Unauthorized, invalid access token",
+            stale_after_seconds=60,
+            now=1_200,
+        )
+        store.connection.close()
+
+        summary = self.repository.summary(now=1_300, request_window_seconds=600)
+
+        self.assertEqual("stale", summary["channel_sync"]["status"])
+        self.assertEqual(0, summary["channels"]["healthy"])
+        self.assertEqual(0, summary["channels"]["failed"])
+        self.assertEqual(2, summary["channels"]["unknown"])
+
     def test_channels_include_latest_observation_and_history(self):
         channels = self.repository.channels(now=1_300, history_limit=60)
 
@@ -269,6 +287,46 @@ class DashboardRepositoryTests(unittest.TestCase):
 
         self.assertEqual(1, payload["total"])
         self.assertEqual("request-2", payload["items"][0]["request_id"])
+
+    def test_resource_history_keeps_latest_container_state_without_repeating_it(self):
+        store = StateStore(self.db_path)
+        store.insert_resource_sample(
+            {
+                "system_cpu": 35,
+                "system_memory": 45,
+                "system_disk": 55,
+                "system_available_mb": 900,
+                "system_swap": 5,
+            },
+            {"containers": {"new-api": {"status": "restarting", "memory_mb": 320}}},
+            created_at=1_280,
+        )
+        store.connection.close()
+
+        payload = self.repository.resources(
+            now=1_300,
+            start_timestamp=1_200,
+            end_timestamp=1_300,
+            limit=10,
+        )
+
+        self.assertGreaterEqual(len(payload["samples"]), 2)
+        self.assertTrue(all(not sample["containers"] for sample in payload["samples"][:-1]))
+        self.assertEqual(
+            "restarting",
+            payload["samples"][-1]["containers"]["new-api"]["status"],
+        )
+
+    def test_resource_history_does_not_bucket_future_empty_time(self):
+        payload = self.repository.resources(
+            now=1_300,
+            start_timestamp=1_200,
+            end_timestamp=2_000,
+            limit=10,
+        )
+
+        self.assertEqual(1_300, payload["requested_end"])
+        self.assertLessEqual(payload["bucket_seconds"], 15)
 
     def test_incident_query_supports_search_facets_and_resolution_context(self):
         store = StateStore(self.db_path)

@@ -1865,13 +1865,19 @@ def dashboard_summary(user: AuthenticatedUser) -> dict[str, Any]:
         return repository().summary()
     values = runtime.settings.runtime_values()
     audience = "viewer" if user["role"] == "viewer" else "admin"
+    visibility_candidates = [
+        {"channel_id": channel_id, "name": "", "enabled": True}
+        for channel_id in repository().enabled_channel_ids()
+    ]
     visible = runtime.settings.decorate_channels(
-        repository().channels(),
+        visibility_candidates,
         include_hidden=False,
         audience=audience,
     )
     visible_channel_ids = {int(item["channel_id"]) for item in visible}
     result = repository().summary(channel_ids=visible_channel_ids)
+    if audience == "viewer":
+        result.get("channel_sync", {}).pop("last_error", None)
     provider_visible = bool(
         values.get(
             "openai_status_viewer_visible" if audience == "viewer" else "openai_status_admin_visible",
