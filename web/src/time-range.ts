@@ -32,6 +32,10 @@ export function appendDateRange(query: URLSearchParams, range: TimeRange) {
   return query
 }
 
+export function isLiveRange(range: TimeRange, now = new Date()) {
+  return range.mode === 'all' || range.endDate === localDate(now)
+}
+
 export function rangeLabel(range: TimeRange, allLabel: string) {
   return range.mode === 'all' ? allLabel : `${range.startDate} → ${range.endDate}`
 }

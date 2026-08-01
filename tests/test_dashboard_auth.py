@@ -236,6 +236,36 @@ class DashboardRoleBoundaryTests(unittest.TestCase):
                         call()
                     self.assertEqual(503, denied.exception.status_code)
 
+    def test_viewer_summary_uses_visible_scope_and_hides_collector_errors(self):
+        viewer = {
+            "username": "alice",
+            "display_name": "Alice",
+            "role": "viewer",
+            "source": "newapi",
+            "source_role": 1,
+            "user_id": 9,
+        }
+        repository = mock.Mock()
+        repository.enabled_channel_ids.return_value = {1, 2}
+        repository.summary.return_value = {
+            "channel_sync": {
+                "status": "stale",
+                "age_seconds": 120,
+                "last_error": "Unauthorized, internal detail",
+            }
+        }
+        settings = mock.Mock()
+        settings.runtime_values.return_value = {"openai_status_enabled": False}
+        settings.decorate_channels.return_value = [{"channel_id": 2}]
+
+        with mock.patch.object(dashboard_app.runtime, "settings", settings), mock.patch(
+            "dashboard_app.repository", return_value=repository
+        ):
+            result = dashboard_app.dashboard_summary(viewer)
+
+        repository.summary.assert_called_once_with(channel_ids={2})
+        self.assertNotIn("last_error", result["channel_sync"])
+
     def test_viewer_channel_payload_omits_operator_only_metadata(self):
         viewer = {
             "username": "alice",

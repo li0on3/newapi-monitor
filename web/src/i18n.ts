@@ -1389,6 +1389,12 @@ const ENGLISH_OVERRIDES: Record<string, string> = {
   '可选：记录负责人、排查动作或工单编号': 'Optional: owner, investigation action, or ticket ID',
   '确认并记录': 'Acknowledge and record',
   '事件确认失败': 'Failed to acknowledge incident',
+  '渠道清单同步中断': 'Channel catalog synchronization is interrupted',
+  '当前展示的是最近一次成功同步的历史快照，渠道数量与启用状态可能已经变化。': 'This is the last successfully synchronized snapshot. Channel count and enabled states may have changed.',
+  '同步链路已异常 {{duration}}': 'Synchronization has been unhealthy for {{duration}}',
+  '图表粒度 {{value}} · {{count}} 个数据点': '{{value}} chart resolution · {{count}} data points',
+  '历史区间不自动刷新 · {{count}} 个数据点': 'Closed historical range · {{count}} data points',
+  '告警策略：渠道连续 5 次失败或 10 次内失败 5 次；20 次内 15 次首字超过 15 秒': 'Alert policy: 5 consecutive channel failures or 5 failures in 10 probes; first-token latency over 15s in 15 of 20 requests',
 }
 
 export function detectLanguage(browserLanguages: readonly string[] = [], savedLanguage?: string | null): Language {

@@ -4,6 +4,25 @@
 
 ## Unreleased
 
+## 1.11.0 - 2026-08-01
+
+### Fixed
+
+- Channel synchronization now follows New API's supported `p` pagination parameter and fails closed on changing totals, truncated pages, duplicate IDs, or oversized responses, preventing channels beyond the first page from being silently omitted.
+- A stale channel-catalog collector is no longer presented as current. The overview marks its channels unknown and gives administrators a direct synchronization-failure explanation.
+- Resource history no longer carries container JSON through a SQLite window sort, fixing `database or disk is full` on 7-day and lifetime queries with the 32 MiB temporary filesystem.
+
+### Changed
+
+- Added ordered composite indexes for log time, channel, model, user, and probe history. On a production database copy, an 80,000-row deep page dropped from about 102 ms median to 20 ms.
+- Resource history carries the end-of-range container snapshot only on its final point while numeric charts remain bounded to at most 1,440 time buckets, reducing sort and response cost.
+- Closed historical ranges no longer poll. Log filters, resource views, and incidents cancel obsolete in-flight requests, while non-overview core status refreshes every 30 seconds to prevent request pileups and stale-response races.
+- The UI now reports actual chart resolution and its footer matches the active 15-of-20 first-token and 5-of-10 channel-failure alert policy.
+
+### Security
+
+- Paginated snapshots accept at most 10,000 channels, malformed or incomplete snapshots never replace the last valid data, and raw collector errors remain hidden from regular users.
+
 ## 1.10.0 - 2026-07-27
 
 ### Changed

@@ -93,4 +93,11 @@ describe('translations', () => {
     expect(translate('启用静默时段', 'en')).toBe('Enable quiet hours')
     expect(translate('计划维护窗口', 'en')).toBe('Scheduled maintenance window')
   })
+
+  test('translates stale channel synchronization and history performance states', () => {
+    expect(translate('渠道清单同步中断', 'en')).toBe('Channel catalog synchronization is interrupted')
+    expect(translate('历史区间不自动刷新 · {{count}} 个数据点', 'en', { count: 120 })).toBe(
+      'Closed historical range · 120 data points',
+    )
+  })
 })

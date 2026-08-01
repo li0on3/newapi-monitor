@@ -59,14 +59,32 @@ class DashboardRepository:
                 ORDER BY c.channel_id
                 """
             ).fetchall()
-            request_rows = connection.execute(
-                """
-                SELECT channel_id, use_time, frt_ms, created_at
-                FROM latency_samples
-                WHERE created_at >= ?
-                """,
-                (since,),
-            ).fetchall()
+            request_parameters: list[Any] = [since]
+            request_scope = ""
+            if channel_ids is not None:
+                scoped_ids = sorted(int(channel_id) for channel_id in channel_ids)
+                if scoped_ids:
+                    request_scope = " AND channel_id IN (" + ",".join("?" for _ in scoped_ids) + ")"
+                    request_parameters.extend(scoped_ids)
+                    request_rows = connection.execute(
+                        f"""
+                        SELECT channel_id, use_time, frt_ms, created_at
+                        FROM latency_samples
+                        WHERE created_at >= ?{request_scope}
+                        """,
+                        request_parameters,
+                    ).fetchall()
+                else:
+                    request_rows = []
+            else:
+                request_rows = connection.execute(
+                    """
+                    SELECT channel_id, use_time, frt_ms, created_at
+                    FROM latency_samples
+                    WHERE created_at >= ?
+                    """,
+                    request_parameters,
+                ).fetchall()
             resource_row = connection.execute(
                 """
                 SELECT created_at, system_cpu, system_memory, system_disk,
@@ -81,6 +99,9 @@ class DashboardRepository:
                 FROM incidents WHERE status = 'open'
                 """
             ).fetchall()
+            collector_row = connection.execute(
+                "SELECT value FROM kv WHERE key = 'collector_health'"
+            ).fetchone()
 
         incident_rows = [
             row for row in incident_rows
@@ -90,7 +111,6 @@ class DashboardRepository:
         enabled = [row for row in channel_rows if int(row["status"] or 0) == 1]
         if channel_ids is not None:
             enabled = [row for row in enabled if int(row["channel_id"]) in channel_ids]
-            request_rows = [row for row in request_rows if int(row["channel_id"] or 0) in channel_ids]
             incident_rows = [
                 row
                 for row in incident_rows
@@ -105,6 +125,28 @@ class DashboardRepository:
         healthy = sum(1 for row in recent if row["success"] == 1)
         failed = sum(1 for row in recent if row["success"] == 0)
         unknown = len(enabled) - healthy - failed
+        channel_sync: dict[str, Any] = {"status": "unknown", "age_seconds": 0}
+        if collector_row is not None:
+            collectors = self._decode_json(collector_row["value"], {})
+            detail = dict(collectors.get("channel_sync") or {}) if isinstance(collectors, dict) else {}
+            if detail:
+                last_success = int(detail.get("last_success_at") or 0)
+                first_attempt = int(detail.get("first_attempt_at") or current_time)
+                stale_after = max(1, int(detail.get("stale_after_seconds") or 300))
+                age = max(0, current_time - (last_success or first_attempt))
+                status = "stale" if age > stale_after else ("ok" if last_success else "starting")
+                channel_sync = {
+                    "status": status,
+                    "age_seconds": age,
+                    "stale_after_seconds": stale_after,
+                    "last_success_at": last_success,
+                    "consecutive_failures": int(detail.get("consecutive_failures") or 0),
+                    "last_error": str(detail.get("last_error") or "")[:500],
+                }
+                if status == "stale":
+                    healthy = 0
+                    failed = 0
+                    unknown = len(enabled)
         durations = [float(row["use_time"] or 0) for row in request_rows]
         frt_values = [float(row["frt_ms"]) for row in request_rows if row["frt_ms"] is not None]
         slow_limit_ms = self.slow_seconds * 1000.0
@@ -127,6 +169,7 @@ class DashboardRepository:
             }
         return {
             "generated_at": current_time,
+            "channel_sync": channel_sync,
             "channels": {
                 "total": len(enabled),
                 "healthy": healthy,
@@ -153,6 +196,13 @@ class DashboardRepository:
                 "critical": sum(1 for row in incident_rows if str(row["severity"]) == "critical"),
             },
         }
+
+    def enabled_channel_ids(self) -> set[int]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT channel_id FROM channels WHERE status = 1"
+            ).fetchall()
+        return {int(row["channel_id"]) for row in rows}
 
     @staticmethod
     def _incident_channel_id(incident_key: str) -> int | None:
@@ -375,7 +425,7 @@ class DashboardRepository:
     ) -> dict[str, Any]:
         current_time = int(time.time()) if now is None else now
         sample_limit = max(1, min(limit, 5000))
-        requested_end = int(end_timestamp or current_time)
+        requested_end = min(int(end_timestamp or current_time), current_time)
         requested_start = int(start_timestamp) if start_timestamp is not None else requested_end - max(1, int(hours)) * 3600
         with self._connect() as connection:
             if all_time:
@@ -384,36 +434,23 @@ class DashboardRepository:
                 ).fetchone()
                 requested_start = int(bounds["first_at"] or requested_end)
                 requested_end = min(requested_end, int(bounds["last_at"] or requested_end))
-        requested_seconds = max(1, requested_end - requested_start + 1)
-        requested_hours = max(1, math.ceil(requested_seconds / 3600))
-        bucket_seconds = max(1, math.ceil(requested_seconds / sample_limit))
-        if bucket_seconds > 15:
-            bucket_seconds = math.ceil(bucket_seconds / 15) * 15
-        with self._connect() as connection:
+            requested_seconds = max(1, requested_end - requested_start + 1)
+            requested_hours = max(1, math.ceil(requested_seconds / 3600))
+            bucket_seconds = max(1, math.ceil(requested_seconds / sample_limit))
+            if bucket_seconds > 15:
+                bucket_seconds = math.ceil(bucket_seconds / 15) * 15
             rows = connection.execute(
                 """
-                WITH bucketed AS (
-                    SELECT id, created_at,
-                           CAST((created_at - ?) / ? AS INTEGER) * ? + ? AS bucket_at,
-                           system_cpu, system_memory, system_disk,
-                           system_available_mb, system_swap, containers_json,
-                           ROW_NUMBER() OVER (
-                               PARTITION BY CAST((created_at - ?) / ? AS INTEGER)
-                               ORDER BY created_at DESC, id DESC
-                           ) AS bucket_rank
-                    FROM resource_samples
-                    WHERE created_at >= ? AND created_at <= ?
-                )
-                SELECT bucket_at AS created_at,
+                SELECT CAST((created_at - ?) / ? AS INTEGER) * ? + ? AS created_at,
                        AVG(system_cpu) AS system_cpu,
                        AVG(system_memory) AS system_memory,
                        AVG(system_disk) AS system_disk,
                        AVG(system_available_mb) AS system_available_mb,
-                       AVG(system_swap) AS system_swap,
-                       MAX(CASE WHEN bucket_rank = 1 THEN containers_json END) AS containers_json
-                FROM bucketed
-                GROUP BY bucket_at
-                ORDER BY bucket_at
+                       AVG(system_swap) AS system_swap
+                FROM resource_samples
+                WHERE created_at >= ? AND created_at <= ?
+                GROUP BY CAST((created_at - ?) / ? AS INTEGER)
+                ORDER BY created_at
                 LIMIT ?
                 """,
                 (
@@ -422,17 +459,27 @@ class DashboardRepository:
                     bucket_seconds,
                     requested_start,
                     requested_start,
-                    bucket_seconds,
-                    requested_start,
                     requested_end,
+                    requested_start,
+                    bucket_seconds,
                     sample_limit,
                 ),
             ).fetchall()
-        samples = []
-        for row in rows:
-            item = dict(row)
-            item["containers"] = self._decode_json(item.pop("containers_json"), {})
-            samples.append(item)
+            latest_container_row = connection.execute(
+                """
+                SELECT containers_json
+                FROM resource_samples
+                WHERE created_at >= ? AND created_at <= ?
+                ORDER BY created_at DESC, id DESC LIMIT 1
+                """,
+                (requested_start, requested_end),
+            ).fetchone()
+        samples = [{**dict(row), "containers": {}} for row in rows]
+        if samples and latest_container_row is not None:
+            samples[-1]["containers"] = self._decode_json(
+                latest_container_row["containers_json"],
+                {},
+            )
         actual_start = int(samples[0]["created_at"]) if samples else 0
         actual_end = int(samples[-1]["created_at"]) if samples else 0
         covered_seconds = max(0, actual_end - actual_start + bucket_seconds) if samples else 0

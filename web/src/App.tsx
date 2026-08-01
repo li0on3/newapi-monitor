@@ -44,7 +44,7 @@ import {
   XCircle,
 } from 'lucide-react';
 import { TimeRangeControl } from './TimeRangeControl';
-import { appendDateRange, presetRange, rangeLabel, type TimeRange } from './time-range';
+import { appendDateRange, isLiveRange, presetRange, rangeLabel, type TimeRange } from './time-range';
 import { FormEvent, PointerEvent as ReactPointerEvent, ReactNode, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { api, ApiError } from './api';
@@ -839,6 +839,7 @@ function Overview({ summary, channels, range, onRange, onChannel, onProviderStat
   const resourceAge = summary.resources.created_at ? Math.floor(Date.now() / 1000 - summary.resources.created_at) : null;
   return (
     <>
+      {summary.channel_sync?.status === 'stale' && <div className="channel-sync-warning" role="alert"><span><AlertTriangle size={19} /></span><div><strong>{t('渠道清单同步中断')}</strong><p>{t('当前展示的是最近一次成功同步的历史快照，渠道数量与启用状态可能已经变化。')}</p><small>{t('同步链路已异常 {{duration}}', { duration: formatElapsed(summary.channel_sync.age_seconds) })}</small></div>{summary.channel_sync.last_error && <code title={summary.channel_sync.last_error}>{summary.channel_sync.last_error}</code>}</div>}
       <section className="metrics-grid">
         <MetricCard icon={<CheckCircle2 />} label={t("渠道健康")} value={`${summary.channels.healthy}/${summary.channels.total}`} detail={`${summary.channels.failed} ${t('异常')} · ${summary.channels.unknown} ${t('未知')}`} tone={summary.channels.failed ? 'bad' : 'ok'} />
         <MetricCard icon={<Clock3 />} label={t("24H 请求耗时")} value={`P95 ${summary.requests.p95_seconds.toFixed(2)}s`} detail={`${t('平均')} ${summary.requests.average_seconds.toFixed(2)}s · ${summary.requests.total} ${t('次')}`} tone={summary.requests.slow ? 'warn' : 'neutral'} />
@@ -860,33 +861,45 @@ function LogsView({ channels }: { channels: Channel[] }) {
   const [slowOnly, setSlowOnly] = useState(false);
   const [channelId, setChannelId] = useState('');
   const [model, setModel] = useState('');
+  const [modelQuery, setModelQuery] = useState('');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [range, setRange] = useState<TimeRange>(() => presetRange(7));
   const [page, setPage] = useState(0);
+  const requestController = useRef<AbortController | null>(null);
   const pageSize = 200;
 
+  useEffect(() => {
+    const timer = window.setTimeout(() => setModelQuery(model.trim()), 300);
+    return () => window.clearTimeout(timer);
+  }, [model]);
+
   const load = useCallback(async () => {
+    requestController.current?.abort();
+    const controller = new AbortController();
+    requestController.current = controller;
     setLoading(true);
     setError('');
     const params = new URLSearchParams({ limit: String(pageSize), offset: String(page * pageSize), slow_only: String(slowOnly) });
     appendDateRange(params, range);
     if (channelId) params.set('channel_id', channelId);
-    if (model.trim()) params.set('model_name', model.trim());
+    if (modelQuery) params.set('model_name', modelQuery);
     try {
-      const payload = await api<{ items: LogItem[]; total: number }>(`logs?${params}`);
+      const payload = await api<{ items: LogItem[]; total: number }>(`logs?${params}`, { signal: controller.signal });
       setItems(payload.items);
       setTotal(payload.total);
     } catch (requestError) {
+      if (requestError instanceof DOMException && requestError.name === 'AbortError') return;
       setError(requestError instanceof Error ? requestError.message : t('日志加载失败'));
     } finally {
-      setLoading(false);
+      if (requestController.current === controller) setLoading(false);
     }
-  }, [channelId, model, page, range, slowOnly]);
+  }, [channelId, modelQuery, page, range, slowOnly]);
 
-  useEffect(() => { setPage(0); }, [channelId, model, range, slowOnly]);
+  useEffect(() => { setPage(0); }, [channelId, modelQuery, range, slowOnly]);
 
   useEffect(() => { void load(); }, [load]);
+  useEffect(() => () => requestController.current?.abort(), []);
   return (
     <section>
       <div className="section-heading"><div><span className="eyebrow">REAL CONSUMPTION LOGS</span><h2>{t("真实使用日志耗时")}</h2></div><span className="source-note">{t("仅保存耗时元数据，不保存提示词或响应正文")}</span></div>
@@ -1052,20 +1065,36 @@ function MetricChart({ samples, field, color, label, description, threshold, ico
 
 function ResourcesView() {
   const [samples, setSamples] = useState<ResourceSample[]>([]);
+  const [bucketSeconds, setBucketSeconds] = useState(0);
   const [error, setError] = useState('');
   const [range, setRange] = useState<TimeRange>(() => presetRange(1));
   const [loading, setLoading] = useState(false);
+  const requestController = useRef<AbortController | null>(null);
+  const liveRange = isLiveRange(range);
   const load = useCallback(async () => {
+    requestController.current?.abort();
+    const controller = new AbortController();
+    requestController.current = controller;
     setLoading(true);
     try {
       const parameters = appendDateRange(new URLSearchParams(), range);
-      const payload = await api<{ samples: ResourceSample[] }>(`resources?${parameters.toString()}`);
+      const payload = await api<{ samples: ResourceSample[]; bucket_seconds: number }>(`resources?${parameters.toString()}`, { signal: controller.signal });
       setSamples(payload.samples);
+      setBucketSeconds(payload.bucket_seconds);
       setError('');
-    } catch (requestError) { setError(requestError instanceof Error ? requestError.message : t('资源加载失败')); }
-    finally { setLoading(false); }
+    } catch (requestError) {
+      if (requestError instanceof DOMException && requestError.name === 'AbortError') return;
+      setError(requestError instanceof Error ? requestError.message : t('资源加载失败'));
+    } finally {
+      if (requestController.current === controller) setLoading(false);
+    }
   }, [range]);
-  useEffect(() => { void load(); const timer = window.setInterval(() => void load(), REFRESH_SECONDS * 1000); return () => window.clearInterval(timer); }, [load]);
+  useEffect(() => {
+    void load();
+    if (!liveRange) return () => requestController.current?.abort();
+    const timer = window.setInterval(() => void load(), 15_000);
+    return () => { window.clearInterval(timer); requestController.current?.abort(); };
+  }, [liveRange, load]);
   const latest = samples[samples.length - 1];
   const containers = latest?.containers || {};
   const highest = Math.max(latest?.system_cpu || 0, latest?.system_memory || 0, latest?.system_disk || 0);
@@ -1073,7 +1102,7 @@ function ResourcesView() {
   const resourceLabel = resourceTone === 'bad' ? t('资源压力较高') : resourceTone === 'warn' ? t('资源需要关注') : t('资源运行平稳');
   return (
     <section>
-      <div className="section-heading resource-heading"><div><span className="eyebrow">HOST & CONTAINER TELEMETRY</span><h2>{t("机器资源")}</h2></div><div className="resource-controls"><span className="source-note"><i className={loading ? 'source-pulse source-pulse-loading' : 'source-pulse'} />{t("15 秒采样 ·")} {samples.length} {t("个数据点")}</span><TimeRangeControl compact value={range} onChange={setRange} /></div></div>
+      <div className="section-heading resource-heading"><div><span className="eyebrow">HOST & CONTAINER TELEMETRY</span><h2>{t("机器资源")}</h2></div><div className="resource-controls"><span className="source-note"><i className={loading ? 'source-pulse source-pulse-loading' : 'source-pulse'} />{liveRange ? t('图表粒度 {{value}} · {{count}} 个数据点', { value: formatElapsed(bucketSeconds), count: samples.length }) : t('历史区间不自动刷新 · {{count}} 个数据点', { count: samples.length })}</span><TimeRangeControl compact value={range} onChange={setRange} /></div></div>
       {error && <div className="inline-error"><AlertTriangle size={16} />{error}</div>}
       <div className={`resource-insight resource-insight-${resourceTone}`}><div className="resource-insight-mark"><Activity size={22} /></div><div><span>RESOURCE SIGNAL</span><strong>{resourceLabel}</strong><small>{latest ? t('最后采样 {{time}}', { time: formatFullTime(latest.created_at) }) : t('正在等待第一批资源样本')}</small></div><div className="resource-insight-score"><span>{t("最高负载")}</span><strong>{latest ? `${highest.toFixed(1)}%` : '—'}</strong></div></div>
       <div className="metrics-grid resource-metrics"><MetricCard icon={<Cpu />} label="CPU" value={formatPercent(latest?.system_cpu)} detail={t("告警阈值 85%")} tone={(latest?.system_cpu || 0) > 85 ? 'bad' : 'neutral'} /><MetricCard icon={<MemoryStick />} label={t("内存")} value={formatPercent(latest?.system_memory)} detail={t('可用 {{value}} GB', { value: latest?.system_available_mb ? (latest.system_available_mb / 1024).toFixed(2) : '—' })} tone={(latest?.system_memory || 0) > 85 ? 'bad' : 'neutral'} /><MetricCard icon={<HardDrive />} label={t("系统盘")} value={formatPercent(latest?.system_disk)} detail={t("告警阈值 80%")} tone={(latest?.system_disk || 0) > 80 ? 'bad' : 'neutral'} /><MetricCard icon={<CircleGauge />} label="Swap" value={formatPercent(latest?.system_swap)} detail={t('最后采样 {{time}}', { time: formatTime(latest?.created_at || 0) })} /></div>
@@ -1127,6 +1156,7 @@ function IncidentsView() {
   const [error, setError] = useState('');
   const [acknowledgementNote, setAcknowledgementNote] = useState('');
   const [acknowledging, setAcknowledging] = useState(false);
+  const requestController = useRef<AbortController | null>(null);
   const pageSize = 50;
 
   useEffect(() => {
@@ -1136,6 +1166,9 @@ function IncidentsView() {
   useEffect(() => { setPage(0); }, [status, severity, category, range, query]);
 
   const load = useCallback(async () => {
+    requestController.current?.abort();
+    const controller = new AbortController();
+    requestController.current = controller;
     setLoading(true);
     const parameters = new URLSearchParams({
       status,
@@ -1147,7 +1180,7 @@ function IncidentsView() {
     appendDateRange(parameters, range);
     if (query) parameters.set('q', query);
     try {
-      const payload = await api<IncidentPayload>(`incidents?${parameters.toString()}`);
+      const payload = await api<IncidentPayload>(`incidents?${parameters.toString()}`, { signal: controller.signal });
       setItems(payload.items);
       setSummary(payload.summary);
       setTotal(payload.total);
@@ -1155,14 +1188,17 @@ function IncidentsView() {
       setSelectedId((current) => payload.items.some((item) => item.id === current) ? current : payload.items[0]?.id ?? null);
       setError('');
     } catch (requestError) {
+      if (requestError instanceof DOMException && requestError.name === 'AbortError') return;
       setError(requestError instanceof Error ? requestError.message : t('事件加载失败'));
-    } finally { setLoading(false); }
+    } finally {
+      if (requestController.current === controller) setLoading(false);
+    }
   }, [category, page, query, range, severity, status]);
 
   useEffect(() => {
     void load();
     const timer = window.setInterval(() => void load(), 30_000);
-    return () => window.clearInterval(timer);
+    return () => { window.clearInterval(timer); requestController.current?.abort(); };
   }, [load]);
 
   const selected = items.find((item) => item.id === selectedId) || null;
@@ -1276,8 +1312,10 @@ export default function App() {
   const [error, setError] = useState('');
   const [refreshing, setRefreshing] = useState(false);
   const [countdown, setCountdown] = useState(REFRESH_SECONDS);
+  const coreRequestController = useRef<AbortController | null>(null);
   const refreshSeconds = Math.max(2, user?.dashboard_refresh_seconds || REFRESH_SECONDS);
   const tab: Tab = route.tab;
+  const coreRefreshSeconds = tab === 'overview' ? refreshSeconds : Math.max(30, refreshSeconds);
   const elevated = canAccessMonitorModules(user?.role || '');
   const customerView = user?.role === 'viewer';
   const enabledConsolePageList = useMemo(
@@ -1312,26 +1350,49 @@ export default function App() {
   }, []);
 
   const loadCore = useCallback(async () => {
+    coreRequestController.current?.abort();
+    const controller = new AbortController();
+    coreRequestController.current = controller;
     setRefreshing(true);
     try {
       const channelParameters = appendDateRange(new URLSearchParams(), overviewRange);
-      const [summaryPayload, channelPayload] = await Promise.all([api<Summary>('dashboard/summary'), api<{ items: Channel[] }>(`channels?${channelParameters.toString()}`)]);
+      const needsChannelDetails = tab === 'overview' || tab === 'logs';
+      const [summaryPayload, channelPayload] = await Promise.all([
+        api<Summary>('dashboard/summary', { signal: controller.signal }),
+        needsChannelDetails
+          ? api<{ items: Channel[] }>(`channels?${channelParameters.toString()}`, { signal: controller.signal })
+          : Promise.resolve(null),
+      ]);
       setSummary(summaryPayload);
-      const enabledChannels = channelPayload.items.filter((channel) => channel.enabled);
-      setChannels(enabledChannels);
-      setSelectedChannel((current) => current
-        ? enabledChannels.find((channel) => channel.channel_id === current.channel_id) || null
-        : null);
+      if (channelPayload) {
+        const enabledChannels = channelPayload.items.filter((channel) => channel.enabled);
+        setChannels(enabledChannels);
+        setSelectedChannel((current) => current
+          ? enabledChannels.find((channel) => channel.channel_id === current.channel_id) || null
+          : null);
+      }
       setError('');
-      setCountdown(refreshSeconds);
+      setCountdown(coreRefreshSeconds);
     } catch (requestError) {
+      if (requestError instanceof DOMException && requestError.name === 'AbortError') return;
       if (requestError instanceof ApiError && requestError.status === 401) setAuthState('guest');
       else setError(requestError instanceof Error ? requestError.message : t('监控数据加载失败'));
-    } finally { setRefreshing(false); }
-  }, [overviewRange, refreshSeconds]);
+    } finally {
+      if (coreRequestController.current === controller) setRefreshing(false);
+    }
+  }, [coreRefreshSeconds, overviewRange, tab]);
 
-  useEffect(() => { if (authState !== 'ready' || tab === 'console' || (!elevated && tab !== 'overview')) return; void loadCore(); const timer = window.setInterval(() => void loadCore(), refreshSeconds * 1000); return () => window.clearInterval(timer); }, [authState, elevated, loadCore, refreshSeconds, tab]);
-  useEffect(() => { if (authState !== 'ready') return; const timer = window.setInterval(() => setCountdown((value) => value <= 1 ? refreshSeconds : value - 1), 1000); return () => window.clearInterval(timer); }, [authState, refreshSeconds]);
+  useEffect(() => {
+    if (authState !== 'ready' || tab === 'console' || (!elevated && tab !== 'overview')) return;
+    void loadCore();
+    const timer = window.setInterval(() => void loadCore(), coreRefreshSeconds * 1000);
+    return () => { window.clearInterval(timer); coreRequestController.current?.abort(); };
+  }, [authState, coreRefreshSeconds, elevated, loadCore, tab]);
+  useEffect(() => {
+    if (authState !== 'ready') return;
+    const timer = window.setInterval(() => setCountdown((value) => value <= 1 ? coreRefreshSeconds : value - 1), 1000);
+    return () => window.clearInterval(timer);
+  }, [authState, coreRefreshSeconds]);
   useEffect(() => {
     if (!user) return;
     const consoleAllowed = tab === 'console'
@@ -1353,7 +1414,7 @@ export default function App() {
     if (!summary) return { tone: 'muted' as const, label: t('正在同步') };
     const providerIssue = summary.provider_status?.include_in_overall
       && buildProviderStatusContext(summary.provider_status).state === 'relevant-issue';
-    if (summary.channels.failed || summary.incidents.critical || providerIssue) return { tone: 'bad' as const, label: t('存在异常') };
+    if (summary.channel_sync?.status === 'stale' || summary.channels.failed || summary.incidents.critical || providerIssue) return { tone: 'bad' as const, label: t('存在异常') };
     if (summary.channels.unknown || summary.requests.slow) return { tone: 'warn' as const, label: t('需要关注') };
     return { tone: 'ok' as const, label: t('运行正常') };
   }, [summary]);
@@ -1408,7 +1469,7 @@ export default function App() {
             {error && <div className="inline-error"><AlertTriangle size={16} />{error}<button onClick={() => void loadCore()}>{t("重试")}</button></div>}
             {summary ? <>{tab === 'overview' && <Overview summary={summary} channels={channels} range={overviewRange} onRange={setOverviewRange} onChannel={setSelectedChannel} showProviderStatus={elevated} onProviderStatus={() => navigate({ tab: 'providerStatus', settingsPage: 'status', consolePage: 'overview' })} />}{tab === 'providerStatus' && summary.provider_status && <ProviderStatusView status={summary.provider_status} summary={summary} onOverview={() => navigate({ tab: 'overview', settingsPage: 'status', consolePage: 'overview' })} />}{tab === 'providerStatus' && !summary.provider_status && <div className="empty-state provider-unavailable"><Cloud size={28} /><strong>{t('官方状态当前不可见')}</strong><span>{t('该功能可能已关闭，或当前角色没有查看权限。')}</span><button className="secondary-button" type="button" onClick={() => navigate({ tab: 'overview', settingsPage: 'status', consolePage: 'overview' })}>{t('返回渠道总览')}</button></div>}{tab === 'keyUsage' && user?.key_usage_available && <KeyUsageView />}{tab === 'logs' && elevated && <LogsView channels={channels} />}{tab === 'resources' && elevated && <ResourcesView />}{tab === 'incidents' && elevated && <IncidentsView />}{tab === 'deliveries' && user?.role === 'admin' && <DeliveriesView />}{tab === 'channels' && elevated && <ChannelSettingsView />}{tab === 'settings' && user?.role === 'admin' && <SettingsView activePage={route.settingsPage} onActivePageChange={(settingsPage) => navigate({ tab: 'settings', settingsPage, consolePage: 'overview' })} />}</> : <div className="loading-panel"><RefreshCw className="spin" /><span>{t("正在读取第一批监控数据")}</span></div>}</>}
           </main>
-          <footer><span>{customerView ? t('数据源：真实调用、渠道探测与资源采集') : <>{t("数据源：New API 管理接口 / 真实 Relay 请求 / Linux")} & Docker / OpenAI Status</>}</span><span>{t("告警阈值：总耗时或首字")} &gt; {t("60s，3/5 或 5/10 触发")}</span></footer>
+          <footer><span>{customerView ? t('数据源：真实调用、渠道探测与资源采集') : <>{t("数据源：New API 管理接口 / 真实 Relay 请求 / Linux")} & Docker / OpenAI Status</>}</span><span>{t('告警策略：渠道连续 5 次失败或 10 次内失败 5 次；20 次内 15 次首字超过 15 秒')}</span></footer>
         </div>
       </div>
       {selectedChannel && <DetailDrawer channel={selectedChannel} customerView={customerView} onClose={() => setSelectedChannel(null)} />}

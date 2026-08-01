@@ -322,6 +322,89 @@ class NewAPIClientLogTests(unittest.TestCase):
         self.assertIn("p=2", paths[1])
 
 
+class NewAPIClientChannelTests(unittest.TestCase):
+    def test_channel_pagination_returns_the_complete_snapshot(self):
+        config = mock.Mock(base_url="https://newapi.example", access_token="token", user_id=1)
+        client = NewAPIClient(config)
+        paths: list[str] = []
+
+        def fake_request(path: str, allow_failure: bool = False):
+            paths.append(path)
+            page = newapi_monitor.urllib.parse.parse_qs(
+                newapi_monitor.urllib.parse.urlsplit(path).query
+            ).get("p", [""])[0]
+            if page == "1":
+                return {
+                    "data": {
+                        "items": [
+                            {"id": index, "name": f"channel-{index}", "status": 1}
+                            for index in range(1, 101)
+                        ],
+                        "total": 101,
+                    }
+                }
+            if page == "2":
+                return {
+                    "data": {
+                        "items": [{"id": 101, "name": "channel-101", "status": 1}],
+                        "total": 101,
+                    }
+                }
+            self.fail(f"unexpected pagination path: {path}")
+
+        client._request = fake_request
+
+        channels = client.get_channels()
+
+        self.assertEqual(101, len(channels))
+        self.assertIn("p=1", paths[0])
+        self.assertIn("page_size=100", paths[0])
+        self.assertIn("p=2", paths[1])
+
+    def test_channel_pagination_rejects_a_truncated_snapshot(self):
+        config = mock.Mock(base_url="https://newapi.example", access_token="token", user_id=1)
+        client = NewAPIClient(config)
+
+        def fake_request(path: str, allow_failure: bool = False):
+            page = newapi_monitor.urllib.parse.parse_qs(
+                newapi_monitor.urllib.parse.urlsplit(path).query
+            ).get("p", [""])[0]
+            if page == "1":
+                return {
+                    "data": {
+                        "items": [
+                            {"id": index, "name": f"channel-{index}", "status": 1}
+                            for index in range(1, 101)
+                        ],
+                        "total": 101,
+                    }
+                }
+            return {"data": {"items": [], "total": 101}}
+
+        client._request = fake_request
+
+        with self.assertRaisesRegex(RuntimeError, "incomplete"):
+            client.get_channels()
+
+    def test_channel_pagination_rejects_duplicate_ids(self):
+        config = mock.Mock(base_url="https://newapi.example", access_token="token", user_id=1)
+        client = NewAPIClient(config)
+        client._request = mock.Mock(
+            return_value={
+                "data": {
+                    "items": [
+                        {"id": 7, "name": "first", "status": 1},
+                        {"id": 7, "name": "duplicate", "status": 1},
+                    ],
+                    "total": 2,
+                }
+            }
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "invalid channel item"):
+            client.get_channels()
+
+
 class LatencyWindowTests(unittest.TestCase):
     def test_triggers_only_when_fifteen_of_twenty_first_responses_exceed_fifteen_seconds(self):
         samples = [
