@@ -488,6 +488,9 @@ footer { display: flex; justify-content: space-between; gap: 20px; padding: 17px
 .analytics-tooltip > div { grid-template-columns:minmax(0,1fr) auto; margin-bottom:8px; padding-bottom:8px; border-bottom:1px solid var(--border); }
 .analytics-tooltip > div strong { font-size:9px; }.analytics-tooltip > div b { font:700 10px Consolas,monospace; }
 .analytics-tooltip > span { padding:4px 0; font-size:8px; }.analytics-tooltip > span i { width:7px; height:7px; border-radius:2px; }.analytics-tooltip > span em { overflow:hidden; font-style:normal; text-overflow:ellipsis; white-space:nowrap; }.analytics-tooltip > span b { font:700 9px Consolas,monospace; }
+.analytics-scope-tabs { flex:0 0 auto; }
+.console-ranking-list .analytics-overflow-row,.console-ranking-list .analytics-pending-row,.console-flow-list .analytics-overflow-row,.console-flow-list .analytics-pending-row { background:var(--surface-deep); }
+.console-ranking-list .analytics-pending-row,.console-flow-list .analytics-pending-row { color:var(--text-muted); }
 .sr-only { position:absolute!important; width:1px!important; height:1px!important; padding:0!important; margin:-1px!important; overflow:hidden!important; clip:rect(0,0,0,0)!important; white-space:nowrap!important; border:0!important; }
 
 /* Multi-membership key groups */

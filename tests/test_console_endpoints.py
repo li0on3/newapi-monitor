@@ -77,12 +77,12 @@ class FakeConsoleClient:
         self.calls.append(("stat", session, user_id, source_role, filters))
         return {"quota": 0, "rpm": 0, "tpm": 0}
 
-    def analytics(self, session, user_id, source_role, start, end, username=""):
-        self.calls.append(("analytics", session, user_id, source_role, start, end, username))
+    def analytics(self, session, user_id, source_role, start, end, username="", scope="auto"):
+        self.calls.append(("analytics", session, user_id, source_role, start, end, username, scope))
         return {
             "start_timestamp": start,
             "end_timestamp": end,
-            "scope": "global" if source_role >= 10 else "self",
+            "scope": "self" if scope == "self" or source_role < 10 else "global",
             "series": [],
             "flow": [],
             "stat": {"quota": 0, "rpm": 0, "tpm": 0},
@@ -305,6 +305,37 @@ class ConsoleEndpointTests(unittest.TestCase):
             )
 
         self.assertEqual(500000, result["quota_per_unit"])
+
+    def test_admin_can_select_self_analytics_scope(self):
+        admin = {**self.user, "role": "admin", "source_role": 10}
+        with patch.object(dashboard_app.runtime, "settings", self.settings), patch(
+            "dashboard_app.console_client", return_value=self.client
+        ):
+            result = dashboard_app.get_console_analytics(
+                request("/api/console/analytics"), admin, 100, 200, "", False, "self"
+            )
+
+        self.assertEqual("self", result["scope"])
+        self.assertEqual("self", self.client.calls[0][-1])
+
+    def test_regular_user_cannot_select_global_analytics_scope(self):
+        with patch.object(dashboard_app.runtime, "settings", self.settings):
+            with self.assertRaises(HTTPException) as raised:
+                dashboard_app.get_console_analytics(
+                    request("/api/console/analytics"), self.user, 100, 200, "", False, "global"
+                )
+
+        self.assertEqual(403, raised.exception.status_code)
+
+    def test_admin_self_scope_cannot_filter_another_username(self):
+        admin = {**self.user, "role": "admin", "source_role": 10}
+        with patch.object(dashboard_app.runtime, "settings", self.settings):
+            with self.assertRaises(HTTPException) as raised:
+                dashboard_app.get_console_analytics(
+                    request("/api/console/analytics"), admin, 100, 200, "alice", False, "self"
+                )
+
+        self.assertEqual(422, raised.exception.status_code)
 
     def test_request_id_log_search_does_not_claim_unsupported_aggregate_metrics(self):
         with patch.object(dashboard_app.runtime, "settings", self.settings), patch(

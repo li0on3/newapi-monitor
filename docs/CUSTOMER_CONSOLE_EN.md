@@ -36,13 +36,13 @@ The monitor login page never collects or stores regular-user upstream passwords.
 | API Keys | `/monitor/console/keys` | `/api/token/*`, `/api/user/models`, `/api/user/self/groups`, `/api/data/flow/self` |
 | Usage Logs | `/monitor/console/logs` | `/api/log/` or `/api/log/self`, plus the matching statistics endpoint |
 
-New API administrators use global endpoints; regular users use only self endpoints. A regular-user query is capped at 30 days.
+Analytics defaults to global endpoints for New API administrators, who can explicitly switch to the current account's self endpoints. Regular users are server-enforced to self endpoints, and username filtering is accepted only in administrator Global scope.
 
 Regular users do not see the technical Monitor workspace. They can read only channel cards and summary status enabled for the viewer audience. The official-status page, monitor logs, machine resources, incidents, key lookup, channel settings, and system settings still reject viewers on the server, and editing a URL cannot bypass this boundary.
 
 Viewer channel responses use a fixed allowlist containing only display status, latency, availability, model scope, and aggregate metrics. Original channel names, probe configuration, recent request logs, and raw upstream error bodies are never sent. Administrators and operators retain the full troubleshooting view.
 
-Analytics uses real New API aggregates to render a model-stacked timeline and can switch between Requests, Tokens, and Spend. Quick date presets query immediately, and a slower stale request cannot overwrite the user's later selection.
+Analytics uses real New API data to render a model-stacked timeline and can switch between Requests, Tokens, and Spend. The spend total uses the most complete value among live consume-log statistics, model attribution, and flow attribution. Live logs normally close the current-period gap, while model and flow details use New API's `quota_data` projection. Any newest-period difference is shown explicitly as pending attribution. Usage-flow rows are merged by the account/key, group, and model dimensions visible in the UI; hidden node and channel dimensions cannot create duplicate-looking rows, and everything after row 12 is summarized as Other so visible details close to the total. A slower stale request cannot overwrite the user's later selection.
 
 ## Data and keys
 

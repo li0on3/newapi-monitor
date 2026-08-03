@@ -1355,12 +1355,17 @@ def get_console_analytics(
     end_timestamp: int | None = Query(None, ge=1),
     username: str = Query("", max_length=128),
     all_time: bool = False,
+    scope: Annotated[str, Query(max_length=6, pattern="^(auto|global|self)$")] = "auto",
 ) -> dict[str, Any]:
     values = console_values()
     session_cookie, user_id = console_identity(request, user, values, "analytics")
     source_role = int(user.get("source_role") or 0)
+    if scope == "global" and source_role < 10:
+        raise HTTPException(status_code=403, detail="普通用户不能查询全局数据")
     if username and source_role < 10:
         raise HTTPException(status_code=403, detail="普通用户不能查询其他账号")
+    if username and scope == "self":
+        raise HTTPException(status_code=422, detail="当前账号范围不能按用户名筛选")
     start, end = console_time_range(
         start_timestamp,
         end_timestamp,
@@ -1377,6 +1382,7 @@ def get_console_analytics(
             start,
             end,
             username=username.strip(),
+            scope=scope,
         )
         result["quota_per_unit"] = client.status(session_cookie, user_id)["quota_per_unit"]
         return result

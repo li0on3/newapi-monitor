@@ -4,6 +4,18 @@
 
 ## Unreleased
 
+## 1.11.1 - 2026-08-03
+
+### Fixed
+
+- Analytics spend totals now use New API consume-log statistics as a live fallback. Requests not yet present in the model and flow projections appear as pending attribution instead of making the total temporarily low for up to one export interval.
+- Usage flow now merges rows by the account/key, group, and model dimensions actually shown in the UI. Hidden node and channel dimensions no longer look like duplicate flows, and rows beyond the first 12 are closed into one Other total.
+
+### Changed
+
+- New API administrators can explicitly switch Analytics between Global and Current Account. Regular users remain server-enforced to Current Account, and username filtering is accepted only in Global scope.
+- Model ranking and usage flow now show the same live total in their headers and distinguish attributed spend from the newest pending-attribution amount.
+
 ## 1.11.0 - 2026-08-01
 
 ### Fixed
