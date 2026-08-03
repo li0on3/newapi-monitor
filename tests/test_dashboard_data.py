@@ -102,6 +102,8 @@ class DashboardRepositoryTests(unittest.TestCase):
             {"containers": {"new-api": {"status": "running", "memory_mb": 300}}},
             created_at=1_220,
         )
+        store.record_collector_result("logs", True, stale_after_seconds=120, now=1_210)
+        store.record_collector_result("resources", True, stale_after_seconds=120, now=1_220)
         store.record_alert_events(
             [AlertEvent("channel_failed", "channel failed", "timeout", key="channel:2", severity="critical")],
             now=1_230,
@@ -123,10 +125,14 @@ class DashboardRepositoryTests(unittest.TestCase):
 
         self.assertEqual(2, summary["channels"]["total"])
         self.assertEqual(1, summary["channels"]["healthy"])
+        self.assertEqual(0, summary["channels"]["delayed"])
         self.assertEqual(1, summary["channels"]["failed"])
         self.assertEqual(0, summary["channels"]["unknown"])
         self.assertEqual(2, summary["requests"]["total"])
         self.assertEqual(1, summary["requests"]["slow"])
+        self.assertEqual(60.0, summary["requests"]["slow_after_seconds"])
+        self.assertEqual("ok", summary["requests"]["collector_status"])
+        self.assertEqual("ok", summary["resources"]["collector_status"])
         self.assertEqual(1, summary["incidents"]["open"])
         self.assertEqual(31, summary["resources"]["system_cpu"])
 
@@ -178,6 +184,33 @@ class DashboardRepositoryTests(unittest.TestCase):
         self.assertEqual(1, summary["requests"]["slow"])
         self.assertEqual(1, summary["incidents"]["open"])
         self.assertEqual(0, summary["incidents"]["critical"])
+
+    def test_summary_can_exclude_operational_incidents_from_viewer_scope(self):
+        store = StateStore(self.db_path)
+        store.record_alert_events(
+            [
+                AlertEvent(
+                    "resource_high",
+                    "memory high",
+                    "high",
+                    key="resource:system_memory",
+                    severity="warning",
+                )
+            ],
+            now=1_250,
+        )
+        store.connection.close()
+
+        summary = self.repository.summary(
+            now=1_300,
+            request_window_seconds=600,
+            channel_ids={1},
+            include_operational_incidents=False,
+        )
+
+        self.assertEqual(0, summary["incidents"]["open"])
+        self.assertEqual(0, summary["incidents"]["critical"])
+        self.assertEqual(0, summary["incidents"]["warning"])
 
     def test_summary_never_mixes_provider_incidents_into_local_overall_health(self):
         before = self.repository.summary(now=1_700_000_100)
@@ -243,6 +276,48 @@ class DashboardRepositoryTests(unittest.TestCase):
         self.assertEqual("real", healthy["latest"]["source"])
         self.assertEqual(["gpt-a", "gpt-b"], healthy["models"])
         self.assertEqual(1, len(healthy["history"]))
+        self.assertEqual(900, healthy["stale_after_seconds"])
+        self.assertEqual("real", healthy["availability"]["source"])
+        self.assertEqual(1_100, healthy["availability"]["coverage_start_at"])
+        self.assertEqual(1_100, healthy["availability"]["coverage_end_at"])
+
+    def test_channel_availability_coverage_matches_the_requested_range(self):
+        store = StateStore(self.db_path)
+        store.insert_channel_observations(
+            [ChannelObservation(1, "healthy-channel", True, 1.2, "", "real", 500)],
+            observed_at=900,
+        )
+        store.connection.close()
+
+        channels = self.repository.channels(
+            now=1_300,
+            availability_start_timestamp=1_000,
+            availability_end_timestamp=1_300,
+        )
+
+        healthy = next(item for item in channels if item["channel_id"] == 1)
+        self.assertEqual(1, healthy["availability"]["total"])
+        self.assertEqual(1_100, healthy["availability"]["coverage_start_at"])
+        self.assertEqual(1_100, healthy["availability"]["coverage_end_at"])
+
+    def test_summary_counts_slow_successful_probes_as_delayed_not_healthy(self):
+        store = StateStore(self.db_path)
+        store.insert_channel_observations(
+            [ChannelObservation(1, "healthy-channel", True, 31, "", "real", 500)],
+            observed_at=1_290,
+        )
+        store.connection.close()
+
+        repository = DashboardRepository(
+            self.db_path,
+            slow_seconds=60,
+            channel_slow_seconds=30,
+        )
+        summary = repository.summary(now=1_300, request_window_seconds=600)
+
+        self.assertEqual(0, summary["channels"]["healthy"])
+        self.assertEqual(1, summary["channels"]["delayed"])
+        self.assertEqual(1, summary["channels"]["failed"])
 
     def test_channels_do_not_mix_old_builtin_failures_into_real_probe_history(self):
         store = StateStore(self.db_path)
@@ -288,6 +363,15 @@ class DashboardRepositoryTests(unittest.TestCase):
         self.assertEqual(1, payload["total"])
         self.assertEqual("request-2", payload["items"][0]["request_id"])
 
+    def test_logs_expose_monitor_collection_bounds(self):
+        payload = self.repository.logs(limit=20)
+
+        self.assertEqual(1_200, payload["collection_started_at"])
+        self.assertEqual(1_210, payload["latest_sample_at"])
+        self.assertEqual(1_200, payload["retained_from_at"])
+        self.assertEqual(1_210, payload["retained_until_at"])
+        self.assertEqual(60.0, payload["slow_after_seconds"])
+
     def test_resource_history_keeps_latest_container_state_without_repeating_it(self):
         store = StateStore(self.db_path)
         store.insert_resource_sample(
@@ -317,6 +401,37 @@ class DashboardRepositoryTests(unittest.TestCase):
             payload["samples"][-1]["containers"]["new-api"]["status"],
         )
 
+    def test_resource_history_separates_exact_latest_values_from_bucket_averages(self):
+        store = StateStore(self.db_path)
+        store.insert_resource_sample(
+            {
+                "system_cpu": 91,
+                "system_memory": 61,
+                "system_disk": 71,
+                "system_available_mb": 800,
+                "system_swap": 7,
+            },
+            {"containers": {"new-api": {"status": "running", "memory_mb": 330}}},
+            created_at=1_280,
+        )
+        store.connection.close()
+
+        payload = self.repository.resources(
+            now=1_300,
+            start_timestamp=1_200,
+            end_timestamp=1_300,
+            limit=1,
+        )
+
+        self.assertEqual(2, payload["sample_count"])
+        self.assertEqual("ok", payload["collector_status"])
+        self.assertEqual(1_280, payload["latest"]["created_at"])
+        self.assertEqual(91, payload["latest"]["system_cpu"])
+        self.assertNotEqual(payload["latest"]["system_cpu"], payload["samples"][0]["system_cpu"])
+        self.assertEqual(31, payload["summary"]["system_cpu"]["min"])
+        self.assertEqual(61, payload["summary"]["system_cpu"]["average"])
+        self.assertEqual(91, payload["summary"]["system_cpu"]["max"])
+
     def test_resource_history_does_not_bucket_future_empty_time(self):
         payload = self.repository.resources(
             now=1_300,
@@ -327,6 +442,20 @@ class DashboardRepositoryTests(unittest.TestCase):
 
         self.assertEqual(1_300, payload["requested_end"])
         self.assertLessEqual(payload["bucket_seconds"], 15)
+
+    def test_resource_coverage_measures_collected_samples_not_only_time_span(self):
+        payload = self.repository.resources(
+            now=1_300,
+            start_timestamp=1_200,
+            end_timestamp=1_300,
+            sampling_interval_seconds=10,
+        )
+
+        self.assertEqual("expected_sample_count", payload["coverage_basis"])
+        self.assertEqual(11, payload["expected_sample_count"])
+        self.assertEqual(1, payload["sample_count"])
+        self.assertEqual(round(1 / 11, 4), payload["coverage_ratio"])
+        self.assertEqual(payload["coverage_ratio"], payload["sample_coverage_ratio"])
 
     def test_incident_query_supports_search_facets_and_resolution_context(self):
         store = StateStore(self.db_path)

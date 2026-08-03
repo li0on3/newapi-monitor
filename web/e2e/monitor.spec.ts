@@ -6,7 +6,7 @@ const now = 1_784_918_400;
 
 const summary = {
   generated_at: now,
-  channels: { total: 1, healthy: 1, failed: 0, unknown: 0, last_checked_at: now },
+  channels: { total: 1, healthy: 1, delayed: 0, failed: 0, unknown: 0, last_checked_at: now },
   requests: {
     window_seconds: 86_400,
     total: 20,
@@ -154,13 +154,28 @@ async function mockMonitorApi(page: Page, role: Role, authenticated = true) {
       flow: analyticsFlow,
       stat: { quota: 1300, rpm: 2, tpm: 300 },
       summary: {
-        requests: analyticsSeries.reduce((total, item) => total + item.count, 0),
+        requests: 100,
+        attributed_requests: analyticsSeries.reduce((total, item) => total + item.count, 0),
+        unattributed_requests: 9,
+        model_request_delta: 9,
+        flow_requests: analyticsFlow.reduce((total, item) => total + item.count, 0),
+        flow_unattributed_requests: 2,
+        flow_request_delta: 2,
         quota: 1300,
         attributed_quota: 1222,
         unattributed_quota: 78,
+        model_quota_delta: 78,
         flow_quota: 1259,
+        flow_quota_delta: 41,
         tokens: analyticsSeries.reduce((total, item) => total + item.token_used, 0),
         models: analyticsSeries.length,
+      },
+      reconciliation: {
+        requests_exact: true,
+        quota_exact: true,
+        request_source: 'live_logs',
+        quota_source: 'live_logs',
+        attribution_source: 'hourly_projection',
       },
       quota_per_unit: 500000,
     });
@@ -180,7 +195,7 @@ test('管理员可访问运维模块且路由具有独立 URL', async ({ page })
   await expect(page).toHaveURL(/\/monitor\/resources$/);
   await expect(page.getByRole('heading', { name: '机器资源' })).toBeVisible();
   await expect(page.getByRole('button', { name: '今天' })).toHaveClass(/active/);
-  await expect(page.getByRole('button', { name: '创建至今' })).toBeVisible();
+  await expect(page.getByRole('button', { name: '累计/历史总量' })).toBeVisible();
 
   await page.getByRole('button', { name: '系统配置' }).click();
   await expect(page).toHaveURL(/\/monitor\/system$/);
@@ -223,9 +238,9 @@ test('数据看板合并隐藏流向并让可见额度总量闭合', async ({ pa
   await expect(page.getByRole('heading', { name: '数据看板' })).toBeVisible();
   await expect(page.getByRole('tab', { name: '全局' })).toHaveAttribute('aria-selected', 'true');
   await expect(page.getByRole('tab', { name: '当前账号' })).toBeVisible();
-  await expect(page.getByText('总计 $0.0026')).toHaveCount(2);
+  await expect(page.getByText('实时日志总量 $0.0026')).toHaveCount(2);
   await expect(page.getByText('其他 1 个模型')).toBeVisible();
   await expect(page.getByText('其他 2 个流向')).toBeVisible();
-  await expect(page.getByText('最新请求待归集')).toHaveCount(2);
+  await expect(page.getByText('总量与归集明细差额')).toHaveCount(2);
   await expect(page.getByText('$0.0014')).toBeVisible();
 });

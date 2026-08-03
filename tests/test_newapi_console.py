@@ -40,10 +40,20 @@ class NewAPIConsoleClientTests(unittest.TestCase):
     def test_list_all_tokens_paginates_and_self_flow_never_uses_admin_scope(self):
         opener = RecordingOpener([
             FakeResponse({"success": True, "data": {"page": 1, "page_size": 2, "total": 3, "items": [
-                {"id": 7, "name": "one"}, {"id": 8, "name": "two"},
+                {"id": 7, "name": "one", "key": "sk-1", "status": 1, "created_time": 10,
+                 "accessed_time": 20, "expired_time": -1, "remain_quota": 100, "used_quota": 0,
+                 "unlimited_quota": False, "model_limits_enabled": False, "model_limits": "",
+                 "allow_ips": "", "group": "default", "cross_group_retry": False},
+                {"id": 8, "name": "two", "key": "sk-2", "status": 1, "created_time": 10,
+                 "accessed_time": 20, "expired_time": -1, "remain_quota": 100, "used_quota": 0,
+                 "unlimited_quota": False, "model_limits_enabled": False, "model_limits": "",
+                 "allow_ips": "", "group": "default", "cross_group_retry": False},
             ]}}),
             FakeResponse({"success": True, "data": {"page": 2, "page_size": 2, "total": 3, "items": [
-                {"id": 9, "name": "three"},
+                {"id": 9, "name": "three", "key": "sk-3", "status": 1, "created_time": 10,
+                 "accessed_time": 20, "expired_time": -1, "remain_quota": 100, "used_quota": 0,
+                 "unlimited_quota": False, "model_limits_enabled": False, "model_limits": "",
+                 "allow_ips": "", "group": "default", "cross_group_retry": False},
             ]}}),
             FakeResponse({"success": True, "data": [
                 {"token_id": 7, "token_name": "one", "use_group": "default", "model_name": "gpt-5.4", "count": 2, "quota": 50, "token_used": 20},
@@ -61,6 +71,108 @@ class NewAPIConsoleClientTests(unittest.TestCase):
         self.assertEqual("https://newapi.example/api/token/?p=2&page_size=2", urls[1])
         self.assertIn("/api/data/flow/self?", urls[2])
         self.assertNotIn("username=", urls[2])
+
+    def test_list_all_tokens_rejects_incomplete_or_duplicate_pages(self):
+        token = {
+            "id": 7, "name": "one", "key": "sk-1", "status": 1, "created_time": 10,
+            "accessed_time": 20, "expired_time": -1, "remain_quota": 100, "used_quota": 0,
+            "unlimited_quota": False, "model_limits_enabled": False, "model_limits": "",
+            "allow_ips": "", "group": "default", "cross_group_retry": False,
+        }
+        incomplete = NewAPIConsoleClient(
+            "https://newapi.example",
+            opener=RecordingOpener([
+                FakeResponse({"success": True, "data": {
+                    "page": 1, "page_size": 1, "total": 2, "items": [token],
+                }}),
+                FakeResponse({"success": True, "data": {
+                    "page": 2, "page_size": 1, "total": 2, "items": [],
+                }}),
+            ]),
+        )
+        duplicate = NewAPIConsoleClient(
+            "https://newapi.example",
+            opener=RecordingOpener([
+                FakeResponse({"success": True, "data": {
+                    "page": 1, "page_size": 1, "total": 2, "items": [token],
+                }}),
+                FakeResponse({"success": True, "data": {
+                    "page": 2, "page_size": 1, "total": 2, "items": [token],
+                }}),
+            ]),
+        )
+
+        with self.assertRaisesRegex(NewAPIConsoleError, "invalid pagination data"):
+            incomplete.list_all_tokens("session", 9, page_size=1)
+        with self.assertRaisesRegex(NewAPIConsoleError, "token pagination is inconsistent"):
+            duplicate.list_all_tokens("session", 9, page_size=1)
+
+    def test_self_flow_splits_ranges_that_exceed_newapi_self_endpoint_limit(self):
+        max_range = 30 * 86400
+        opener = RecordingOpener([
+            FakeResponse({"success": True, "data": {
+                "page": 1, "page_size": 1, "total": 2,
+                "items": [{"created_at": max_range + 100, "type": 2}],
+            }}),
+            FakeResponse({"success": True, "data": {
+                "page": 2, "page_size": 1, "total": 2,
+                "items": [{"created_at": 100, "type": 2}],
+            }}),
+            FakeResponse({"success": True, "data": [
+                {"token_id": 7, "use_group": "default", "model_name": "gpt-a", "count": 2, "quota": 20, "token_used": 10},
+            ]}),
+            FakeResponse({"success": True, "data": [
+                {"token_id": 7, "use_group": "default", "model_name": "gpt-b", "count": 3, "quota": 30, "token_used": 15},
+            ]}),
+        ])
+        client = NewAPIConsoleClient("https://newapi.example", opener=opener)
+
+        flow = client.self_flow("session", 9, 1, max_range + 200)
+
+        self.assertEqual(["gpt-a", "gpt-b"], [item["model_name"] for item in flow])
+        urls = [request.full_url for request, _ in opener.requests]
+        flow_urls = [url for url in urls if "/api/data/flow/self?" in url]
+        self.assertEqual(2, len(flow_urls))
+        self.assertIn("start_timestamp=1", flow_urls[0])
+        self.assertIn(f"end_timestamp={1 + max_range}", flow_urls[0])
+        self.assertIn(f"start_timestamp={2 + max_range}", flow_urls[1])
+        self.assertIn(f"end_timestamp={max_range + 200}", flow_urls[1])
+
+    def test_long_self_analytics_chunks_projection_and_reuses_log_total(self):
+        max_range = 30 * 86400
+        opener = RecordingOpener([
+            FakeResponse({"success": True, "data": {
+                "page": 1, "page_size": 1, "total": 2,
+                "items": [{"created_at": max_range + 100, "type": 2}],
+            }}),
+            FakeResponse({"success": True, "data": {
+                "page": 2, "page_size": 1, "total": 2,
+                "items": [{"created_at": 100, "type": 2}],
+            }}),
+            FakeResponse({"success": True, "data": [
+                {"created_at": 100, "model_name": "gpt-a", "count": 1, "quota": 10, "token_used": 5},
+            ]}),
+            FakeResponse({"success": True, "data": [
+                {"created_at": max_range + 100, "model_name": "gpt-b", "count": 1, "quota": 20, "token_used": 10},
+            ]}),
+            FakeResponse({"success": True, "data": [
+                {"token_id": 7, "use_group": "default", "model_name": "gpt-a", "count": 1, "quota": 10, "token_used": 5},
+            ]}),
+            FakeResponse({"success": True, "data": [
+                {"token_id": 7, "use_group": "default", "model_name": "gpt-b", "count": 1, "quota": 20, "token_used": 10},
+            ]}),
+            FakeResponse({"success": True, "data": {"quota": 30, "rpm": 1, "tpm": 10}}),
+        ])
+        client = NewAPIConsoleClient("https://newapi.example", opener=opener)
+
+        result = client.analytics("session", 9, 1, 1, max_range + 200)
+
+        self.assertEqual(2, result["summary"]["requests"])
+        self.assertEqual(30, result["summary"]["quota"])
+        self.assertEqual(7, len(opener.requests))
+        self.assertEqual(2, sum("/api/data/self?" in request.full_url for request, _ in opener.requests))
+        self.assertEqual(2, sum("/api/data/flow/self?" in request.full_url for request, _ in opener.requests))
+        self.assertEqual(2, sum("/api/log/self?" in request.full_url for request, _ in opener.requests))
 
     def test_redirects_are_never_followed_with_the_session_cookie(self):
         handler = NoRedirectHandler()
@@ -121,11 +233,95 @@ class NewAPIConsoleClientTests(unittest.TestCase):
         self.assertEqual("sk-a**********wxyz", result["items"][0]["masked_key"])
         self.assertNotIn("key", result["items"][0])
 
+    def test_paginated_console_data_fails_closed_when_totals_or_items_are_invalid(self):
+        missing_total = NewAPIConsoleClient(
+            "https://newapi.example",
+            opener=RecordingOpener([
+                FakeResponse({"success": True, "data": {"page": 1, "page_size": 20, "items": []}}),
+            ]),
+        )
+        with self.assertRaisesRegex(NewAPIConsoleError, "invalid pagination field: total"):
+            missing_total.list_tokens("session", 9)
+
+        invalid_items = NewAPIConsoleClient(
+            "https://newapi.example",
+            opener=RecordingOpener([
+                FakeResponse({"success": True, "data": {"page": 1, "page_size": 20, "total": 1, "items": {}}}),
+            ]),
+        )
+        with self.assertRaisesRegex(NewAPIConsoleError, "invalid pagination data"):
+            invalid_items.list_logs("session", 9, 1)
+
+    def test_paginated_console_data_rejects_mismatched_page_metadata(self):
+        wrong_page = NewAPIConsoleClient(
+            "https://newapi.example",
+            opener=RecordingOpener([
+                FakeResponse({"success": True, "data": {
+                    "page": 2, "page_size": 20, "total": 1, "items": [],
+                }}),
+            ]),
+        )
+        too_many_items = NewAPIConsoleClient(
+            "https://newapi.example",
+            opener=RecordingOpener([
+                FakeResponse({"success": True, "data": {
+                    "page": 1, "page_size": 1, "total": 2, "items": [{}, {}],
+                }}),
+            ]),
+        )
+        impossible_total = NewAPIConsoleClient(
+            "https://newapi.example",
+            opener=RecordingOpener([
+                FakeResponse({"success": True, "data": {
+                    "page": 2, "page_size": 20, "total": 20, "items": [{}],
+                }}),
+            ]),
+        )
+
+        with self.assertRaisesRegex(NewAPIConsoleError, "invalid pagination data"):
+            wrong_page.list_tokens("session", 9, page=1, page_size=20)
+        with self.assertRaisesRegex(NewAPIConsoleError, "invalid pagination data"):
+            too_many_items.list_logs("session", 9, 1, page=1, page_size=1)
+        with self.assertRaisesRegex(NewAPIConsoleError, "invalid pagination data"):
+            impossible_total.list_logs("session", 9, 1, page=2, page_size=20)
+
+    def test_unlimited_token_preserves_signed_remaining_quota(self):
+        opener = RecordingOpener([
+            FakeResponse({"success": True, "data": {
+                "page": 1,
+                "page_size": 20,
+                "total": 1,
+                "items": [{
+                    "id": 7,
+                    "name": "Unlimited",
+                    "key": "sk-a**********wxyz",
+                    "status": 1,
+                    "created_time": 100,
+                    "accessed_time": 200,
+                    "expired_time": -1,
+                    "remain_quota": -500000,
+                    "used_quota": 500000,
+                    "unlimited_quota": True,
+                    "model_limits_enabled": False,
+                    "model_limits": "",
+                    "allow_ips": "",
+                    "group": "default",
+                    "cross_group_retry": False,
+                }],
+            }}),
+        ])
+        client = NewAPIConsoleClient("https://newapi.example", opener=opener)
+
+        result = client.list_tokens("session", 9)
+
+        self.assertEqual(-500000, result["items"][0]["remain_quota"])
+
     def test_analytics_uses_self_endpoints_for_users_and_admin_endpoints_for_admins(self):
         user_opener = RecordingOpener([
             FakeResponse({"success": True, "data": [{"created_at": 100, "model_name": "gpt-5.4", "count": 2, "quota": 50, "token_used": 20}]}),
             FakeResponse({"success": True, "data": [{"token_id": 3, "use_group": "default", "model_name": "gpt-5.4", "count": 2, "quota": 50, "token_used": 20}]}),
             FakeResponse({"success": True, "data": {"quota": 50, "rpm": 2, "tpm": 20}}),
+            FakeResponse({"success": True, "data": {"page": 1, "page_size": 1, "total": 2, "items": [{}]}}),
         ])
         user_client = NewAPIConsoleClient("https://newapi.example", opener=user_opener)
 
@@ -139,6 +335,7 @@ class NewAPIConsoleClientTests(unittest.TestCase):
             FakeResponse({"success": True, "data": []}),
             FakeResponse({"success": True, "data": []}),
             FakeResponse({"success": True, "data": {"quota": 0, "rpm": 0, "tpm": 0}}),
+            FakeResponse({"success": True, "data": {"page": 1, "page_size": 1, "total": 0, "items": []}}),
         ])
         admin_client = NewAPIConsoleClient("https://newapi.example", opener=admin_opener)
 
@@ -149,6 +346,9 @@ class NewAPIConsoleClientTests(unittest.TestCase):
         self.assertIn("username=alice", urls[0])
         self.assertIn("/api/data/flow?", urls[1])
         self.assertIn("/api/log/stat?", urls[2])
+        self.assertIn("type=2", urls[2])
+        self.assertIn("/api/log/?", urls[3])
+        self.assertIn("page_size=1", urls[3])
 
     def test_analytics_uses_log_quota_as_total_and_reports_projection_gap(self):
         opener = RecordingOpener([
@@ -159,21 +359,124 @@ class NewAPIConsoleClientTests(unittest.TestCase):
                 {"token_id": 3, "use_group": "default", "model_name": "gpt-5.4", "count": 2, "quota": 40, "token_used": 20},
             ]}),
             FakeResponse({"success": True, "data": {"quota": 70, "rpm": 2, "tpm": 20}}),
+            FakeResponse({"success": True, "data": {"page": 1, "page_size": 1, "total": 5, "items": [{}]}}),
         ])
         client = NewAPIConsoleClient("https://newapi.example", opener=opener)
 
         result = client.analytics("session", 9, 1, 100, 200)
 
+        self.assertEqual(5, result["summary"]["requests"])
+        self.assertEqual(2, result["summary"]["attributed_requests"])
+        self.assertEqual(3, result["summary"]["unattributed_requests"])
         self.assertEqual(70, result["summary"]["quota"])
         self.assertEqual(50, result["summary"]["attributed_quota"])
         self.assertEqual(20, result["summary"]["unattributed_quota"])
         self.assertEqual(40, result["summary"]["flow_quota"])
+        self.assertTrue(result["reconciliation"]["requests_exact"])
+        self.assertTrue(result["reconciliation"]["quota_exact"])
+        self.assertEqual("hourly_projection", result["reconciliation"]["attribution_source"])
+
+    def test_analytics_reports_when_hourly_projection_exceeds_live_log_totals(self):
+        opener = RecordingOpener([
+            FakeResponse({"success": True, "data": [
+                {"created_at": 100, "model_name": "gpt-5.4", "count": 5, "quota": 100, "token_used": 40},
+            ]}),
+            FakeResponse({"success": True, "data": [
+                {"token_id": 3, "use_group": "default", "model_name": "gpt-5.4", "count": 4, "quota": 90, "token_used": 35},
+            ]}),
+            FakeResponse({"success": True, "data": {"quota": 70, "rpm": 0, "tpm": 0}}),
+            FakeResponse({"success": True, "data": {"page": 1, "page_size": 1, "total": 2, "items": [{}]}}),
+        ])
+        client = NewAPIConsoleClient("https://newapi.example", opener=opener)
+
+        result = client.analytics("session", 9, 1, 100, 200)
+
+        self.assertEqual(-3, result["summary"]["model_request_delta"])
+        self.assertEqual(-2, result["summary"]["flow_request_delta"])
+        self.assertEqual(-30, result["summary"]["model_quota_delta"])
+        self.assertEqual(-20, result["summary"]["flow_quota_delta"])
+
+    def test_analytics_rejects_malformed_totals_and_projection_metrics(self):
+        invalid_total = NewAPIConsoleClient(
+            "https://newapi.example",
+            opener=RecordingOpener([
+                FakeResponse({"success": True, "data": []}),
+                FakeResponse({"success": True, "data": []}),
+                FakeResponse({"success": True, "data": {"quota": 0, "rpm": 0, "tpm": 0}}),
+                FakeResponse({"success": True, "data": {
+                    "page": 1, "page_size": 1, "total": "not-a-number", "items": [],
+                }}),
+            ]),
+        )
+        with self.assertRaisesRegex(NewAPIConsoleError, "invalid pagination field: total"):
+            invalid_total.analytics("session", 9, 1, 100, 200)
+
+        invalid_projection = NewAPIConsoleClient(
+            "https://newapi.example",
+            opener=RecordingOpener([
+                FakeResponse({"success": True, "data": [
+                    {"created_at": 100, "model_name": "gpt-5.4", "count": 1.5, "quota": 10, "token_used": 5},
+                ]}),
+                FakeResponse({"success": True, "data": []}),
+                FakeResponse({"success": True, "data": {"quota": 10, "rpm": 0, "tpm": 0}}),
+                FakeResponse({"success": True, "data": {
+                    "page": 1, "page_size": 1, "total": 1, "items": [{}],
+                }}),
+            ]),
+        )
+        with self.assertRaisesRegex(NewAPIConsoleError, "invalid analytics field: count"):
+            invalid_projection.analytics("session", 9, 1, 100, 200)
+
+    def test_log_statistics_require_all_authoritative_integer_fields(self):
+        missing_quota = NewAPIConsoleClient(
+            "https://newapi.example",
+            opener=RecordingOpener([
+                FakeResponse({"success": True, "data": {"rpm": 1, "tpm": 20}}),
+            ]),
+        )
+        with self.assertRaisesRegex(NewAPIConsoleError, "invalid log statistics field: quota"):
+            missing_quota.log_stat("session", 9, 1, type=2)
+
+        fractional_rate = NewAPIConsoleClient(
+            "https://newapi.example",
+            opener=RecordingOpener([
+                FakeResponse({"success": True, "data": {"quota": 10, "rpm": 1.5, "tpm": 20}}),
+            ]),
+        )
+        with self.assertRaisesRegex(NewAPIConsoleError, "invalid log statistics field: rpm"):
+            fractional_rate.log_stat("session", 9, 1, type=2)
+
+    def test_self_info_rejects_identity_mismatch_or_malformed_account_totals(self):
+        mismatched = NewAPIConsoleClient(
+            "https://newapi.example",
+            opener=RecordingOpener([
+                FakeResponse({"success": True, "data": {
+                    "id": 10, "username": "alice", "role": 1, "status": 1,
+                    "quota": 10, "used_quota": 20, "request_count": 3,
+                }}),
+            ]),
+        )
+        with self.assertRaisesRegex(NewAPIConsoleError, "account identity mismatch"):
+            mismatched.self_info("session", 9)
+
+        malformed = NewAPIConsoleClient(
+            "https://newapi.example",
+            opener=RecordingOpener([
+                FakeResponse({"success": True, "data": {
+                    "id": 9, "username": "alice", "role": 1, "status": 1,
+                    "quota": "unknown", "used_quota": 20, "request_count": 3,
+                }}),
+            ]),
+        )
+        with self.assertRaisesRegex(NewAPIConsoleError, "invalid account field: quota"):
+            malformed.self_info("session", 9)
 
     def test_admin_can_query_their_own_analytics_scope(self):
         opener = RecordingOpener([
             FakeResponse({"success": True, "data": []}),
             FakeResponse({"success": True, "data": []}),
             FakeResponse({"success": True, "data": {"quota": 0, "rpm": 0, "tpm": 0}}),
+            FakeResponse({"success": True, "data": {"page": 1, "page_size": 1, "total": 0, "items": []}}),
         ])
         client = NewAPIConsoleClient("https://newapi.example", opener=opener)
 
@@ -213,15 +516,75 @@ class NewAPIConsoleClientTests(unittest.TestCase):
             opener.requests[0][0].full_url,
         )
 
-    def test_status_rejects_non_finite_or_invalid_quota_units(self):
+    def test_status_fails_closed_on_non_finite_or_invalid_quota_units(self):
         opener = RecordingOpener([
             FakeResponse({"success": True, "data": {"quota_per_unit": "NaN"}}),
             FakeResponse({"success": True, "data": {"quota_per_unit": "invalid"}}),
         ])
         client = NewAPIConsoleClient("https://newapi.example", opener=opener)
 
-        self.assertEqual(500000, client.status("session", 9)["quota_per_unit"])
-        self.assertEqual(500000, client.status("session", 9)["quota_per_unit"])
+        with self.assertRaisesRegex(NewAPIConsoleError, "invalid status field: quota_per_unit"):
+            client.status("session", 9)
+        with self.assertRaisesRegex(NewAPIConsoleError, "invalid status field: quota_per_unit"):
+            client.status("session", 9)
+
+    def test_console_catalog_and_rows_fail_closed_on_malformed_upstream_fields(self):
+        invalid_models = NewAPIConsoleClient(
+            "https://newapi.example",
+            opener=RecordingOpener([FakeResponse({"success": True, "data": 42})]),
+        )
+        with self.assertRaisesRegex(NewAPIConsoleError, "invalid model catalog"):
+            invalid_models.models("session", 9)
+
+        invalid_token = NewAPIConsoleClient(
+            "https://newapi.example",
+            opener=RecordingOpener([FakeResponse({"success": True, "data": {
+                "page": 1,
+                "page_size": 20,
+                "total": 1,
+                "items": [{
+                    "id": 7,
+                    "name": "Codex",
+                    "key": "sk-a**********wxyz",
+                    "status": "enabled",
+                    "created_time": 100,
+                    "accessed_time": 200,
+                    "expired_time": -1,
+                    "remain_quota": 500000,
+                    "used_quota": 250000,
+                    "unlimited_quota": False,
+                    "model_limits_enabled": False,
+                    "model_limits": "",
+                    "allow_ips": "",
+                    "group": "default",
+                    "cross_group_retry": False,
+                }],
+            }})]),
+        )
+        with self.assertRaisesRegex(NewAPIConsoleError, "invalid token field: status"):
+            invalid_token.list_tokens("session", 9)
+
+        invalid_log = NewAPIConsoleClient(
+            "https://newapi.example",
+            opener=RecordingOpener([FakeResponse({"success": True, "data": {
+                "page": 1,
+                "page_size": 20,
+                "total": 1,
+                "items": [{
+                    "id": 1,
+                    "created_at": 100,
+                    "type": 2,
+                    "quota": 50,
+                    "prompt_tokens": 10,
+                    "completion_tokens": 5,
+                    "use_time": 3,
+                    "is_stream": "false",
+                    "channel": 7,
+                }],
+            }})]),
+        )
+        with self.assertRaisesRegex(NewAPIConsoleError, "invalid log field: is_stream"):
+            invalid_log.list_logs("session", 9, 1)
 
     def test_user_logs_strip_admin_only_details_and_bound_large_text(self):
         opener = RecordingOpener([

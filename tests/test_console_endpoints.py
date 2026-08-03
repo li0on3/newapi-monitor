@@ -261,6 +261,8 @@ class ConsoleEndpointTests(unittest.TestCase):
         for call in self.client.calls:
             self.assertEqual("newapi-session", call[1])
             self.assertEqual(9, call[2])
+        stat_call = next(call for call in self.client.calls if call[0] == "stat")
+        self.assertEqual(2, stat_call[-1]["type"])
 
     def test_overview_does_not_fetch_key_metadata_when_key_page_is_disabled(self):
         values = self.settings.runtime_values()
@@ -273,6 +275,17 @@ class ConsoleEndpointTests(unittest.TestCase):
 
         self.assertEqual([], result["keys"]["items"])
         self.assertFalse(any(call[0] == "tokens" for call in self.client.calls))
+
+    def test_admin_overview_keeps_account_metrics_in_self_scope(self):
+        admin = {**self.user, "role": "admin", "source_role": 10}
+        with patch.object(dashboard_app.runtime, "settings", self.settings), patch(
+            "dashboard_app.console_client", return_value=self.client
+        ):
+            result = dashboard_app.get_console_overview(request("/api/console/overview"), admin)
+
+        self.assertEqual("self", result["scope"])
+        stat_call = next(call for call in self.client.calls if call[0] == "stat")
+        self.assertEqual(1, stat_call[3])
 
     def test_emergency_admin_cannot_use_customer_console(self):
         emergency = {**self.user, "role": "admin", "source": "emergency"}
@@ -361,6 +374,33 @@ class ConsoleEndpointTests(unittest.TestCase):
         self.assertIsNone(result["stat"])
         self.assertFalse(result["stat_filters_complete"])
         self.assertEqual(500000, result["quota_per_unit"])
+        self.assertFalse(any(call[0] == "stat" for call in self.client.calls))
+
+    def test_non_consumption_log_filters_do_not_show_consumption_aggregates(self):
+        with patch.object(dashboard_app.runtime, "settings", self.settings), patch(
+            "dashboard_app.console_client", return_value=self.client
+        ):
+            result = dashboard_app.get_console_logs(
+                request("/api/console/logs"),
+                self.user,
+                page=1,
+                page_size=20,
+                log_type=1,
+                start_timestamp=100,
+                end_timestamp=200,
+                username="",
+                token_name="",
+                model_name="",
+                channel=0,
+                group="",
+                request_id="",
+                upstream_request_id="",
+            )
+
+        self.assertIsNone(result["stat"])
+        self.assertFalse(result["stat_filters_complete"])
+        self.assertEqual("consume_only", result["stat_scope"])
+        self.assertEqual("non_consume_type", result["stat_unavailable_reason"])
         self.assertFalse(any(call[0] == "stat" for call in self.client.calls))
 
 

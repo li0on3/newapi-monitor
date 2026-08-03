@@ -63,27 +63,49 @@ class KeyUsageClient:
         if not isinstance(usage_data, dict) or not isinstance(logs_data, list):
             raise KeyUsageError("New API 返回的数据格式不受支持")
 
-        unit = quota_per_unit if quota_per_unit > 0 else 500_000.0
-        granted = self._number(usage_data.get("total_granted"))
-        used = self._number(usage_data.get("total_used"))
-        available = self._number(usage_data.get("total_available"))
-        unlimited = bool(usage_data.get("unlimited_quota"))
+        if not math.isfinite(quota_per_unit) or quota_per_unit <= 0:
+            raise KeyUsageError("额度换算单位无效")
+        configured_unit = float(quota_per_unit)
+        granted = self._required_number(usage_data.get("total_granted"), "total_granted", "额度", integer=True)
+        used = self._required_number(usage_data.get("total_used"), "total_used", "额度", integer=True, minimum=0)
+        available = self._required_number(usage_data.get("total_available"), "total_available", "额度", integer=True)
+        unlimited = self._required_boolean(usage_data.get("unlimited_quota"), "unlimited_quota", "额度")
+        model_limits = usage_data.get("model_limits")
+        if not isinstance(model_limits, dict):
+            raise KeyUsageError("New API 返回的额度字段无效：model_limits")
         usage = {
             "name": str(usage_data.get("name") or "未命名 Key"),
             "total_granted": granted,
             "total_used": used,
             "total_available": available,
+            "used_percentage": None if unlimited or granted <= 0 else round(used / granted * 100, 2),
+            "unlimited_quota": unlimited,
+            "expires_at": self._required_number(
+                usage_data.get("expires_at"), "expires_at", "额度", integer=True, minimum=0
+            ),
+            "model_limits_enabled": self._required_boolean(
+                usage_data.get("model_limits_enabled"), "model_limits_enabled", "额度"
+            ),
+            "model_limits": model_limits,
+        }
+
+        if any(not isinstance(item, dict) for item in logs_data):
+            raise KeyUsageError("New API 返回的调用数据格式不受支持")
+        calls = [self._normalize_log(item, 1.0) for item in logs_data[: max(1, log_limit)]]
+        status_payload = self._request("/api/status", "")
+        status_data = status_payload.get("data")
+        if not isinstance(status_data, dict):
+            raise KeyUsageError("New API 返回的额度换算单位无效")
+        unit = self._required_number(status_data.get("quota_per_unit"), "quota_per_unit", "额度换算")
+        if unit <= 0:
+            raise KeyUsageError("New API 返回的额度换算单位无效")
+        usage.update({
             "total_granted_display": round(granted / unit, 6),
             "total_used_display": round(used / unit, 6),
             "total_available_display": round(available / unit, 6),
-            "used_percentage": None if unlimited or granted <= 0 else round(used / granted * 100, 2),
-            "unlimited_quota": unlimited,
-            "expires_at": int(self._number(usage_data.get("expires_at"))),
-            "model_limits_enabled": bool(usage_data.get("model_limits_enabled")),
-            "model_limits": usage_data.get("model_limits") if isinstance(usage_data.get("model_limits"), dict) else {},
-        }
-
-        calls = [self._normalize_log(item, unit) for item in logs_data[: max(1, log_limit)] if isinstance(item, dict)]
+        })
+        for item in calls:
+            item["quota_display"] = round(float(item["quota"]) / unit, 6)
         durations = sorted(float(item["use_time"]) for item in calls)
         model_counts = Counter(str(item["model_name"] or "unknown") for item in calls)
         summary = {
@@ -100,15 +122,27 @@ class KeyUsageClient:
         return {
             "queried_at": int(time.time()),
             "quota_per_unit": unit,
+            "quota_per_unit_source": "new_api_status",
+            "configured_quota_per_unit": configured_unit,
+            "quota_per_unit_matches_config": math.isclose(
+                float(unit), configured_unit, rel_tol=0.0, abs_tol=1e-9
+            ),
+            "summary_scope": "recent_calls",
+            "log_limit": max(1, log_limit),
+            "returned_calls": len(calls),
+            "logs_may_be_truncated": len(logs_data) > len(calls) or len(calls) >= max(1, log_limit),
             "usage": usage,
             "summary": summary,
             "calls": calls,
         }
 
     def _request(self, path: str, api_key: str) -> dict[str, Any]:
+        headers = {"Accept": "application/json"}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
         request = urllib.request.Request(
             self.base_url + path,
-            headers={"Authorization": f"Bearer {api_key}", "Accept": "application/json"},
+            headers=headers,
         )
         try:
             with self.opener(request, timeout=self.timeout_seconds) as response:
@@ -132,12 +166,31 @@ class KeyUsageClient:
         return payload
 
     @staticmethod
-    def _number(value: Any) -> float:
+    def _required_number(
+        value: Any,
+        field: str,
+        context: str,
+        *,
+        integer: bool = False,
+        minimum: float | None = None,
+    ) -> int | float:
+        if isinstance(value, bool):
+            raise KeyUsageError(f"New API 返回的{context}字段无效：{field}")
         try:
-            result = float(value or 0)
-            return result if math.isfinite(result) else 0.0
-        except (TypeError, ValueError):
-            return 0.0
+            result = float(value)
+        except (TypeError, ValueError, OverflowError) as error:
+            raise KeyUsageError(f"New API 返回的{context}字段无效：{field}") from error
+        if not math.isfinite(result) or (integer and not result.is_integer()):
+            raise KeyUsageError(f"New API 返回的{context}字段无效：{field}")
+        if minimum is not None and result < minimum:
+            raise KeyUsageError(f"New API 返回的{context}字段无效：{field}")
+        return int(result) if integer else result
+
+    @staticmethod
+    def _required_boolean(value: Any, field: str, context: str) -> bool:
+        if not isinstance(value, bool):
+            raise KeyUsageError(f"New API 返回的{context}字段无效：{field}")
+        return value
 
     def _normalize_log(self, item: dict[str, Any], unit: float) -> dict[str, Any]:
         other = item.get("other")
@@ -148,21 +201,33 @@ class KeyUsageClient:
                 other = {}
         if not isinstance(other, dict):
             other = {}
-        quota = self._number(item.get("quota"))
-        frt = self._number(other.get("frt"))
+        quota = self._required_number(item.get("quota"), "quota", "调用", integer=True)
+        frt = (
+            self._required_number(other.get("frt"), "frt", "调用", minimum=0)
+            if other.get("frt") is not None
+            else 0.0
+        )
         return {
-            "id": int(self._number(item.get("id"))),
-            "created_at": int(self._number(item.get("created_at"))),
-            "type": int(self._number(item.get("type"))),
+            "id": self._required_number(item.get("id"), "id", "调用", integer=True, minimum=0),
+            "created_at": self._required_number(
+                item.get("created_at"), "created_at", "调用", integer=True, minimum=0
+            ),
+            "type": self._required_number(item.get("type"), "type", "调用", integer=True, minimum=0),
             "model_name": str(item.get("model_name") or ""),
             "quota": quota,
             "quota_display": round(quota / unit, 6),
-            "prompt_tokens": int(self._number(item.get("prompt_tokens"))),
-            "completion_tokens": int(self._number(item.get("completion_tokens"))),
-            "use_time": self._number(item.get("use_time")),
+            "prompt_tokens": self._required_number(
+                item.get("prompt_tokens"), "prompt_tokens", "调用", integer=True, minimum=0
+            ),
+            "completion_tokens": self._required_number(
+                item.get("completion_tokens"), "completion_tokens", "调用", integer=True, minimum=0
+            ),
+            "use_time": self._required_number(item.get("use_time"), "use_time", "调用", minimum=0),
             "frt_ms": frt if frt > 0 else None,
-            "is_stream": bool(item.get("is_stream")),
-            "channel_id": int(self._number(item.get("channel"))),
+            "is_stream": self._required_boolean(item.get("is_stream"), "is_stream", "调用"),
+            "channel_id": self._required_number(
+                item.get("channel"), "channel", "调用", integer=True, minimum=0
+            ),
             "request_id": str(item.get("request_id") or ""),
             "upstream_request_id": str(item.get("upstream_request_id") or ""),
             "group": str(item.get("group") or ""),

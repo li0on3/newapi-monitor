@@ -50,7 +50,7 @@ export const SETTING_SECTIONS: Array<{
     { key: 'key_usage_min_role', label: t('最低可用角色'), type: 'select', options: [['admin', t('仅管理员')], ['operator', t('运维员及管理员')]], hint: t('普通用户固定不可访问，避免 Key 信息泄露') },
     { key: 'key_usage_log_limit', label: t('单次返回调用数'), type: 'number', hint: t('10–500，New API 最多提供最近 1000 条') },
     { key: 'key_usage_attempts_per_minute', label: t('每用户每分钟查询次数'), type: 'number', hint: t('防止撞库、滥用与上游压力') },
-    { key: 'key_usage_quota_per_unit', label: t('额度换算单位'), type: 'number', hint: t('默认 500000，即 500000 额度显示为 $1') },
+    { key: 'key_usage_quota_per_unit', label: t('额度换算单位校验值'), type: 'number', hint: t('实际展示始终读取 New API /api/status；此值只用于发现配置漂移') },
   ] },
   { id: 'collection', title: t('采集频率'), short: t('同步与采样'), icon: <RefreshCw size={18} />, description: t('保存后监控工作线程将在数秒内热加载。'), fields: [
     { key: 'dashboard_refresh_seconds', label: t('页面刷新（秒）'), type: 'number' }, { key: 'channel_sync_interval_seconds', label: t('渠道同步（秒）'), type: 'number' }, { key: 'channel_interval_seconds', label: t('渠道探测（秒）'), type: 'number' }, { key: 'channel_probe_concurrency', label: t('渠道探测并发数'), type: 'number', hint: t('建议 2–3，避免探测阻塞采集器，同时限制上游瞬时压力') }, { key: 'log_interval_seconds', label: t('日志同步（秒）'), type: 'number' }, { key: 'resource_interval_seconds', label: t('资源采样（秒）'), type: 'number' }, { key: 'report_interval_seconds', label: t('周期报告（秒）'), type: 'number' }, { key: 'retention_days', label: t('原始采样保留（天）'), type: 'number', hint: t('延迟、渠道探测和资源原始数据的保留时间') }, { key: 'incident_retention_days', label: t('已恢复事件保留（天）'), type: 'number' }, { key: 'notification_retention_days', label: t('投递记录保留（天）'), type: 'number' },

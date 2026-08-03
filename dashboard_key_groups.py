@@ -377,6 +377,7 @@ def build_key_usage_workspace(
         if int(token.get("id") or 0) > 0
     }
     token_usage: dict[int, dict[str, Any]] = {}
+    excluded_deleted_key_usage = {"requests": 0, "quota": 0, "tokens": 0}
 
     def usage_for(token_id: int) -> dict[str, Any]:
         if token_id not in token_usage:
@@ -413,6 +414,9 @@ def build_key_usage_workspace(
     for item in flow_items:
         token_id = int(item.get("token_id") or 0)
         if token_id not in token_names:
+            excluded_deleted_key_usage["requests"] += int(item.get("count") or 0)
+            excluded_deleted_key_usage["quota"] += int(item.get("quota") or 0)
+            excluded_deleted_key_usage["tokens"] += int(item.get("token_used") or 0)
             continue
         usage = usage_for(token_id)
         if not usage["token_name"]:
@@ -481,6 +485,8 @@ def build_key_usage_workspace(
         "start_timestamp": int(start_timestamp),
         "end_timestamp": int(end_timestamp),
         "usage_attribution": "current_multi_membership",
+        "summary_scope": "current_keys",
+        "excluded_deleted_key_usage": excluded_deleted_key_usage,
         "summary": {
             **serialize_usage(summary_source),
             "keys": len(token_names),

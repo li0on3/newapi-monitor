@@ -148,7 +148,7 @@ button { color: inherit; }
 .overall-status small, .overall-status strong { display: block; }
 .overall-status small { color: var(--text-muted); font: 10px Consolas, monospace; letter-spacing: .13em; }
 .overall-status strong { margin-top: 4px; }
-.overall-status > span:last-child { color: var(--text-muted); font: 11px Consolas, monospace; }
+.overall-status > span:last-child { max-width: 210px; overflow: hidden; color: var(--text-muted); font: 11px Consolas, monospace; text-overflow: ellipsis; white-space: nowrap; }
 
 .metrics-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-bottom: 38px; }
 .metric-card { display: grid; grid-template-columns: auto 1fr; gap: 14px; min-height: 132px; padding: 20px; border: 1px solid var(--line); border-radius: 16px; background: var(--panel); box-shadow: inset 0 1px color-mix(in srgb, var(--foreground) 2.5%, transparent); }
@@ -491,6 +491,13 @@ footer { display: flex; justify-content: space-between; gap: 20px; padding: 17px
 .analytics-scope-tabs { flex:0 0 auto; }
 .console-ranking-list .analytics-overflow-row,.console-ranking-list .analytics-pending-row,.console-flow-list .analytics-overflow-row,.console-flow-list .analytics-pending-row { background:var(--surface-deep); }
 .console-ranking-list .analytics-pending-row,.console-flow-list .analytics-pending-row { color:var(--text-muted); }
+.console-ranking-list .analytics-reconcile-row,.console-flow-list .analytics-reconcile-row { border-color:color-mix(in srgb,var(--warning) 24%,var(--border)); background:color-mix(in srgb,var(--warning) 5%,var(--surface-deep)); }
+.analytics-data-contract { display:grid; grid-template-columns:auto minmax(0,1fr) auto; align-items:center; gap:11px; padding:12px 14px; border:1px solid color-mix(in srgb,var(--primary) 20%,var(--border)); border-radius:12px; background:color-mix(in srgb,var(--primary) 4%,var(--surface)); color:var(--text-muted); }
+.analytics-data-contract > svg { color:var(--primary); }
+.analytics-data-contract strong,.analytics-data-contract span { display:block; }
+.analytics-data-contract strong { color:var(--text-secondary); font-size:10px; }
+.analytics-data-contract span { margin-top:4px; font-size:9px; line-height:1.5; }
+@media (max-width:640px) { .analytics-data-contract { grid-template-columns:auto minmax(0,1fr); }.analytics-data-contract .console-badge { grid-column:2; justify-self:start; } }
 .sr-only { position:absolute!important; width:1px!important; height:1px!important; padding:0!important; margin:-1px!important; overflow:hidden!important; clip:rect(0,0,0,0)!important; white-space:nowrap!important; border:0!important; }
 
 /* Multi-membership key groups */

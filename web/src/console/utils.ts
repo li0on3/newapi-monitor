@@ -143,6 +143,10 @@ export function compactNumber(value: number): string {
   return new Intl.NumberFormat(undefined, { notation: 'compact', maximumFractionDigits: 1 }).format(value || 0)
 }
 
+export function numberText(value: number): string {
+  return new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 }).format(value || 0)
+}
+
 export function durationText(seconds: number): string {
   if (seconds < 1) return `${Math.max(0, Math.round(seconds * 1000))} ms`
   return `${seconds.toFixed(seconds >= 10 ? 1 : 2)} s`

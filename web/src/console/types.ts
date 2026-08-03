@@ -72,6 +72,8 @@ export type ConsoleKeyGroupWorkspace = {
   all_time: boolean
   quota_per_unit: number
   usage_attribution: 'current_multi_membership'
+  summary_scope: 'current_keys'
+  excluded_deleted_key_usage: { requests: number; quota: number; tokens: number }
   summary: { requests: number; quota: number; tokens: number; models: number; keys: number; groups: number }
   groups: ConsoleKeyGroup[]
   ungrouped: {
@@ -105,7 +107,14 @@ export type ConsoleOverview = {
   }
   models: { total: number; items: string[] }
   keys: ConsoleTokenPage
-  usage_24h: { quota: number; rpm: number; tpm: number }
+  usage_24h: {
+    quota: number
+    rpm: number
+    tpm: number
+    scope: 'self_consume'
+    quota_window_seconds: number
+    rate_window_seconds: number
+  }
 }
 
 export type ConsoleSeriesItem = {
@@ -140,12 +149,27 @@ export type ConsoleAnalytics = {
   stat: { quota: number; rpm: number; tpm: number }
   summary: {
     requests: number
+    attributed_requests: number
+    unattributed_requests: number
+    model_request_delta: number
+    flow_requests: number
+    flow_unattributed_requests: number
+    flow_request_delta: number
     quota: number
     attributed_quota: number
     unattributed_quota: number
+    model_quota_delta: number
     flow_quota: number
+    flow_quota_delta: number
     tokens: number
     models: number
+  }
+  reconciliation: {
+    requests_exact: boolean
+    quota_exact: boolean
+    request_source: 'live_logs' | 'hourly_projection'
+    quota_source: 'live_logs' | 'hourly_projection'
+    attribution_source: 'hourly_projection'
   }
   quota_per_unit: number
 }
@@ -178,6 +202,9 @@ export type ConsoleLogPage = {
   items: ConsoleLog[]
   stat: { quota: number; rpm: number; tpm: number } | null
   stat_filters_complete: boolean
+  stat_scope: 'consume_only'
+  rate_window_seconds: number
+  stat_unavailable_reason: '' | 'request_id_filter' | 'non_consume_type'
   quota_per_unit: number
   scope: 'self' | 'global'
 }

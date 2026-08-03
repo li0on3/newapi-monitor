@@ -1,7 +1,13 @@
 import { describe, expect, test } from 'bun:test'
-import { buildAnalyticsFlowRows, buildAnalyticsModelTimeline, buildAnalyticsTimeline, summarizeFlowOverflow, logsToCsv } from './utils'
+import { buildAnalyticsFlowRows, buildAnalyticsModelTimeline, buildAnalyticsTimeline, summarizeFlowOverflow, logsToCsv, numberText } from './utils'
 
 describe('customer console analytics utilities', () => {
+  test('renders user-facing totals without compact rounding', () => {
+    const rendered = numberText(1348)
+    expect(rendered.replace(/\D/g, '')).toBe('1348')
+    expect(rendered.toLowerCase()).not.toContain('k')
+  })
+
   test('groups duplicate time buckets without losing request or token totals', () => {
     expect(buildAnalyticsTimeline([
       { created_at: 100, username: '', model_name: 'gpt-5.4', count: 2, quota: 50, token_used: 20 },

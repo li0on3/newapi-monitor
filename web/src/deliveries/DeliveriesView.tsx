@@ -13,7 +13,7 @@ import {
   Skull,
   X,
 } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../api';
 import { getLanguage, t } from '../i18n';
 import { TimeRangeControl } from '../TimeRangeControl';
@@ -41,6 +41,7 @@ type DeliveryItem = {
 
 type DeliveryPayload = {
   generated_at: number;
+  retention_days: number;
   total: number;
   limit: number;
   offset: number;
@@ -91,29 +92,49 @@ export function DeliveriesView() {
   const [action, setAction] = useState<'retry' | 'cancel' | null>(null);
   const [error, setError] = useState('');
   const [range, setRange] = useState<TimeRange>(() => presetRange(30));
+  const [page, setPage] = useState(0);
+  const requestSequence = useRef(0);
+  const pageSize = 100;
 
   useEffect(() => {
     const timer = window.setTimeout(() => setQuery(search.trim()), 250);
     return () => window.clearTimeout(timer);
   }, [search]);
 
+  useEffect(() => {
+    setPage(0);
+  }, [destination, query, range, status]);
+
   const load = useCallback(async () => {
+    const requestId = ++requestSequence.current;
     setLoading(true);
-    const parameters = new URLSearchParams({ status, destination, limit: '100', offset: '0' });
+    const parameters = new URLSearchParams({
+      status,
+      destination,
+      limit: String(pageSize),
+      offset: String(page * pageSize),
+    });
     appendDateRange(parameters, range);
     if (query) parameters.set('q', query);
     try {
       const result = await api<DeliveryPayload>(`notifications/outbox?${parameters.toString()}`);
+      if (requestId !== requestSequence.current) return;
+      const lastPage = Math.max(0, Math.ceil(result.total / pageSize) - 1);
+      if (page > lastPage) {
+        setPage(lastPage);
+        return;
+      }
       setPayload(result);
       setSelectedIds((current) => current.filter((id) => result.items.some((item) => item.id === id)));
       setSelectedId((current) => result.items.some((item) => item.id === current) ? current : result.items[0]?.id ?? null);
       setError('');
     } catch (requestError) {
+      if (requestId !== requestSequence.current) return;
       setError(requestError instanceof Error ? requestError.message : t('投递记录加载失败'));
     } finally {
-      setLoading(false);
+      if (requestId === requestSequence.current) setLoading(false);
     }
-  }, [destination, query, range, status]);
+  }, [destination, page, query, range, status]);
 
   useEffect(() => {
     void load();
@@ -152,11 +173,12 @@ export function DeliveriesView() {
 
   const counts = payload?.counts || { pending: 0, sending: 0, delivered: 0, dead: 0, cancelled: 0 };
   const statuses: Array<DeliveryStatus | 'all'> = ['all', 'pending', 'sending', 'delivered', 'dead', 'cancelled'];
+  const pageCount = Math.max(1, Math.ceil((payload?.total || 0) / pageSize));
 
   return <section className="deliveries-view">
     <div className="section-heading delivery-heading">
       <div><span className="eyebrow">ALERT DELIVERY OPERATIONS</span><h2>{t('告警投递中心')}</h2><p>{t('查看每一条告警的投递状态，恢复死信，并对积压任务执行安全操作。')}</p></div>
-      <div className="delivery-heading-actions"><span><i className={loading ? 'source-pulse source-pulse-loading' : 'source-pulse'} />{t('10 秒自动刷新')}</span><button className="secondary-button" type="button" onClick={() => void load()} disabled={loading}><RefreshCw className={loading ? 'spin' : ''} size={14} />{t('立即刷新')}</button></div>
+      <div className="delivery-heading-actions"><span><i className={loading ? 'source-pulse source-pulse-loading' : 'source-pulse'} />{t('10 秒自动刷新')} · {t('投递记录保留 {{days}} 天', { days: payload?.retention_days || 30 })}</span><button className="secondary-button" type="button" onClick={() => void load()} disabled={loading}><RefreshCw className={loading ? 'spin' : ''} size={14} />{t('立即刷新')}</button></div>
     </div>
     {error && <div className="inline-error"><AlertTriangle size={16} />{error}<button type="button" onClick={() => setError('')}>{t('关闭')}</button></div>}
 
@@ -191,6 +213,7 @@ export function DeliveriesView() {
           </article>)}
           {!payload?.items.length && <div className="delivery-empty"><Inbox size={30} /><strong>{t('没有匹配的投递记录')}</strong><span>{t('调整状态、渠道或搜索条件后重试。')}</span></div>}
         </div>
+        <div className="console-pagination"><span>{t('第 {{page}}/{{pages}} 页 · {{total}} 条记录', { page: page + 1, pages: pageCount, total: payload?.total || 0 })}</span><div><button type="button" disabled={page === 0 || loading} onClick={() => setPage((value) => Math.max(0, value - 1))}>{t('上一页')}</button><button type="button" disabled={page + 1 >= pageCount || loading} onClick={() => setPage((value) => value + 1)}>{t('下一页')}</button></div></div>
       </div>
 
       <aside className="delivery-detail-panel">

@@ -128,10 +128,10 @@ curl -fsS http://127.0.0.1:18081/api/health
 正常：
 
 ```json
-{"status":"ok","timestamp":1784476800}
+{"status":"ok","timestamp":1784476800,"version":"1.12.0"}
 ```
 
-首次安装尚未完成向导时返回 HTTP 200 和 `{"status":"setup_required"}`，便于容器健康检查通过，但采集线程尚未启动。
+首次安装尚未完成向导时返回 HTTP 200 和 `{"status":"setup_required","timestamp":1784476800,"version":"1.12.0"}`，便于容器健康检查通过，但采集线程尚未启动。`version` 来自镜像内只读的 `VERSION` 文件，可用于部署验收和回滚核对。
 
 以下任一情况返回 HTTP 503：
 
@@ -191,7 +191,7 @@ curl -fsS http://127.0.0.1:18081/api/health
 - 原始采样、已恢复事件和投递记录采用独立保留策略；定期执行清理和 WAL checkpoint，并在系统配置中展示数据库/WAL 容量、待投递数量和死信数量。
 - 日志历史使用按时间与筛选维度排列的复合索引；资源历史只聚合有界数值桶，并仅在最后一个点返回区间末端容器快照，避免长区间查询依赖大容量临时盘。
 
-New API 功能页的接口映射、权限边界和兼容策略见 [New API 功能页架构](docs/CUSTOMER_CONSOLE.md)。详细安全边界见 [SECURITY.md](SECURITY.md)，后续计划见 [ROADMAP.md](ROADMAP.md)，GitHub 维护流程见 [GITHUB_GUIDE.md](GITHUB_GUIDE.md)。
+每个页面的权威数据源、时间范围、归集差额和验收规则见 [数据口径与准确性](docs/DATA_ACCURACY.md)。New API 功能页的接口映射、权限边界和兼容策略见 [New API 功能页架构](docs/CUSTOMER_CONSOLE.md)。详细安全边界见 [SECURITY.md](SECURITY.md)，后续计划见 [ROADMAP.md](ROADMAP.md)，GitHub 维护流程见 [GITHUB_GUIDE.md](GITHUB_GUIDE.md)。
 
 ## 备份
 

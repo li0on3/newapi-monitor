@@ -15,7 +15,7 @@ export function TimeRangeControl({ value, onChange, compact = false }: {
         key={days}
         onClick={() => onChange(presetRange(days))}
       >{days === 1 ? t('今天') : t('近 {{days}} 天', { days })}</button>)}
-      <button className={value.mode === 'all' ? 'active' : ''} type="button" onClick={() => onChange(allTimeRange())}><History size={13} />{t('创建至今')}</button>
+      <button className={value.mode === 'all' ? 'active' : ''} type="button" onClick={() => onChange(allTimeRange())}><History size={13} />{t('累计/历史总量')}</button>
     </div>
     {value.mode === 'custom' && <div className="time-range-dates">
       <CalendarDays size={14} />

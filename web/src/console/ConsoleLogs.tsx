@@ -6,7 +6,7 @@ import { dateRangeQuery, presetRange, rangeLabel, type TimeRange } from '../time
 import { consoleApi } from './api'
 import { ConsoleBadge, ConsoleEmpty, ConsoleError, ConsoleLoading, ConsoleMetric } from './ConsoleCommon'
 import type { ConsoleLogPage } from './types'
-import { compactNumber, durationText, logsToCsv, quotaText } from './utils'
+import { durationText, logsToCsv, numberText, quotaText } from './utils'
 
 function fullTime(value: number) {
   return new Intl.DateTimeFormat(getLanguage() === 'en' ? 'en-US' : 'zh-CN', {
@@ -83,12 +83,12 @@ export function ConsoleLogs({ globalScope }: { globalScope: boolean }) {
 
     {loading && !data ? <ConsoleLoading /> : !data ? <ConsoleError message={error} retry={() => void load()} /> : <>
       {error && <div className="console-inline-warning">{error}</div>}
-      {!data.stat_filters_complete && <div className="console-inline-warning">{t('请求 ID 筛选时聚合指标不可用')}</div>}
+      {!data.stat_filters_complete && <div className="console-inline-warning">{data.stat_unavailable_reason === 'non_consume_type' ? t('额度、RPM 与 TPM 仅适用于消费日志；当前日志类型不展示这些指标。') : t('请求 ID 筛选时聚合指标不可用')}</div>}
       <section className="console-metric-grid console-log-metrics">
-        <ConsoleMetric icon={<Layers3 size={19} />} label={t('匹配记录')} value={compactNumber(data.total)} detail={data.scope === 'global' ? t('全局日志') : t('当前账号日志')} tone="blue" />
-        <ConsoleMetric icon={<Sigma size={19} />} label={t('额度消耗')} value={data.stat ? quotaText(data.stat.quota, data.quota_per_unit) : '—'} detail={rangeLabel(appliedRange, t('创建至今'))} tone="amber" />
-        <ConsoleMetric icon={<Timer size={19} />} label="RPM" value={data.stat ? compactNumber(data.stat.rpm) : '—'} detail={t('筛选范围统计')} tone="green" />
-        <ConsoleMetric icon={<Hash size={19} />} label="TPM" value={data.stat ? compactNumber(data.stat.tpm) : '—'} detail={t('筛选范围统计')} />
+        <ConsoleMetric icon={<Layers3 size={19} />} label={t('匹配记录')} value={numberText(data.total)} detail={data.scope === 'global' ? t('全局日志') : t('当前账号日志')} tone="blue" />
+        <ConsoleMetric icon={<Sigma size={19} />} label={t('消费额度')} value={data.stat ? quotaText(data.stat.quota, data.quota_per_unit) : '—'} detail={rangeLabel(appliedRange, t('累计/历史总量'))} tone="amber" />
+        <ConsoleMetric icon={<Timer size={19} />} label="RPM" value={data.stat ? numberText(data.stat.rpm) : '—'} detail={t('当前 60 秒消费请求')} tone="green" />
+        <ConsoleMetric icon={<Hash size={19} />} label="TPM" value={data.stat ? numberText(data.stat.tpm) : '—'} detail={t('当前 60 秒消费 Token')} />
       </section>
 
       <section className="console-panel console-log-list-panel">
@@ -96,7 +96,7 @@ export function ConsoleLogs({ globalScope }: { globalScope: boolean }) {
         {data.items.length ? <div className="console-log-list">{data.items.map((item) => {
           const open = expanded.has(item.id)
           const frt = Number(item.other.frt || item.other.frt_ms || 0)
-          return <article className={open ? 'expanded' : ''} key={`${item.id}-${item.request_id}`}><button className="console-log-summary" type="button" onClick={() => setExpanded((current) => { const next = new Set(current); if (next.has(item.id)) next.delete(item.id); else next.add(item.id); return next })}>{open ? <ChevronDown size={15} /> : <ChevronRight size={15} />}<span className="console-log-time"><strong>{fullTime(item.created_at)}</strong><small>{item.username || t('当前账号')}</small></span><span><strong>{item.model_name || t('未知模型')}</strong><small>{item.token_name || t('未命名密钥')} · {item.group || t('默认分组')}</small></span><span><strong>{compactNumber(item.prompt_tokens + item.completion_tokens)} Tokens</strong><small>{item.prompt_tokens} + {item.completion_tokens}</small></span><span><strong>{durationText(item.use_time)}</strong><small>{frt > 0 ? `${t('首字')} ${Math.round(frt)} ms` : item.is_stream ? t('流式') : t('非流式')}</small></span><span><ConsoleBadge tone={item.type === 5 ? 'red' : item.type === 2 ? 'green' : 'neutral'}>{logType(item.type)}</ConsoleBadge></span></button>{open && <div className="console-log-detail"><dl><div><dt>{t('请求 ID')}</dt><dd><code>{item.request_id || '—'}</code></dd></div><div><dt>{t('上游请求 ID')}</dt><dd><code>{item.upstream_request_id || '—'}</code></dd></div><div><dt>{t('调用渠道')}</dt><dd>{item.channel_name || (item.channel_id ? `#${item.channel_id}` : '—')}</dd></div><div><dt>{t('额度')}</dt><dd>{quotaText(item.quota, data.quota_per_unit)}</dd></div></dl><section><strong>{t('日志内容')}</strong><pre>{item.content || t('无附加内容')}</pre></section><section><strong>{t('诊断字段')}</strong><pre>{Object.keys(item.other).length ? JSON.stringify(item.other, null, 2) : t('无附加诊断字段')}</pre></section></div>}</article>
+          return <article className={open ? 'expanded' : ''} key={`${item.id}-${item.request_id}`}><button className="console-log-summary" type="button" onClick={() => setExpanded((current) => { const next = new Set(current); if (next.has(item.id)) next.delete(item.id); else next.add(item.id); return next })}>{open ? <ChevronDown size={15} /> : <ChevronRight size={15} />}<span className="console-log-time"><strong>{fullTime(item.created_at)}</strong><small>{item.username || t('当前账号')}</small></span><span><strong>{item.model_name || t('未知模型')}</strong><small>{item.token_name || t('未命名密钥')} · {item.group || t('默认分组')}</small></span><span><strong>{numberText(item.prompt_tokens + item.completion_tokens)} Tokens</strong><small>{numberText(item.prompt_tokens)} + {numberText(item.completion_tokens)}</small></span><span><strong>{durationText(item.use_time)}</strong><small>{frt > 0 ? `${t('首字')} ${Math.round(frt)} ms` : item.is_stream ? t('流式') : t('非流式')}</small></span><span><ConsoleBadge tone={item.type === 5 ? 'red' : item.type === 2 ? 'green' : 'neutral'}>{logType(item.type)}</ConsoleBadge></span></button>{open && <div className="console-log-detail"><dl><div><dt>{t('请求 ID')}</dt><dd><code>{item.request_id || '—'}</code></dd></div><div><dt>{t('上游请求 ID')}</dt><dd><code>{item.upstream_request_id || '—'}</code></dd></div><div><dt>{t('调用渠道')}</dt><dd>{item.channel_name || (item.channel_id ? `#${item.channel_id}` : '—')}</dd></div><div><dt>{t('额度')}</dt><dd>{quotaText(item.quota, data.quota_per_unit)}</dd></div></dl><section><strong>{t('日志内容')}</strong><pre>{item.content || t('无附加内容')}</pre></section><section><strong>{t('诊断字段')}</strong><pre>{Object.keys(item.other).length ? JSON.stringify(item.other, null, 2) : t('无附加诊断字段')}</pre></section></div>}</article>
         })}</div> : <ConsoleEmpty title={t('没有匹配的使用日志')} detail={t('调整日期或筛选条件后重新查询。')} />}
         <div className="console-pagination"><span>{t('第 {{page}}/{{pages}} 页 · {{total}} 条记录', { page: data.page, pages: pageCount, total: data.total })}</span><div><button type="button" disabled={page <= 1 || loading} onClick={() => setPage((value) => value - 1)}>{t('上一页')}</button><button type="button" disabled={page >= pageCount || loading} onClick={() => setPage((value) => value + 1)}>{t('下一页')}</button></div></div>
       </section>

@@ -11,6 +11,9 @@ from typing import Any, Callable
 from dashboard_http import open_without_redirects
 
 
+SELF_DATA_RANGE_SECONDS = 30 * 86400
+
+
 class NewAPIConsoleError(RuntimeError):
     def __init__(self, status_code: int, message: str):
         super().__init__(message)
@@ -87,71 +90,159 @@ class NewAPIConsoleClient:
             return default
 
     @staticmethod
-    def _positive_number(value: Any, default: float) -> float:
+    def _required_positive_number(value: Any, field: str, context: str) -> float:
+        if isinstance(value, bool):
+            raise NewAPIConsoleError(502, f"Account service returned invalid {context} field: {field}")
         try:
             number = float(value)
-        except (TypeError, ValueError, OverflowError):
-            return default
-        return number if math.isfinite(number) and number > 0 else default
+        except (TypeError, ValueError, OverflowError) as error:
+            raise NewAPIConsoleError(
+                502, f"Account service returned invalid {context} field: {field}"
+            ) from error
+        if not math.isfinite(number) or number <= 0:
+            raise NewAPIConsoleError(502, f"Account service returned invalid {context} field: {field}")
+        return number
+
+    @staticmethod
+    def _required_integer(
+        value: Any,
+        field: str,
+        context: str,
+        minimum: int | None = 0,
+    ) -> int:
+        if isinstance(value, bool):
+            raise NewAPIConsoleError(502, f"Account service returned invalid {context} field: {field}")
+        if isinstance(value, int):
+            number = value
+        elif isinstance(value, float) and math.isfinite(value) and value.is_integer():
+            number = int(value)
+        elif isinstance(value, str) and re.fullmatch(r"-?\d+", value.strip()):
+            number = int(value.strip())
+        else:
+            raise NewAPIConsoleError(502, f"Account service returned invalid {context} field: {field}")
+        if minimum is not None and number < minimum:
+            raise NewAPIConsoleError(502, f"Account service returned invalid {context} field: {field}")
+        return number
+
+    @staticmethod
+    def _required_boolean(value: Any, field: str, context: str) -> bool:
+        if not isinstance(value, bool):
+            raise NewAPIConsoleError(502, f"Account service returned invalid {context} field: {field}")
+        return value
+
+    @staticmethod
+    def _analytics_integer(value: Any, field: str) -> int:
+        return NewAPIConsoleClient._required_integer(value, field, "analytics")
 
     @staticmethod
     def _token(item: Any) -> dict[str, Any]:
-        value = item if isinstance(item, dict) else {}
+        if not isinstance(item, dict):
+            raise NewAPIConsoleError(502, "Account service returned invalid token data")
+        value = item
         allow_ips = value.get("allow_ips")
         return {
-            "id": NewAPIConsoleClient._number(value.get("id")),
+            "id": NewAPIConsoleClient._required_integer(value.get("id"), "id", "token", minimum=1),
             "name": str(value.get("name") or "")[:50],
             "masked_key": str(value.get("key") or "")[:128],
-            "status": NewAPIConsoleClient._number(value.get("status")),
-            "created_time": NewAPIConsoleClient._number(value.get("created_time")),
-            "accessed_time": NewAPIConsoleClient._number(value.get("accessed_time")),
-            "expired_time": NewAPIConsoleClient._number(value.get("expired_time"), -1),
-            "remain_quota": NewAPIConsoleClient._number(value.get("remain_quota")),
-            "used_quota": NewAPIConsoleClient._number(value.get("used_quota")),
-            "unlimited_quota": bool(value.get("unlimited_quota")),
-            "model_limits_enabled": bool(value.get("model_limits_enabled")),
+            "status": NewAPIConsoleClient._required_integer(value.get("status"), "status", "token"),
+            "created_time": NewAPIConsoleClient._required_integer(
+                value.get("created_time"), "created_time", "token"
+            ),
+            "accessed_time": NewAPIConsoleClient._required_integer(
+                value.get("accessed_time"), "accessed_time", "token"
+            ),
+            "expired_time": NewAPIConsoleClient._required_integer(
+                value.get("expired_time"), "expired_time", "token", minimum=-1
+            ),
+            "remain_quota": NewAPIConsoleClient._required_integer(
+                value.get("remain_quota"), "remain_quota", "token", minimum=None
+            ),
+            "used_quota": NewAPIConsoleClient._required_integer(
+                value.get("used_quota"), "used_quota", "token"
+            ),
+            "unlimited_quota": NewAPIConsoleClient._required_boolean(
+                value.get("unlimited_quota"), "unlimited_quota", "token"
+            ),
+            "model_limits_enabled": NewAPIConsoleClient._required_boolean(
+                value.get("model_limits_enabled"), "model_limits_enabled", "token"
+            ),
             "model_limits": str(value.get("model_limits") or "")[:8192],
             "allow_ips": str(allow_ips or "")[:4096],
             "group": str(value.get("group") or "")[:128],
-            "cross_group_retry": bool(value.get("cross_group_retry")),
+            "cross_group_retry": NewAPIConsoleClient._required_boolean(
+                value.get("cross_group_retry"), "cross_group_retry", "token"
+            ),
         }
 
     @staticmethod
-    def _page(data: Any, normalizer: Callable[[Any], dict[str, Any]]) -> dict[str, Any]:
-        value = data if isinstance(data, dict) else {}
-        items = value.get("items") if isinstance(value.get("items"), list) else []
+    def _page(
+        data: Any,
+        normalizer: Callable[[Any], dict[str, Any]],
+        *,
+        expected_page: int | None = None,
+        expected_page_size: int | None = None,
+    ) -> dict[str, Any]:
+        if not isinstance(data, dict) or not isinstance(data.get("items"), list):
+            raise NewAPIConsoleError(502, "Account service returned invalid pagination data")
+        value = data
+        items = value["items"]
+        if any(not isinstance(item, dict) for item in items):
+            raise NewAPIConsoleError(502, "Account service returned invalid pagination data")
+        page = NewAPIConsoleClient._required_integer(value.get("page"), "page", "pagination")
+        page_size = NewAPIConsoleClient._required_integer(value.get("page_size"), "page_size", "pagination")
+        total = NewAPIConsoleClient._required_integer(value.get("total"), "total", "pagination")
+        if (
+            page < 1
+            or page_size < 1
+            or len(items) > page_size
+            or total < len(items)
+            or (items and total < (page - 1) * page_size + len(items))
+            or (not items and total > (page - 1) * page_size)
+            or (expected_page is not None and page != expected_page)
+            or (expected_page_size is not None and page_size != expected_page_size)
+        ):
+            raise NewAPIConsoleError(502, "Account service returned invalid pagination data")
         return {
-            "page": max(1, NewAPIConsoleClient._number(value.get("page"), 1)),
-            "page_size": max(1, NewAPIConsoleClient._number(value.get("page_size"), len(items) or 20)),
-            "total": max(0, NewAPIConsoleClient._number(value.get("total"), len(items))),
+            "page": page,
+            "page_size": page_size,
+            "total": total,
             "items": [normalizer(item) for item in items],
         }
 
     def status(self, session_cookie: str, user_id: int) -> dict[str, Any]:
         data = self._request(session_cookie, user_id, "GET", "/api/status")
-        value = data if isinstance(data, dict) else {}
+        if not isinstance(data, dict):
+            raise NewAPIConsoleError(502, "Account service returned invalid status data")
+        value = data
         return {
             "version": str(value.get("version") or ""),
             "system_name": str(value.get("system_name") or "New API")[:128],
             "server_address": str(value.get("server_address") or "")[:2048],
             "docs_link": str(value.get("docs_link") or "")[:2048],
-            "quota_per_unit": self._positive_number(value.get("quota_per_unit"), 500000),
+            "quota_per_unit": self._required_positive_number(
+                value.get("quota_per_unit"), "quota_per_unit", "status"
+            ),
             "quota_display_type": str(value.get("quota_display_type") or "USD")[:32],
         }
 
     def self_info(self, session_cookie: str, user_id: int) -> dict[str, Any]:
         data = self._request(session_cookie, user_id, "GET", "/api/user/self")
-        value = data if isinstance(data, dict) else {}
+        if not isinstance(data, dict):
+            raise NewAPIConsoleError(502, "Account service returned invalid account data")
+        value = data
+        account_id = self._required_integer(value.get("id"), "id", "account")
+        if account_id != user_id:
+            raise NewAPIConsoleError(502, "Account service returned account identity mismatch")
         return {
-            "id": self._number(value.get("id")),
+            "id": account_id,
             "username": str(value.get("username") or "")[:128],
             "display_name": str(value.get("display_name") or value.get("username") or "")[:128],
-            "role": self._number(value.get("role")),
-            "status": self._number(value.get("status")),
+            "role": self._required_integer(value.get("role"), "role", "account"),
+            "status": self._required_integer(value.get("status"), "status", "account"),
             "group": str(value.get("group") or "")[:128],
-            "quota": self._number(value.get("quota")),
-            "used_quota": self._number(value.get("used_quota")),
-            "request_count": self._number(value.get("request_count")),
+            "quota": self._required_integer(value.get("quota"), "quota", "account"),
+            "used_quota": self._required_integer(value.get("used_quota"), "used_quota", "account"),
+            "request_count": self._required_integer(value.get("request_count"), "request_count", "account"),
         }
 
     def models(self, session_cookie: str, user_id: int) -> list[str]:
@@ -163,13 +254,20 @@ class NewAPIConsoleClient:
         elif isinstance(data, dict):
             items = [item for models in data.values() if isinstance(models, list) for item in models]
         else:
-            items = []
+            raise NewAPIConsoleError(502, "Account service returned invalid model catalog")
         result: list[str] = []
         for item in items:
-            name = str(item.get("id") or item.get("model_name") or item.get("name") or "") if isinstance(item, dict) else str(item)
-            if name and name not in result:
+            if isinstance(item, dict):
+                name = str(item.get("id") or item.get("model_name") or item.get("name") or "").strip()
+            elif isinstance(item, str):
+                name = item.strip()
+            else:
+                raise NewAPIConsoleError(502, "Account service returned invalid model catalog")
+            if not name:
+                raise NewAPIConsoleError(502, "Account service returned invalid model catalog")
+            if name not in result:
                 result.append(name[:256])
-        return result[:2000]
+        return result
 
     def groups(self, session_cookie: str, user_id: int) -> list[str]:
         data = self._request(session_cookie, user_id, "GET", "/api/user/self/groups")
@@ -178,8 +276,10 @@ class NewAPIConsoleClient:
         elif isinstance(data, list):
             values = data
         else:
-            values = []
-        return [str(value)[:128] for value in values if str(value).strip()][:500]
+            raise NewAPIConsoleError(502, "Account service returned invalid group catalog")
+        if any(not isinstance(value, str) or not value.strip() for value in values):
+            raise NewAPIConsoleError(502, "Account service returned invalid group catalog")
+        return [value.strip()[:128] for value in values]
 
     def list_tokens(
         self,
@@ -192,7 +292,12 @@ class NewAPIConsoleClient:
     ) -> dict[str, Any]:
         path = "/api/token/search" if keyword or token else "/api/token/"
         query = {"p": page, "page_size": page_size, "keyword": keyword, "token": token}
-        return self._page(self._request(session_cookie, user_id, "GET", path, query=query), self._token)
+        return self._page(
+            self._request(session_cookie, user_id, "GET", path, query=query),
+            self._token,
+            expected_page=page,
+            expected_page_size=page_size,
+        )
 
     def list_all_tokens(
         self,
@@ -206,21 +311,27 @@ class NewAPIConsoleClient:
         page = 1
         result: list[dict[str, Any]] = []
         seen: set[int] = set()
+        expected_total: int | None = None
         while True:
             current = self.list_tokens(session_cookie, user_id, page=page, page_size=page_size)
             total = int(current["total"])
+            if expected_total is None:
+                expected_total = total
+            elif total != expected_total:
+                raise NewAPIConsoleError(502, "New API token pagination changed during the request")
             if total > max_items:
                 raise NewAPIConsoleError(400, f"too many API keys; maximum supported is {max_items}")
             items = current["items"]
             result_size = len(result)
             for item in items:
                 token_id = int(item.get("id") or 0)
-                if token_id > 0 and token_id not in seen:
-                    seen.add(token_id)
-                    result.append(item)
-            if not items or len(result) >= total:
+                if token_id in seen:
+                    raise NewAPIConsoleError(502, "New API token pagination is inconsistent")
+                seen.add(token_id)
+                result.append(item)
+            if len(result) == total:
                 return result
-            if len(result) == result_size:
+            if not items or len(result) <= result_size or len(result) > total:
                 raise NewAPIConsoleError(502, "New API token pagination is inconsistent")
             page += 1
 
@@ -231,14 +342,112 @@ class NewAPIConsoleClient:
         start_timestamp: int,
         end_timestamp: int,
     ) -> list[dict[str, Any]]:
-        data = self._request(
+        effective_start, _ = self._self_range_start(
             session_cookie,
             user_id,
-            "GET",
-            "/api/data/flow/self",
-            query={"start_timestamp": start_timestamp, "end_timestamp": end_timestamp},
+            start_timestamp,
+            end_timestamp,
         )
-        return [self._flow_item(item) for item in data] if isinstance(data, list) else []
+        if effective_start > end_timestamp:
+            return []
+        data = self._request_self_range(
+            session_cookie,
+            user_id,
+            "/api/data/flow/self",
+            effective_start,
+            end_timestamp,
+        )
+        return [self._flow_item(item) for item in data]
+
+    @staticmethod
+    def _range_chunks(start_timestamp: int, end_timestamp: int) -> list[tuple[int, int]]:
+        chunks: list[tuple[int, int]] = []
+        cursor = max(1, int(start_timestamp))
+        end = int(end_timestamp)
+        while cursor <= end:
+            chunk_end = min(end, cursor + SELF_DATA_RANGE_SECONDS)
+            chunks.append((cursor, chunk_end))
+            cursor = chunk_end + 1
+        return chunks
+
+    def _request_self_range(
+        self,
+        session_cookie: str,
+        user_id: int,
+        path: str,
+        start_timestamp: int,
+        end_timestamp: int,
+    ) -> list[Any]:
+        result: list[Any] = []
+        for chunk_start, chunk_end in self._range_chunks(start_timestamp, end_timestamp):
+            data = self._request(
+                session_cookie,
+                user_id,
+                "GET",
+                path,
+                query={"start_timestamp": chunk_start, "end_timestamp": chunk_end},
+            )
+            if not isinstance(data, list):
+                raise NewAPIConsoleError(502, "Account service returned invalid analytics data")
+            result.extend(data)
+        return result
+
+    def _self_range_start(
+        self,
+        session_cookie: str,
+        user_id: int,
+        start_timestamp: int,
+        end_timestamp: int,
+    ) -> tuple[int, dict[str, Any] | None]:
+        if end_timestamp - start_timestamp <= SELF_DATA_RANGE_SECONDS:
+            return start_timestamp, None
+        query = {
+            "type": 2,
+            "start_timestamp": start_timestamp,
+            "end_timestamp": end_timestamp,
+            "p": 1,
+            "page_size": 1,
+        }
+        first_page_raw = self._request(session_cookie, user_id, "GET", "/api/log/self", query=query)
+        first_page = self._page(
+            first_page_raw,
+            lambda item: item,
+            expected_page=1,
+            expected_page_size=1,
+        )
+        total = first_page["total"]
+        items = first_page["items"]
+        if total == 0:
+            return end_timestamp + 1, first_page
+        oldest_items = items
+        if total > 1:
+            oldest_page_raw = self._request(
+                session_cookie,
+                user_id,
+                "GET",
+                "/api/log/self",
+                query={**query, "p": total},
+            )
+            oldest_page = self._page(
+                oldest_page_raw,
+                lambda item: item,
+                expected_page=total,
+                expected_page_size=1,
+            )
+            if oldest_page["total"] != total:
+                raise NewAPIConsoleError(502, "Account service returned incomplete log bounds")
+            oldest_items = oldest_page["items"]
+        oldest_at = min(
+            (
+                self._required_integer(item.get("created_at"), "created_at", "pagination")
+                for item in oldest_items
+            ),
+            default=0,
+        )
+        if oldest_at <= 0:
+            raise NewAPIConsoleError(502, "Account service returned incomplete log bounds")
+        bucket_start = oldest_at - oldest_at % 3600
+        return max(start_timestamp, max(1, bucket_start)), first_page
 
     def get_token(self, session_cookie: str, user_id: int, token_id: int) -> dict[str, Any]:
         return self._token(self._request(session_cookie, user_id, "GET", f"/api/token/{token_id}"))
@@ -265,39 +474,61 @@ class NewAPIConsoleClient:
 
     def batch_delete_tokens(self, session_cookie: str, user_id: int, token_ids: list[int]) -> int:
         data = self._request(session_cookie, user_id, "POST", "/api/token/batch", body={"ids": token_ids})
-        return self._number(data)
+        return self._required_integer(data, "deleted", "token")
 
     def reveal_token(self, session_cookie: str, user_id: int, token_id: int) -> str:
         data = self._request(session_cookie, user_id, "POST", f"/api/token/{token_id}/key")
-        return str(data.get("key") or "") if isinstance(data, dict) else ""
+        if not isinstance(data, dict) or not isinstance(data.get("key"), str) or not data["key"]:
+            raise NewAPIConsoleError(502, "Account service returned invalid token key data")
+        return data["key"]
 
     @staticmethod
     def _series_item(item: Any) -> dict[str, Any]:
-        value = item if isinstance(item, dict) else {}
+        if not isinstance(item, dict):
+            raise NewAPIConsoleError(502, "Account service returned invalid analytics data")
+        value = item
         return {
-            "created_at": NewAPIConsoleClient._number(value.get("created_at")),
+            "created_at": NewAPIConsoleClient._analytics_integer(value.get("created_at"), "created_at"),
             "username": str(value.get("username") or "")[:128],
             "model_name": str(value.get("model_name") or "")[:256],
-            "count": NewAPIConsoleClient._number(value.get("count")),
-            "quota": NewAPIConsoleClient._number(value.get("quota")),
-            "token_used": NewAPIConsoleClient._number(value.get("token_used")),
+            "count": NewAPIConsoleClient._analytics_integer(value.get("count"), "count"),
+            "quota": NewAPIConsoleClient._analytics_integer(value.get("quota"), "quota"),
+            "token_used": NewAPIConsoleClient._analytics_integer(value.get("token_used"), "token_used"),
         }
 
     @staticmethod
     def _flow_item(item: Any) -> dict[str, Any]:
-        value = item if isinstance(item, dict) else {}
+        if not isinstance(item, dict):
+            raise NewAPIConsoleError(502, "Account service returned invalid analytics data")
+        value = item
         return {
             "username": str(value.get("username") or "")[:128],
             "node_name": str(value.get("node_name") or "")[:128],
-            "token_id": NewAPIConsoleClient._number(value.get("token_id")),
+            "token_id": NewAPIConsoleClient._analytics_integer(value.get("token_id", 0), "token_id"),
             "token_name": str(value.get("token_name") or "")[:128],
             "use_group": str(value.get("use_group") or "")[:128],
-            "channel_id": NewAPIConsoleClient._number(value.get("channel_id")),
+            "channel_id": NewAPIConsoleClient._analytics_integer(value.get("channel_id", 0), "channel_id"),
             "channel_name": str(value.get("channel_name") or "")[:128],
             "model_name": str(value.get("model_name") or "")[:256],
-            "token_used": NewAPIConsoleClient._number(value.get("token_used")),
-            "count": NewAPIConsoleClient._number(value.get("count")),
-            "quota": NewAPIConsoleClient._number(value.get("quota")),
+            "token_used": NewAPIConsoleClient._analytics_integer(value.get("token_used"), "token_used"),
+            "count": NewAPIConsoleClient._analytics_integer(value.get("count"), "count"),
+            "quota": NewAPIConsoleClient._analytics_integer(value.get("quota"), "quota"),
+        }
+
+    @staticmethod
+    def _log_statistics(data: Any) -> dict[str, int]:
+        if not isinstance(data, dict):
+            raise NewAPIConsoleError(502, "Account service returned invalid log statistics data")
+        return {
+            "quota": NewAPIConsoleClient._required_integer(
+                data.get("quota"), "quota", "log statistics"
+            ),
+            "rpm": NewAPIConsoleClient._required_integer(
+                data.get("rpm"), "rpm", "log statistics"
+            ),
+            "tpm": NewAPIConsoleClient._required_integer(
+                data.get("tpm"), "tpm", "log statistics"
+            ),
         }
 
     def analytics(
@@ -318,6 +549,7 @@ class NewAPIConsoleClient:
             raise NewAPIConsoleError(403, "global analytics requires an administrator")
         use_global_scope = is_admin and requested_scope != "self"
         query = {
+            "type": 2,
             "start_timestamp": start_timestamp,
             "end_timestamp": end_timestamp,
             "username": username if use_global_scope else "",
@@ -325,41 +557,112 @@ class NewAPIConsoleClient:
         series_path = "/api/data/" if use_global_scope else "/api/data/self"
         flow_path = "/api/data/flow" if use_global_scope else "/api/data/flow/self"
         stat_path = "/api/log/stat" if use_global_scope else "/api/log/self/stat"
-        series_raw = self._request(session_cookie, user_id, "GET", series_path, query=query)
-        flow_raw = self._request(session_cookie, user_id, "GET", flow_path, query=query)
+        cached_log_page: dict[str, Any] | None = None
+        if use_global_scope:
+            series_raw = self._request(session_cookie, user_id, "GET", series_path, query=query)
+            flow_raw = self._request(session_cookie, user_id, "GET", flow_path, query=query)
+        else:
+            effective_start, cached_log_page = self._self_range_start(
+                session_cookie,
+                user_id,
+                start_timestamp,
+                end_timestamp,
+            )
+            if effective_start > end_timestamp:
+                series_raw = []
+                flow_raw = []
+            else:
+                series_raw = self._request_self_range(
+                    session_cookie,
+                    user_id,
+                    series_path,
+                    effective_start,
+                    end_timestamp,
+                )
+                flow_raw = self._request_self_range(
+                    session_cookie,
+                    user_id,
+                    flow_path,
+                    effective_start,
+                    end_timestamp,
+                )
         stat_raw = self._request(session_cookie, user_id, "GET", stat_path, query=query)
-        series = [self._series_item(item) for item in series_raw] if isinstance(series_raw, list) else []
-        flow = [self._flow_item(item) for item in flow_raw] if isinstance(flow_raw, list) else []
-        stat = stat_raw if isinstance(stat_raw, dict) else {}
+        log_path = "/api/log/" if use_global_scope else "/api/log/self"
+        log_query = {
+            "type": 2,
+            "start_timestamp": start_timestamp,
+            "end_timestamp": end_timestamp,
+            "p": 1,
+            "page_size": 1,
+        }
+        if use_global_scope and username:
+            log_query["username"] = username
+        log_page_raw = cached_log_page or self._request(
+            session_cookie,
+            user_id,
+            "GET",
+            log_path,
+            query=log_query,
+        )
+        if not isinstance(series_raw, list) or not isinstance(flow_raw, list):
+            raise NewAPIConsoleError(502, "Account service returned invalid analytics data")
+        series = [self._series_item(item) for item in series_raw]
+        flow = [self._flow_item(item) for item in flow_raw]
+        stat = self._log_statistics(stat_raw)
+        log_page = self._page(
+            log_page_raw,
+            lambda item: item,
+            expected_page=1,
+            expected_page_size=1,
+        )
+        attributed_requests = sum(item["count"] for item in series)
+        flow_requests = sum(item["count"] for item in flow)
         attributed_quota = sum(item["quota"] for item in series)
         flow_quota = sum(item["quota"] for item in flow)
-        log_quota = self._number(stat.get("quota"))
-        total_quota = max(attributed_quota, flow_quota, log_quota)
+        total_quota = stat["quota"]
+        total_requests = log_page["total"]
+        model_request_delta = total_requests - attributed_requests
+        flow_request_delta = total_requests - flow_requests
+        model_quota_delta = total_quota - attributed_quota
+        flow_quota_delta = total_quota - flow_quota
         return {
             "start_timestamp": start_timestamp,
             "end_timestamp": end_timestamp,
             "scope": "global" if use_global_scope else "self",
             "series": series,
             "flow": flow,
-            "stat": {
-                "quota": self._number(stat.get("quota")),
-                "rpm": self._number(stat.get("rpm")),
-                "tpm": self._number(stat.get("tpm")),
-            },
+            "stat": stat,
             "summary": {
-                "requests": sum(item["count"] for item in series),
+                "requests": total_requests,
+                "attributed_requests": attributed_requests,
+                "unattributed_requests": max(0, model_request_delta),
+                "model_request_delta": model_request_delta,
+                "flow_requests": flow_requests,
+                "flow_unattributed_requests": max(0, flow_request_delta),
+                "flow_request_delta": flow_request_delta,
                 "quota": total_quota,
                 "attributed_quota": attributed_quota,
-                "unattributed_quota": max(0, total_quota - attributed_quota),
+                "unattributed_quota": max(0, model_quota_delta),
+                "model_quota_delta": model_quota_delta,
                 "flow_quota": flow_quota,
+                "flow_quota_delta": flow_quota_delta,
                 "tokens": sum(item["token_used"] for item in series),
                 "models": len({item["model_name"] for item in series if item["model_name"]}),
+            },
+            "reconciliation": {
+                "requests_exact": True,
+                "quota_exact": True,
+                "request_source": "live_logs",
+                "quota_source": "live_logs",
+                "attribution_source": "hourly_projection",
             },
         }
 
     @staticmethod
     def _log(item: Any, include_admin: bool) -> dict[str, Any]:
-        value = item if isinstance(item, dict) else {}
+        if not isinstance(item, dict):
+            raise NewAPIConsoleError(502, "Account service returned invalid log data")
+        value = item
         raw_other = value.get("other")
         if isinstance(raw_other, str):
             try:
@@ -373,19 +676,33 @@ class NewAPIConsoleClient:
             other.pop("audit_info", None)
             other.pop("stream_status", None)
         return {
-            "id": NewAPIConsoleClient._number(value.get("id")),
-            "created_at": NewAPIConsoleClient._number(value.get("created_at")),
-            "type": NewAPIConsoleClient._number(value.get("type")),
+            "id": NewAPIConsoleClient._required_integer(value.get("id"), "id", "log"),
+            "created_at": NewAPIConsoleClient._required_integer(
+                value.get("created_at"), "created_at", "log"
+            ),
+            "type": NewAPIConsoleClient._required_integer(value.get("type"), "type", "log"),
             "content": str(value.get("content") or "")[:4000],
             "username": str(value.get("username") or "")[:128],
             "token_name": str(value.get("token_name") or "")[:128],
             "model_name": str(value.get("model_name") or "")[:256],
-            "quota": NewAPIConsoleClient._number(value.get("quota")),
-            "prompt_tokens": NewAPIConsoleClient._number(value.get("prompt_tokens")),
-            "completion_tokens": NewAPIConsoleClient._number(value.get("completion_tokens")),
-            "use_time": NewAPIConsoleClient._number(value.get("use_time")),
-            "is_stream": bool(value.get("is_stream")),
-            "channel_id": NewAPIConsoleClient._number(value.get("channel")),
+            "quota": NewAPIConsoleClient._required_integer(
+                value.get("quota"), "quota", "log", minimum=None
+            ),
+            "prompt_tokens": NewAPIConsoleClient._required_integer(
+                value.get("prompt_tokens"), "prompt_tokens", "log"
+            ),
+            "completion_tokens": NewAPIConsoleClient._required_integer(
+                value.get("completion_tokens"), "completion_tokens", "log"
+            ),
+            "use_time": NewAPIConsoleClient._required_integer(
+                value.get("use_time"), "use_time", "log"
+            ),
+            "is_stream": NewAPIConsoleClient._required_boolean(
+                value.get("is_stream"), "is_stream", "log"
+            ),
+            "channel_id": NewAPIConsoleClient._required_integer(
+                value.get("channel"), "channel", "log"
+            ),
             "channel_name": str(value.get("channel_name") or "")[:128] if include_admin else "",
             "group": str(value.get("group") or "")[:128],
             "request_id": str(value.get("request_id") or "")[:128],
@@ -413,7 +730,12 @@ class NewAPIConsoleClient:
         query.update({key: value for key, value in filters.items() if key in allowed})
         path = "/api/log/" if is_admin else "/api/log/self"
         data = self._request(session_cookie, user_id, "GET", path, query=query)
-        return self._page(data, lambda item: self._log(item, is_admin))
+        return self._page(
+            data,
+            lambda item: self._log(item, is_admin),
+            expected_page=page,
+            expected_page_size=page_size,
+        )
 
     def log_stat(
         self,
@@ -434,9 +756,4 @@ class NewAPIConsoleClient:
             path,
             query={key: value for key, value in filters.items() if key in allowed},
         )
-        value = data if isinstance(data, dict) else {}
-        return {
-            "quota": self._number(value.get("quota")),
-            "rpm": self._number(value.get("rpm")),
-            "tpm": self._number(value.get("tpm")),
-        }
+        return self._log_statistics(data)

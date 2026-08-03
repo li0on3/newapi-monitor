@@ -15,10 +15,12 @@ class DashboardRepository:
         database_path: str,
         slow_seconds: float = 60.0,
         channel_stale_seconds: int = 900,
+        channel_slow_seconds: float = 30.0,
     ):
         self.database_path = database_path
         self.slow_seconds = slow_seconds
         self.channel_stale_seconds = max(60, channel_stale_seconds)
+        self.channel_slow_seconds = max(1.0, channel_slow_seconds)
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
@@ -43,13 +45,15 @@ class DashboardRepository:
         now: int | None = None,
         request_window_seconds: int = 86400,
         channel_ids: set[int] | None = None,
+        include_operational_incidents: bool = True,
     ) -> dict[str, Any]:
         current_time = int(time.time()) if now is None else now
         since = current_time - request_window_seconds
         with self._connect() as connection:
             channel_rows = connection.execute(
                 """
-                SELECT c.channel_id, c.status, latest.success, latest.observed_at
+                SELECT c.channel_id, c.status, latest.success, latest.observed_at,
+                       latest.elapsed_ms, latest.frt_ms
                 FROM channels c
                 LEFT JOIN channel_observations latest ON latest.id = (
                     SELECT id FROM channel_observations
@@ -107,6 +111,12 @@ class DashboardRepository:
             row for row in incident_rows
             if not str(row["incident_key"]).startswith("provider:")
         ]
+        if not include_operational_incidents:
+            incident_rows = [
+                row
+                for row in incident_rows
+                if self._incident_channel_id(str(row["incident_key"])) is not None
+            ]
 
         enabled = [row for row in channel_rows if int(row["status"] or 0) == 1]
         if channel_ids is not None:
@@ -122,12 +132,30 @@ class DashboardRepository:
             for row in enabled
             if int(row["observed_at"] or 0) >= current_time - self.channel_stale_seconds
         ]
-        healthy = sum(1 for row in recent if row["success"] == 1)
+        slow_limit_ms = self.channel_slow_seconds * 1000.0
+        delayed = sum(
+            1
+            for row in recent
+            if row["success"] == 1
+            and (
+                float(row["elapsed_ms"] or 0) > slow_limit_ms
+                or float(row["frt_ms"] or 0) > slow_limit_ms
+            )
+        )
+        healthy = sum(
+            1
+            for row in recent
+            if row["success"] == 1
+            and not (
+                float(row["elapsed_ms"] or 0) > slow_limit_ms
+                or float(row["frt_ms"] or 0) > slow_limit_ms
+            )
+        )
         failed = sum(1 for row in recent if row["success"] == 0)
-        unknown = len(enabled) - healthy - failed
+        unknown = len(enabled) - healthy - delayed - failed
         channel_sync: dict[str, Any] = {"status": "unknown", "age_seconds": 0}
-        if collector_row is not None:
-            collectors = self._decode_json(collector_row["value"], {})
+        collectors = self._decode_json(collector_row["value"], {}) if collector_row is not None else {}
+        if isinstance(collectors, dict):
             detail = dict(collectors.get("channel_sync") or {}) if isinstance(collectors, dict) else {}
             if detail:
                 last_success = int(detail.get("last_success_at") or 0)
@@ -145,8 +173,13 @@ class DashboardRepository:
                 }
                 if status == "stale":
                     healthy = 0
+                    delayed = 0
                     failed = 0
                     unknown = len(enabled)
+        collector_freshness = {
+            "logs": self._collector_freshness(collectors, "logs", current_time, 120),
+            "resources": self._collector_freshness(collectors, "resources", current_time, 90),
+        }
         durations = [float(row["use_time"] or 0) for row in request_rows]
         frt_values = [float(row["frt_ms"]) for row in request_rows if row["frt_ms"] is not None]
         slow_limit_ms = self.slow_seconds * 1000.0
@@ -167,14 +200,18 @@ class DashboardRepository:
                 "system_swap": resource_row["system_swap"],
                 "containers": self._decode_json(resource_row["containers_json"], {}),
             }
+        resources.update(collector_freshness["resources"])
         return {
             "generated_at": current_time,
             "channel_sync": channel_sync,
             "channels": {
                 "total": len(enabled),
                 "healthy": healthy,
+                "delayed": delayed,
                 "failed": failed,
                 "unknown": unknown,
+                "stale_after_seconds": self.channel_stale_seconds,
+                "slow_after_seconds": self.channel_slow_seconds,
                 "last_checked_at": max(
                     (int(row["observed_at"] or 0) for row in enabled),
                     default=0,
@@ -184,16 +221,19 @@ class DashboardRepository:
                 "window_seconds": request_window_seconds,
                 "total": len(request_rows),
                 "slow": slow_count,
+                "slow_after_seconds": self.slow_seconds,
                 "slow_ratio": round(slow_count / len(request_rows) * 100, 2) if request_rows else 0.0,
                 "average_seconds": round(sum(durations) / len(durations), 3) if durations else 0.0,
                 "p95_seconds": self._p95(durations),
                 "average_frt_ms": round(sum(frt_values) / len(frt_values), 1) if frt_values else None,
                 "last_request_at": max((int(row["created_at"] or 0) for row in request_rows), default=0),
+                **collector_freshness["logs"],
             },
             "resources": resources,
             "incidents": {
                 "open": len(incident_rows),
                 "critical": sum(1 for row in incident_rows if str(row["severity"]) == "critical"),
+                "warning": sum(1 for row in incident_rows if str(row["severity"]) == "warning"),
             },
         }
 
@@ -283,13 +323,22 @@ class DashboardRepository:
                     availability = connection.execute(
                         """
                         SELECT COUNT(*) AS total,
-                               SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END) AS successes
+                               SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END) AS successes,
+                               MIN(observed_at) AS coverage_start_at,
+                               MAX(observed_at) AS coverage_end_at
                         FROM channel_observations
-                        WHERE channel_id = ? AND source = ? AND observed_at >= ? AND observed_at <= ?
+                        WHERE channel_id = ? AND source = ?
+                          AND observed_at >= ? AND observed_at <= ?
                         """,
-                        (channel_id, latest_source, availability_start, availability_end),
+                        (
+                            channel_id,
+                            latest_source,
+                            availability_start,
+                            availability_end,
+                        ),
                     ).fetchone()
                 else:
+                    latest_source = ""
                     observations = []
                     availability = None
                 channel_usage = usage_by_channel.get(channel_id, [])
@@ -318,6 +367,8 @@ class DashboardRepository:
                         ],
                         "group": str(channel["channel_group"] or ""),
                         "synced_at": int(channel["updated_at"] or 0),
+                        "stale_after_seconds": self.channel_stale_seconds,
+                        "slow_after_seconds": self.channel_slow_seconds,
                         "latest": latest,
                         "history": history,
                         "availability": {
@@ -325,6 +376,13 @@ class DashboardRepository:
                             "start_timestamp": availability_start,
                             "end_timestamp": availability_end,
                             "all_time": availability_all_time,
+                            "source": latest_source,
+                            "coverage_start_at": int(availability["coverage_start_at"] or 0)
+                            if availability
+                            else 0,
+                            "coverage_end_at": int(availability["coverage_end_at"] or 0)
+                            if availability
+                            else 0,
                             "total": availability_total,
                             "successes": availability_successes,
                             "percentage": round(availability_successes / availability_total * 100, 2)
@@ -390,6 +448,9 @@ class DashboardRepository:
             parameters.append(int(end_timestamp))
         where = " WHERE " + " AND ".join(clauses) if clauses else ""
         with self._connect() as connection:
+            bounds = connection.execute(
+                "SELECT MIN(created_at) AS first_at, MAX(created_at) AS last_at FROM latency_samples"
+            ).fetchone()
             total = int(
                 connection.execute(
                     f"SELECT COUNT(*) FROM latency_samples{where}",
@@ -411,6 +472,11 @@ class DashboardRepository:
             "total": total,
             "limit": page_limit,
             "offset": page_offset,
+            "collection_started_at": int(bounds["first_at"] or 0),
+            "latest_sample_at": int(bounds["last_at"] or 0),
+            "retained_from_at": int(bounds["first_at"] or 0),
+            "retained_until_at": int(bounds["last_at"] or 0),
+            "slow_after_seconds": self.slow_seconds,
             "items": [dict(row) for row in rows],
         }
 
@@ -422,9 +488,11 @@ class DashboardRepository:
         start_timestamp: int | None = None,
         end_timestamp: int | None = None,
         all_time: bool = False,
+        sampling_interval_seconds: int = 15,
     ) -> dict[str, Any]:
         current_time = int(time.time()) if now is None else now
         sample_limit = max(1, min(limit, 5000))
+        sampling_interval = max(1, int(sampling_interval_seconds))
         requested_end = min(int(end_timestamp or current_time), current_time)
         requested_start = int(start_timestamp) if start_timestamp is not None else requested_end - max(1, int(hours)) * 3600
         with self._connect() as connection:
@@ -465,25 +533,73 @@ class DashboardRepository:
                     sample_limit,
                 ),
             ).fetchall()
-            latest_container_row = connection.execute(
+            raw_summary = connection.execute(
                 """
-                SELECT containers_json
+                SELECT COUNT(*) AS sample_count,
+                       MIN(created_at) AS actual_start,
+                       MAX(created_at) AS actual_end,
+                       MIN(system_cpu) AS system_cpu_min,
+                       AVG(system_cpu) AS system_cpu_average,
+                       MAX(system_cpu) AS system_cpu_max,
+                       MIN(system_memory) AS system_memory_min,
+                       AVG(system_memory) AS system_memory_average,
+                       MAX(system_memory) AS system_memory_max,
+                       MIN(system_disk) AS system_disk_min,
+                       AVG(system_disk) AS system_disk_average,
+                       MAX(system_disk) AS system_disk_max,
+                       MIN(system_swap) AS system_swap_min,
+                       AVG(system_swap) AS system_swap_average,
+                       MAX(system_swap) AS system_swap_max
+                FROM resource_samples
+                WHERE created_at >= ? AND created_at <= ?
+                """,
+                (requested_start, requested_end),
+            ).fetchone()
+            latest_row = connection.execute(
+                """
+                SELECT created_at, system_cpu, system_memory, system_disk,
+                       system_available_mb, system_swap, containers_json
                 FROM resource_samples
                 WHERE created_at >= ? AND created_at <= ?
                 ORDER BY created_at DESC, id DESC LIMIT 1
                 """,
                 (requested_start, requested_end),
             ).fetchone()
+            collector_row = connection.execute(
+                "SELECT value FROM kv WHERE key = 'collector_health'"
+            ).fetchone()
         samples = [{**dict(row), "containers": {}} for row in rows]
-        if samples and latest_container_row is not None:
+        latest: dict[str, Any] | None = None
+        if latest_row is not None:
+            latest = {
+                "created_at": int(latest_row["created_at"]),
+                "system_cpu": latest_row["system_cpu"],
+                "system_memory": latest_row["system_memory"],
+                "system_disk": latest_row["system_disk"],
+                "system_available_mb": latest_row["system_available_mb"],
+                "system_swap": latest_row["system_swap"],
+                "containers": self._decode_json(latest_row["containers_json"], {}),
+            }
+        if samples and latest is not None:
             samples[-1]["containers"] = self._decode_json(
-                latest_container_row["containers_json"],
+                latest_row["containers_json"],
                 {},
             )
-        actual_start = int(samples[0]["created_at"]) if samples else 0
-        actual_end = int(samples[-1]["created_at"]) if samples else 0
+        actual_start = int(raw_summary["actual_start"] or 0) if raw_summary else 0
+        actual_end = int(raw_summary["actual_end"] or 0) if raw_summary else 0
         covered_seconds = max(0, actual_end - actual_start + bucket_seconds) if samples else 0
-        coverage_ratio = min(1.0, covered_seconds / requested_seconds)
+        span_coverage_ratio = min(1.0, covered_seconds / requested_seconds)
+        sample_count = int(raw_summary["sample_count"] or 0) if raw_summary else 0
+        expected_sample_count = max(1, math.ceil(requested_seconds / sampling_interval))
+        sample_coverage_ratio = min(1.0, sample_count / expected_sample_count)
+        metric_summary: dict[str, dict[str, float | None]] = {}
+        for field in ("system_cpu", "system_memory", "system_disk", "system_swap"):
+            metric_summary[field] = {
+                "min": raw_summary[f"{field}_min"] if raw_summary else None,
+                "average": raw_summary[f"{field}_average"] if raw_summary else None,
+                "max": raw_summary[f"{field}_max"] if raw_summary else None,
+            }
+        collectors = self._decode_json(collector_row["value"], {}) if collector_row is not None else {}
         return {
             "generated_at": current_time,
             "hours": requested_hours,
@@ -492,8 +608,18 @@ class DashboardRepository:
             "all_time": all_time,
             "actual_start": actual_start,
             "actual_end": actual_end,
-            "coverage_ratio": round(coverage_ratio, 4),
+            "coverage_ratio": round(sample_coverage_ratio, 4),
+            "coverage_basis": "expected_sample_count",
+            "sample_coverage_ratio": round(sample_coverage_ratio, 4),
+            "span_coverage_ratio": round(span_coverage_ratio, 4),
+            "expected_sample_count": expected_sample_count,
+            "sampling_interval_seconds": sampling_interval,
             "bucket_seconds": bucket_seconds,
+            "trend_aggregation": "bucket_average",
+            "sample_count": sample_count,
+            "latest": latest,
+            "summary": metric_summary,
+            **self._collector_freshness(collectors, "resources", current_time, 90),
             "samples": samples,
         }
 
@@ -658,6 +784,32 @@ class DashboardRepository:
             if candidate in lowered_kind:
                 return candidate
         return "other"
+
+    @staticmethod
+    def _collector_freshness(
+        collectors: Any,
+        collector_name: str,
+        current_time: int,
+        default_stale_after: int,
+    ) -> dict[str, Any]:
+        detail = dict(collectors.get(collector_name) or {}) if isinstance(collectors, dict) else {}
+        if not detail:
+            return {
+                "collector_status": "unknown",
+                "collector_age_seconds": 0,
+                "collector_stale_after_seconds": default_stale_after,
+                "last_collected_at": 0,
+            }
+        last_success = int(detail.get("last_success_at") or 0)
+        first_attempt = int(detail.get("first_attempt_at") or current_time)
+        stale_after = max(1, int(detail.get("stale_after_seconds") or default_stale_after))
+        age = max(0, current_time - (last_success or first_attempt))
+        return {
+            "collector_status": "stale" if age > stale_after else ("ok" if last_success else "starting"),
+            "collector_age_seconds": age,
+            "collector_stale_after_seconds": stale_after,
+            "last_collected_at": last_success,
+        }
 
     @staticmethod
     def _observation_dict(row: sqlite3.Row) -> dict[str, Any]:

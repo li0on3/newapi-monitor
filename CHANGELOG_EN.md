@@ -4,6 +4,37 @@
 
 ## Unreleased
 
+## 1.12.0 - 2026-08-03
+
+### Added
+
+- Added Chinese and English data-accuracy documentation defining authoritative sources, time ranges, retention boundaries, attribution differences, and production acceptance for every page.
+- Analytics now exposes live-log request/quota totals, hourly model/flow attribution, and signed reconciliation differences so every visible total has an explicit source and closure rule.
+
+### Fixed
+
+- New API account, key, log, pagination, and statistics payloads are now validated strictly. Missing fields, invalid types, impossible offsets, unexpectedly empty pages, and non-finite values fail the whole request instead of silently becoming `0`, `false`, empty data, or an incomplete result.
+- Signed remaining quota returned for unlimited keys is preserved as authoritative New API data instead of being rejected as invalid.
+- Account Overview always uses current-account statistics, removing the mixed administrator view that combined a personal balance with global 24-hour consumption.
+- Regular-user ranges over 30 days, including lifetime queries, are split to respect New API self-endpoint limits; any failed chunk fails the complete query instead of returning partial history.
+- Usage Logs exposes consumption quota, RPM, and TPM only for All/Consumption views and identifies RPM/TPM as current 60-second rates.
+- Slow-request, channel-stale, channel-delay, CPU, memory, and disk thresholds now come from dynamic settings rather than frontend constants.
+- Host-resource current values and extrema now use raw samples while trends remain bounded bucket averages; an empty sample set no longer reports stable operation.
+- Resource coverage now measures collected samples against expected samples and reports time-span coverage separately, so collector gaps cannot appear as nearly 100% complete.
+- Regular-viewer overall status is affected only by visible channels, not hidden administrator channels or operator-only incidents.
+- Key groups explicitly count current keys and disclose deleted-key history separately; key lookup explicitly summarizes only the latest N calls.
+- Key lookup now reads the quota conversion unit live from New API `/api/status`; the local setting is drift detection only and can no longer distort displayed amounts.
+- Alert-delivery status facets now follow the selected time, destination, and search filters, and histories beyond 100 rows can be fully paged.
+- Rapid alert-delivery filter or page changes now accept only the newest response, preventing an older request from overwriting the selected view.
+- Channel history bars and cards now share the dynamic slow-probe threshold, while positive analytics gaps use neutral total-to-attribution wording instead of assuming every historical difference is only a newest-request delay.
+- The UI, periodic report, and alert state machine now consistently use strict greater-than semantics for threshold breaches; equality is not mislabeled as over-limit.
+- Health checks now expose the running release version, so deployment and rollback verification no longer infer it from an image tag.
+
+### Security
+
+- Long-range splitting remains restricted to fixed New API `/self` allowlisted routes, the verified session identity, no redirects, bounded responses, and fail-closed validation.
+- Reconciliation adds only counts, quota differences, source labels, and timestamps; it does not widen roles or persist customer business data or plaintext keys.
+
 ## 1.11.1 - 2026-08-03
 
 ### Fixed
