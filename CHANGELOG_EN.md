@@ -4,6 +4,13 @@
 
 ## Unreleased
 
+## 1.12.1 - 2026-08-03
+
+### Fixed
+
+- Analytics no longer describes every positive attribution difference as merely pending. The UI now explains that time boundaries, retention policy, or missing historical attribution dimensions such as group can also cause a difference.
+- Updated the Chinese and English customer-console documentation to remove the obsolete “maximum across sources” rule and consistently use live consume logs as the authoritative total with hourly attribution reconciliation.
+
 ## 1.12.0 - 2026-08-03
 
 ### Added

@@ -128,10 +128,10 @@ curl -fsS http://127.0.0.1:18081/api/health
 正常：
 
 ```json
-{"status":"ok","timestamp":1784476800,"version":"1.12.0"}
+{"status":"ok","timestamp":1784476800,"version":"1.12.1"}
 ```
 
-首次安装尚未完成向导时返回 HTTP 200 和 `{"status":"setup_required","timestamp":1784476800,"version":"1.12.0"}`，便于容器健康检查通过，但采集线程尚未启动。`version` 来自镜像内只读的 `VERSION` 文件，可用于部署验收和回滚核对。
+首次安装尚未完成向导时返回 HTTP 200 和 `{"status":"setup_required","timestamp":1784476800,"version":"1.12.1"}`，便于容器健康检查通过，但采集线程尚未启动。`version` 来自镜像内只读的 `VERSION` 文件，可用于部署验收和回滚核对。
 
 以下任一情况返回 HTTP 503：
 
