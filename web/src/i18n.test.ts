@@ -78,6 +78,12 @@ describe('translations', () => {
     expect(translate('保存成员', 'en')).toBe('Save members')
     expect(translate('趋势数据表', 'en')).toBe('Trend data table')
     expect(translate('其他模型', 'en')).toBe('Other models')
+    expect(translate('{{count}} 条请求已计入实时总数，但未进入当前模型与 Token 归集明细', 'en', { count: 9 })).toBe(
+      '9 requests are included in the live total but are not represented in the current model and token attribution details',
+    )
+    expect(translate('{{count}} 条请求已计入实时总数，但未进入当前密钥与分组流向明细', 'en', { count: 2 })).toBe(
+      '2 requests are included in the live total but are not represented in the current key and group flow details',
+    )
   })
 
   test('translates theme controls', () => {

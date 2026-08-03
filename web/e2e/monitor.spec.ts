@@ -242,5 +242,7 @@ test('数据看板合并隐藏流向并让可见额度总量闭合', async ({ pa
   await expect(page.getByText('其他 1 个模型')).toBeVisible();
   await expect(page.getByText('其他 2 个流向')).toBeVisible();
   await expect(page.getByText('总量与归集明细差额')).toHaveCount(2);
+  await expect(page.getByText('9 条请求已计入实时总数，但未进入当前模型与 Token 归集明细')).toBeVisible();
+  await expect(page.getByText('2 条请求已计入实时总数，但未进入当前密钥与分组流向明细')).toBeVisible();
   await expect(page.getByText('$0.0014')).toBeVisible();
 });

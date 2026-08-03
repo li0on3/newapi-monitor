@@ -109,10 +109,10 @@ curl -fsS http://127.0.0.1:18081/api/health
 Healthy response:
 
 ```json
-{"status":"ok","timestamp":1784476800,"version":"1.12.0"}
+{"status":"ok","timestamp":1784476800,"version":"1.12.1"}
 ```
 
-Before the first-run wizard is completed, health returns HTTP 200 with `{"status":"setup_required","timestamp":1784476800,"version":"1.12.0"}` so orchestration remains healthy while collectors stay stopped. `version` comes from the read-only `VERSION` file inside the image and can be used for deployment and rollback verification.
+Before the first-run wizard is completed, health returns HTTP 200 with `{"status":"setup_required","timestamp":1784476800,"version":"1.12.1"}` so orchestration remains healthy while collectors stay stopped. `version` comes from the read-only `VERSION` file inside the image and can be used for deployment and rollback verification.
 
 HTTP 503 is returned when SQLite is unavailable, the monitoring worker has stopped, a collector has exceeded its dynamic stale threshold, the database exceeds its configured capacity, dead letters exist, or pending delivery is older than 15 minutes.
 
