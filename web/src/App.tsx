@@ -50,11 +50,13 @@ import { createPortal } from 'react-dom';
 import { api, ApiError } from './api';
 import { getLanguage, setLanguage, t } from './i18n';
 import { buildProviderStatusContext, DEFAULT_OPENAI_COMPONENT_NAMES } from './provider-status';
+import { channelHealth, observationHealth, overallHealth } from './monitor-status';
 import { canAccessMonitorModules, defaultAuthorizedRoute, enabledConsolePages, readRoute, routePath } from './routes';
 import { ThemeSwitch } from './ThemeSwitch';
 import type { AppRoute, AppTab, ConsolePage, SettingsPage } from './routes';
-import type { AuthUser, Channel, ChannelMonitorConfig, ContainerMetric, Incident, IncidentPayload, IncidentSummary, KeyUsageCall, KeyUsageResult, LogItem, ProviderStatus, ResourceSample, Summary, SystemHealth } from './types';
+import type { AuthUser, Channel, ChannelMonitorConfig, ContainerMetric, Incident, IncidentPayload, IncidentSummary, KeyUsageCall, KeyUsageResult, LogItem, ProviderStatus, ResourceMetricSummary, ResourcePayload, ResourceSample, Summary, SystemHealth } from './types';
 import { ConsoleShell } from './console/ConsoleShell';
+import { numberText } from './console/utils';
 import { DeliveriesView } from './deliveries/DeliveriesView';
 import { SECRET_SETTING_KEYS, SETTING_SECTIONS } from './settings/catalog';
 import type { SettingSectionId } from './settings/catalog';
@@ -62,7 +64,6 @@ import type { SettingSectionId } from './settings/catalog';
 type Tab = AppTab;
 
 const REFRESH_SECONDS = 5;
-const SLOW_SECONDS = 60;
 
 function formatTime(timestamp: number, includeDate = false): string {
   if (!timestamp) return t('暂无');
@@ -119,10 +120,6 @@ function formatElapsed(seconds: number | null | undefined): string {
 
 function formatPercent(value: number | null | undefined): string {
   return value == null ? '—' : `${value.toFixed(1)}%`;
-}
-
-function formatCompactNumber(value: number): string {
-  return new Intl.NumberFormat(getLanguage() === 'en' ? 'en-US' : 'zh-CN', { notation: value >= 10_000 ? 'compact' : 'standard', maximumFractionDigits: 2 }).format(value);
 }
 
 function formatQuota(value: number): string {
@@ -599,11 +596,7 @@ function HistoryBars({ channel }: { channel: Channel }) {
   const activeIndex = hoverIndex ?? pinnedIndex;
   const activePoint = activeIndex == null ? null : channel.history[activeIndex];
   const activeState = activePoint
-    ? !activePoint.success
-      ? 'bad'
-      : activePoint.elapsed_ms > 30_000 || (activePoint.frt_ms || 0) > 30_000
-        ? 'warn'
-        : 'ok'
+    ? observationHealth(activePoint, channel.slow_after_seconds).tone
     : 'ok';
   const activeStatus = activeState === 'bad' ? t('异常') : activeState === 'warn' ? t('延迟') : t('正常');
   useLayoutEffect(() => {
@@ -658,7 +651,7 @@ function HistoryBars({ channel }: { channel: Channel }) {
       <div className="history-bars" role="group" aria-label={t('{{name}} 最近探测历史', { name: channel.name })} style={channel.history.length ? { gridTemplateColumns: `repeat(${channel.history.length}, minmax(0, 1fr))` } : undefined}>
         {channel.history.length === 0 && <div className="history-empty">{t("等待首次探测")}</div>}
         {channel.history.map((point, index) => {
-          const state = !point.success ? 'bad' : point.elapsed_ms > 30_000 || (point.frt_ms || 0) > 30_000 ? 'warn' : 'ok';
+          const state = observationHealth(point, channel.slow_after_seconds).tone;
           const label = `${formatFullTime(point.observed_at)} · ${point.success ? t('正常') : t('异常')} · ${t('总耗时')} ${formatDuration(point.elapsed_ms)} · ${t('首字')} ${formatDuration(point.frt_ms)}`;
           return (
             <button
@@ -705,12 +698,25 @@ function HistoryBars({ channel }: { channel: Channel }) {
   );
 }
 
+function channelHealthText(state: ReturnType<typeof channelHealth>['state']): string {
+  if (state === 'unknown') return t('未探测');
+  if (state === 'stale') return t('数据陈旧');
+  if (state === 'failed') return t('异常');
+  if (state === 'delayed') return t('延迟');
+  return t('正常');
+}
+
+function observationSourceText(source: string): string {
+  if (source === 'real') return t('真实模型探测');
+  if (source === 'builtin') return t('内置测试');
+  return t('尚无探测来源');
+}
+
 function ChannelCard({ channel, onOpen, availabilityLabel }: { channel: Channel; onOpen: () => void; availabilityLabel: string }) {
   const latest = channel.latest;
-  const stale = latest ? Date.now() / 1000 - latest.observed_at > 12 * 60 : true;
-  const delayed = Boolean(latest && latest.success && (latest.elapsed_ms > 30_000 || (latest.frt_ms || 0) > 30_000));
-  const tone = stale ? 'muted' : !latest?.success ? 'bad' : delayed ? 'warn' : 'ok';
-  const statusText = stale ? t('数据陈旧') : !latest?.success ? t('异常') : delayed ? t('延迟') : t('正常');
+  const health = channelHealth(channel);
+  const tone = health.tone;
+  const statusText = channelHealthText(health.state);
   const modelLabel = channel.models.length ? channel.models.slice(0, 2).join(' · ') : t('未配置模型');
   return (
     <article className={classNames('channel-card', tone === 'bad' && 'channel-card-bad')}>
@@ -720,13 +726,13 @@ function ChannelCard({ channel, onOpen, availabilityLabel }: { channel: Channel;
         <div className="channel-title"><h3>{channel.name}</h3><p>{channel.group || 'default'} <span>·</span> {modelLabel}</p></div>
         <StatusPill tone={tone}>{statusText}</StatusPill>
       </div>
-      <div className="probe-source"><span>{latest?.source === 'real' ? 'REAL REQUEST' : 'BUILT-IN CHECK'}</span><span>{latest ? formatTime(latest.observed_at) : t('未探测')}</span></div>
+      <div className="probe-source"><span>{latest?.source === 'real' ? 'REAL MODEL PROBE' : latest?.source === 'builtin' ? 'BUILT-IN CHECK' : 'WAITING FOR PROBE'}</span><span>{latest ? formatTime(latest.observed_at) : t('未探测')}</span></div>
       <div className="channel-stats">
         <div><span><Activity size={14} />{t("探测总耗时")}</span><strong>{formatDuration(latest?.elapsed_ms)}</strong></div>
         <div><span><Network size={14} />{t("首字响应")}</span><strong>{formatDuration(latest?.frt_ms)}</strong></div>
       </div>
       <div className="availability-row">
-        <div><span>{t('可用率')} · {availabilityLabel}</span><small>{channel.availability.successes}/{channel.availability.total} {t("成功")}</small></div>
+        <div><span>{t('可用率')} · {availabilityLabel}</span><small title={channel.availability.coverage_start_at ? `${formatFullTime(channel.availability.coverage_start_at)} → ${formatFullTime(channel.availability.coverage_end_at)}` : t('暂无有效样本')}>{observationSourceText(channel.availability.source)} · {channel.availability.successes}/{channel.availability.total} {t("成功")}</small></div>
         <strong className={tone === 'bad' ? 'text-bad' : tone === 'warn' ? 'text-warn' : 'text-ok'}>{channel.availability.percentage == null ? '—' : `${channel.availability.percentage.toFixed(2)}%`}</strong>
       </div>
       <div className="usage-strip"><span>{t("24H 请求")} <b>{channel.usage_24h.requests}</b></span><span>P95 <b>{channel.usage_24h.p95_seconds.toFixed(2)}s</b></span><span>{t("慢请求")} <b className={channel.usage_24h.slow ? 'text-warn' : ''}>{channel.usage_24h.slow}</b></span></div>
@@ -736,22 +742,23 @@ function ChannelCard({ channel, onOpen, availabilityLabel }: { channel: Channel;
 }
 
 function DetailDrawer({ channel, onClose, customerView }: { channel: Channel; onClose: () => void; customerView: boolean }) {
+  const health = channelHealth(channel);
   return (
     <div className="drawer-backdrop" role="presentation" onMouseDown={onClose}>
       <aside className="drawer" role="dialog" aria-modal="true" aria-label={t('{{name}} 渠道详情', { name: channel.name })} onMouseDown={(event) => event.stopPropagation()}>
         <button className="icon-button drawer-close" onClick={onClose} aria-label={t("关闭")}><X size={20} /></button>
         <div className="eyebrow">CHANNEL DETAIL / #{channel.channel_id}</div>
         <h2>{channel.name}</h2>
-        <p className="drawer-subtitle">{customerView ? t('渠道状态实时同步，探测结果独立存档。') : t('数据与 New API 渠道配置实时同步，探测结果独立存档。')}</p>
+        <p className="drawer-subtitle">{customerView ? t('渠道配置按周期同步，探测结果独立存档。') : t('数据按配置周期与 New API 渠道同步，探测结果独立存档。')}</p>
         <div className="drawer-grid">
-          <div><span>{t("状态")}</span><strong>{channel.latest?.success ? t('正常') : t('异常')}</strong></div>
-          <div><span>{t("探测方式")}</span><strong>{channel.latest?.source === 'real' ? t('真实模型请求') : customerView ? t('平台健康检查') : t('New API 内置测试')}</strong></div>
+          <div><span>{t("状态")}</span><strong>{channelHealthText(health.state)}</strong></div>
+          <div><span>{t("探测方式")}</span><strong>{channel.latest?.source === 'real' ? t('真实模型请求') : channel.latest?.source === 'builtin' ? (customerView ? t('平台健康检查') : t('New API 内置测试')) : t('尚未产生探测样本')}</strong></div>
           <div><span>{t("总耗时")}</span><strong>{formatDuration(channel.latest?.elapsed_ms)}</strong></div>
           <div><span>{t("首字耗时")}</span><strong>{formatDuration(channel.latest?.frt_ms)}</strong></div>
         </div>
         <section className="drawer-section"><h3>{t("最近 60 次探测")}</h3><HistoryBars channel={channel} /></section>
         <section className="drawer-section"><h3>{t("模型范围")}</h3><div className="tag-list">{channel.models.map((model) => <span key={model}>{model}</span>)}</div></section>
-        <section className="drawer-section"><h3>{t("同步信息")}</h3><dl className="detail-list"><div><dt>{t("渠道组")}</dt><dd>{channel.group || 'default'}</dd></div><div><dt>{t("配置同步")}</dt><dd>{formatTime(channel.synced_at, true)}</dd></div><div><dt>{t("最后请求")}</dt><dd>{formatTime(channel.usage_24h.last_request_at, true)}</dd></div></dl></section>
+        <section className="drawer-section"><h3>{t("同步信息")}</h3><dl className="detail-list"><div><dt>{t("渠道组")}</dt><dd>{channel.group || 'default'}</dd></div><div><dt>{t("配置同步")}</dt><dd>{formatTime(channel.synced_at, true)}</dd></div><div><dt>{t('数据失效阈值')}</dt><dd>{formatElapsed(channel.stale_after_seconds)}</dd></div><div><dt>{t('可用率来源')}</dt><dd>{observationSourceText(channel.availability.source)}</dd></div><div><dt>{t('统计覆盖')}</dt><dd>{channel.availability.coverage_start_at ? `${formatFullTime(channel.availability.coverage_start_at)} → ${formatFullTime(channel.availability.coverage_end_at)}` : t('暂无有效样本')}</dd></div><div><dt>{t('历史保留')}</dt><dd>{t('最多 {{days}} 天', { days: channel.availability.retention_days })}</dd></div><div><dt>{t("最后请求")}</dt><dd>{formatTime(channel.usage_24h.last_request_at, true)}</dd></div></dl></section>
       </aside>
     </div>
   );
@@ -837,18 +844,25 @@ function ProviderStatusView({ status, summary, onOverview }: { status: ProviderS
 
 function Overview({ summary, channels, range, onRange, onChannel, onProviderStatus, showProviderStatus }: { summary: Summary; channels: Channel[]; range: TimeRange; onRange: (range: TimeRange) => void; onChannel: (channel: Channel) => void; onProviderStatus: () => void; showProviderStatus: boolean }) {
   const resourceAge = summary.resources.created_at ? Math.floor(Date.now() / 1000 - summary.resources.created_at) : null;
+  const resourceThresholds = summary.resources.thresholds || { system_cpu: 85, system_memory: 85, system_disk: 80 };
+  const requestDetail = summary.requests.collector_status === 'stale'
+    ? t('日志采集已延迟 {{duration}}', { duration: formatElapsed(summary.requests.collector_age_seconds) })
+    : `${t('平均')} ${summary.requests.average_seconds.toFixed(2)}s · ${summary.requests.total} ${t('次')}`;
+  const resourceDetail = summary.resources.collector_status === 'stale'
+    ? t('资源采集已延迟 {{duration}}', { duration: formatElapsed(summary.resources.collector_age_seconds || 0) })
+    : resourceAge == null ? t('等待资源样本') : `${resourceAge}s ${t('前更新')} · DISK ${formatPercent(summary.resources.system_disk)}`;
   return (
     <>
       {summary.channel_sync?.status === 'stale' && <div className="channel-sync-warning" role="alert"><span><AlertTriangle size={19} /></span><div><strong>{t('渠道清单同步中断')}</strong><p>{t('当前展示的是最近一次成功同步的历史快照，渠道数量与启用状态可能已经变化。')}</p><small>{t('同步链路已异常 {{duration}}', { duration: formatElapsed(summary.channel_sync.age_seconds) })}</small></div>{summary.channel_sync.last_error && <code title={summary.channel_sync.last_error}>{summary.channel_sync.last_error}</code>}</div>}
       <section className="metrics-grid">
-        <MetricCard icon={<CheckCircle2 />} label={t("渠道健康")} value={`${summary.channels.healthy}/${summary.channels.total}`} detail={`${summary.channels.failed} ${t('异常')} · ${summary.channels.unknown} ${t('未知')}`} tone={summary.channels.failed ? 'bad' : 'ok'} />
-        <MetricCard icon={<Clock3 />} label={t("24H 请求耗时")} value={`P95 ${summary.requests.p95_seconds.toFixed(2)}s`} detail={`${t('平均')} ${summary.requests.average_seconds.toFixed(2)}s · ${summary.requests.total} ${t('次')}`} tone={summary.requests.slow ? 'warn' : 'neutral'} />
-        <MetricCard icon={<AlertTriangle />} label={t("慢请求")} value={`${summary.requests.slow}`} detail={`${t('总耗时')} / ${t('首字')} > ${SLOW_SECONDS}s · ${summary.requests.slow_ratio.toFixed(1)}%`} tone={summary.requests.slow ? 'warn' : 'ok'} />
-        <MetricCard icon={<Server />} label={t("机器资源")} value={`MEM ${formatPercent(summary.resources.system_memory)}`} detail={resourceAge == null ? t('等待资源样本') : `${resourceAge}s ${t('前更新')} · DISK ${formatPercent(summary.resources.system_disk)}`} tone={(summary.resources.system_memory || 0) > 85 ? 'bad' : 'neutral'} />
+        <MetricCard icon={<CheckCircle2 />} label={t("渠道健康")} value={`${summary.channels.healthy}/${summary.channels.total}`} detail={`${summary.channels.failed} ${t('异常')} · ${summary.channels.delayed} ${t('延迟')} · ${summary.channels.unknown} ${t('未知')}`} tone={summary.channels.failed ? 'bad' : summary.channels.delayed || summary.channels.unknown ? 'warn' : 'ok'} />
+        <MetricCard icon={<Clock3 />} label={t("24H 请求耗时")} value={`P95 ${summary.requests.p95_seconds.toFixed(2)}s`} detail={requestDetail} tone={summary.requests.collector_status === 'stale' || summary.requests.slow ? 'warn' : 'neutral'} />
+        <MetricCard icon={<AlertTriangle />} label={t("慢请求")} value={`${summary.requests.slow}`} detail={`${t('总耗时')} / ${t('首字')} > ${summary.requests.slow_after_seconds}s · ${summary.requests.slow_ratio.toFixed(1)}%`} tone={summary.requests.slow ? 'warn' : 'ok'} />
+        <MetricCard icon={<Server />} label={t("机器资源")} value={`MEM ${formatPercent(summary.resources.system_memory)}`} detail={resourceDetail} tone={summary.resources.collector_status === 'stale' ? 'warn' : (summary.resources.system_memory || 0) > resourceThresholds.system_memory || (summary.resources.system_disk || 0) > resourceThresholds.system_disk ? 'bad' : 'neutral'} />
       </section>
       <div className="section-heading channel-section-heading"><div><span className="eyebrow">LIVE CHANNEL MATRIX</span><h2>{t("渠道运行状态")}</h2><TimeRangeControl compact value={range} onChange={onRange} /></div><div className="channel-heading-aside">{showProviderStatus && summary.provider_status && <ProviderStatusHint status={summary.provider_status} onOpen={onProviderStatus} />}<div className="legend"><span><i className="legend-ok" />{t("正常")}</span><span><i className="legend-warn" />{t("延迟")}</span><span><i className="legend-bad" />{t("异常")}</span></div></div></div>
       <section className="channel-grid">
-        {channels.map((channel) => <ChannelCard key={channel.channel_id} channel={channel} availabilityLabel={rangeLabel(range, t('创建至今'))} onOpen={() => onChannel(channel)} />)}
+        {channels.map((channel) => <ChannelCard key={channel.channel_id} channel={channel} availabilityLabel={rangeLabel(range, t('当前保留历史'))} onOpen={() => onChannel(channel)} />)}
         {!channels.length && <div className="empty-state"><Database size={28} /><strong>{t("等待渠道同步")}</strong><span>{t("首次状态同步完成后将在这里展示可用渠道。")}</span></div>}
       </section>
     </>
@@ -865,6 +879,10 @@ function LogsView({ channels }: { channels: Channel[] }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [range, setRange] = useState<TimeRange>(() => presetRange(7));
+  const [retainedFromAt, setRetainedFromAt] = useState(0);
+  const [retainedUntilAt, setRetainedUntilAt] = useState(0);
+  const [excludedTokenNames, setExcludedTokenNames] = useState<string[]>([]);
+  const [slowAfterSeconds, setSlowAfterSeconds] = useState(60);
   const [page, setPage] = useState(0);
   const requestController = useRef<AbortController | null>(null);
   const pageSize = 200;
@@ -885,9 +903,13 @@ function LogsView({ channels }: { channels: Channel[] }) {
     if (channelId) params.set('channel_id', channelId);
     if (modelQuery) params.set('model_name', modelQuery);
     try {
-      const payload = await api<{ items: LogItem[]; total: number }>(`logs?${params}`, { signal: controller.signal });
+      const payload = await api<{ items: LogItem[]; total: number; retained_from_at: number; retained_until_at: number; excluded_token_names: string[]; slow_after_seconds: number }>(`logs?${params}`, { signal: controller.signal });
       setItems(payload.items);
       setTotal(payload.total);
+      setRetainedFromAt(payload.retained_from_at || 0);
+      setRetainedUntilAt(payload.retained_until_at || 0);
+      setExcludedTokenNames(payload.excluded_token_names || []);
+      setSlowAfterSeconds(payload.slow_after_seconds || 60);
     } catch (requestError) {
       if (requestError instanceof DOMException && requestError.name === 'AbortError') return;
       setError(requestError instanceof Error ? requestError.message : t('日志加载失败'));
@@ -902,21 +924,21 @@ function LogsView({ channels }: { channels: Channel[] }) {
   useEffect(() => () => requestController.current?.abort(), []);
   return (
     <section>
-      <div className="section-heading"><div><span className="eyebrow">REAL CONSUMPTION LOGS</span><h2>{t("真实使用日志耗时")}</h2></div><span className="source-note">{t("仅保存耗时元数据，不保存提示词或响应正文")}</span></div>
+      <div className="section-heading"><div><span className="eyebrow">REAL CONSUMPTION LOGS</span><h2>{t("真实使用日志耗时")}</h2></div><span className="source-note">{t('仅统计真实用户请求；已排除监控探测和模型测试')}</span></div>
       <div className="filter-bar">
         <TimeRangeControl value={range} onChange={setRange} />
         <label><span>{t("渠道")}</span><select value={channelId} onChange={(event) => setChannelId(event.target.value)}><option value="">{t("全部渠道")}</option>{channels.map((channel) => <option key={channel.channel_id} value={channel.channel_id}>{channel.name}</option>)}</select></label>
         <label><span>{t("模型精确匹配")}</span><div className="filter-input"><Search size={15} /><input value={model} onChange={(event) => setModel(event.target.value)} placeholder={t("例如 gpt-5.6-sol")} /></div></label>
-        <label className="check-label"><input type="checkbox" checked={slowOnly} onChange={(event) => setSlowOnly(event.target.checked)} /><span>{t("只看超过 60 秒")}</span></label>
+        <label className="check-label"><input type="checkbox" checked={slowOnly} onChange={(event) => setSlowOnly(event.target.checked)} /><span>{t('只看超过 {{seconds}} 秒', { seconds: slowAfterSeconds })}</span></label>
         <button className="secondary-button" onClick={() => void load()}><RefreshCw className={loading ? 'spin' : ''} size={16} />{t("刷新")}</button>
       </div>
       {error && <div className="inline-error"><AlertTriangle size={16} />{error}</div>}
       <div className="table-shell">
-        <div className="table-meta">{t("匹配")} {total} {t("条，当前页")} {items.length} {t("条")}</div>
+        <div className="table-meta">{t("匹配")} {total} {t("条，当前页")} {items.length} {t("条")} · {retainedFromAt ? t('当前保留自 {{time}}', { time: formatTime(retainedFromAt, true) }) : t('等待首条日志')} · {retainedUntilAt ? t('最新 {{time}}', { time: formatTime(retainedUntilAt, true) }) : '—'}{excludedTokenNames.length ? ` · ${t('排除')} ${excludedTokenNames.join('、')}` : ''}</div>
         <div className="table-scroll"><table><thead><tr><th>{t("时间")}</th><th>{t("渠道 / 模型")}</th><th>{t("用户 / 令牌")}</th><th>{t("总耗时")}</th><th>{t("首字")}</th><th>{t("模式")}</th><th>{t("请求 ID")}</th></tr></thead><tbody>
           {items.map((item) => {
-            const slow = item.use_time > SLOW_SECONDS || (item.frt_ms || 0) > SLOW_SECONDS * 1000;
-            return <tr key={`${item.request_id}-${item.created_at}`} className={slow ? 'slow-row' : ''}><td className="mono">{formatTime(item.created_at, true)}</td><td><strong>{item.channel_name || `#${item.channel_id}`}</strong><span>{item.model_name}</span></td><td><strong>{item.username || '—'}</strong><span>{item.token_name || '—'}</span></td><td><b className={item.use_time > SLOW_SECONDS ? 'text-bad' : ''}>{item.use_time.toFixed(2)}s</b></td><td><b className={(item.frt_ms || 0) > SLOW_SECONDS * 1000 ? 'text-bad' : ''}>{formatDuration(item.frt_ms)}</b></td><td>{item.is_stream ? t('流式') : t('非流式')}</td><td className="mono request-id" title={item.request_id}>{item.request_id || '—'}</td></tr>;
+            const slow = item.use_time > slowAfterSeconds || (item.frt_ms || 0) > slowAfterSeconds * 1000;
+            return <tr key={`${item.request_id}-${item.created_at}`} className={slow ? 'slow-row' : ''}><td className="mono">{formatTime(item.created_at, true)}</td><td><strong>{item.channel_name || `#${item.channel_id}`}</strong><span>{item.model_name}</span></td><td><strong>{item.username || '—'}</strong><span>{item.token_name || '—'}</span></td><td><b className={item.use_time > slowAfterSeconds ? 'text-bad' : ''}>{item.use_time.toFixed(2)}s</b></td><td><b className={(item.frt_ms || 0) > slowAfterSeconds * 1000 ? 'text-bad' : ''}>{formatDuration(item.frt_ms)}</b></td><td>{item.is_stream ? t('流式') : t('非流式')}</td><td className="mono request-id" title={item.request_id}>{item.request_id || '—'}</td></tr>;
           })}
           {!loading && !items.length && <tr><td colSpan={7}><div className="empty-row">{t("当前筛选条件下暂无日志")}</div></td></tr>}
         </tbody></table></div>
@@ -955,6 +977,7 @@ function KeyUsageView() {
     return result.calls.filter((item) => [item.model_name, item.channel_name, item.request_id, item.upstream_request_id, item.group].some((value) => value.toLowerCase().includes(keyword)));
   }, [filter, result]);
   const usagePercentage = result?.usage.used_percentage ?? 0;
+  const keySlowAfterSeconds = result?.slow_after_seconds || 60;
   const expiryTone = !result?.usage.expires_at || result.usage.expires_at > Date.now() / 1000 ? 'ok' : 'bad';
 
   return <section className="key-usage-page">
@@ -968,24 +991,25 @@ function KeyUsageView() {
     {error && <div className="inline-error key-query-error"><AlertTriangle size={16} />{error}</div>}
     {!result && !loading && <div className="key-usage-empty"><div><KeyRound size={28} /></div><strong>{t("一次查询，确认额度与调用轨迹")}</strong><p>{t("适合快速核验用户反馈、定位 Key 是否仍有额度、确认最近模型与请求耗时。")}</p><ul><li><CheckCircle2 size={14} />{t("实时额度")}</li><li><CheckCircle2 size={14} />{t("最近调用")}</li><li><CheckCircle2 size={14} />{t("Token 与耗时")}</li></ul></div>}
     {result && <>
+      {!result.quota_per_unit_matches_config && <div className="console-inline-warning"><AlertTriangle size={16} />{t('额度换算使用 New API 实时单位 {{live}}；系统配置 {{configured}} 已忽略，请在系统配置中校准。', { live: numberText(result.quota_per_unit), configured: numberText(result.configured_quota_per_unit) })}</div>}
       <div className="key-result-identity">
         <div className="key-usage-ring" style={{ '--usage-progress': `${Math.min(100, usagePercentage) * 3.6}deg` } as React.CSSProperties}><span><b>{result.usage.unlimited_quota ? '∞' : formatPercent(result.usage.used_percentage)}</b><small>{t("已使用")}</small></span></div>
         <div className="key-result-title"><span className="eyebrow">VERIFIED TOKEN</span><h3>{result.usage.name}</h3><div><StatusPill tone={expiryTone}>{result.usage.expires_at ? (expiryTone === 'ok' ? t('有效至 {{time}}', { time: formatTime(result.usage.expires_at, true) }) : t('已过期')) : t('长期有效')}</StatusPill><span>{t("查询于")} {formatTime(result.queried_at, true)}</span></div></div>
         <div className="key-model-scope"><span>{t("模型权限")}</span><strong>{result.usage.model_limits_enabled ? `${Object.keys(result.usage.model_limits).length} ${t('个模型')}` : t('未限制')}</strong><small>{result.usage.model_limits_enabled ? Object.keys(result.usage.model_limits).slice(0, 3).join(' · ') : t('跟随账号与分组策略')}</small></div>
       </div>
       <div className="key-usage-metrics">
-        <article><span><CircleDollarSign size={16} />{t("已使用额度")}</span><strong>{formatQuota(result.usage.total_used_display)}</strong><small>{t("原始额度")} {formatCompactNumber(result.usage.total_used)}</small></article>
+        <article><span><CircleDollarSign size={16} />{t("已使用额度")}</span><strong>{formatQuota(result.usage.total_used_display)}</strong><small>{t("原始额度")} {numberText(result.usage.total_used)}</small></article>
         <article><span><CircleGauge size={16} />{t("可用额度")}</span><strong>{result.usage.unlimited_quota ? t('不限额') : formatQuota(result.usage.total_available_display)}</strong><small>{result.usage.unlimited_quota ? t('此 Key 未设置额度上限') : t('总授予 {{quota}}', { quota: formatQuota(result.usage.total_granted_display) })}</small></article>
-        <article><span><Activity size={16} />{t("最近调用")}</span><strong>{formatCompactNumber(result.summary.calls)}</strong><small>{formatCompactNumber(result.summary.total_tokens)} Tokens · {result.summary.models.length} {t("个模型")}</small></article>
+        <article><span><Activity size={16} />{t('最近 {{count}} 条汇总', { count: result.returned_calls })}</span><strong>{numberText(result.summary.calls)}</strong><small>{numberText(result.summary.total_tokens)} Tokens · {result.summary.models.length} {t("个模型")}</small></article>
         <article><span><TimerReset size={16} />{t("P95 总耗时")}</span><strong>{result.summary.p95_seconds.toFixed(2)}s</strong><small>{t("平均")} {result.summary.average_seconds.toFixed(2)}s</small></article>
       </div>
       <div className="key-call-workspace">
         <div className="key-call-list">
-          <div className="key-call-toolbar"><div><strong>{t("最近调用详情")}</strong><span>{t("New API 返回")} {result.calls.length} {t("条 · 当前显示")} {calls.length} {t("条")}</span></div><label><Search size={15} /><input value={filter} onChange={(event) => setFilter(event.target.value)} placeholder={t("模型、渠道、请求 ID")} />{filter && <button onClick={() => setFilter('')}><X size={14} /></button>}</label></div>
-          <div className="key-call-table-scroll"><table className="key-call-table"><thead><tr><th>{t("时间")}</th><th>{t("模型 / 渠道")}</th><th>Tokens</th><th>{t("额度")}</th><th>{t("耗时")}</th><th>{t("模式")}</th><th /></tr></thead><tbody>{calls.map((item) => <tr key={`${item.id}-${item.request_id}`} className={selected?.id === item.id ? 'active' : ''} onClick={() => setSelected(item)}><td className="mono">{formatTime(item.created_at, true)}</td><td><strong>{item.model_name || t('未知模型')}</strong><span>{item.channel_name || t('渠道 #{{id}}', { id: item.channel_id })} · {item.group || 'default'}</span></td><td><b>{formatCompactNumber(item.prompt_tokens + item.completion_tokens)}</b><span>{item.prompt_tokens} + {item.completion_tokens}</span></td><td><b>{formatQuota(item.quota_display)}</b></td><td><b className={item.use_time > SLOW_SECONDS ? 'text-bad' : ''}>{item.use_time.toFixed(2)}s</b><span>{t("首字")} {formatDuration(item.frt_ms)}</span></td><td>{item.is_stream ? t('流式') : t('非流式')}</td><td><ChevronRight size={15} /></td></tr>)}{!calls.length && <tr><td colSpan={7}><div className="empty-row">{t("没有匹配的调用记录")}</div></td></tr>}</tbody></table></div>
+          <div className="key-call-toolbar"><div><strong>{t("最近调用详情")}</strong><span>{t("New API 返回")} {result.calls.length} {t("条 · 当前显示")} {calls.length} {t("条")}{result.logs_may_be_truncated ? ` · ${t('这是最近记录汇总，不代表累计调用总量')}` : ''}</span></div><label><Search size={15} /><input value={filter} onChange={(event) => setFilter(event.target.value)} placeholder={t("模型、渠道、请求 ID")} />{filter && <button onClick={() => setFilter('')}><X size={14} /></button>}</label></div>
+          <div className="key-call-table-scroll"><table className="key-call-table"><thead><tr><th>{t("时间")}</th><th>{t("模型 / 渠道")}</th><th>Tokens</th><th>{t("额度")}</th><th>{t("耗时")}</th><th>{t("模式")}</th><th /></tr></thead><tbody>{calls.map((item) => <tr key={`${item.id}-${item.request_id}`} className={selected?.id === item.id ? 'active' : ''} onClick={() => setSelected(item)}><td className="mono">{formatTime(item.created_at, true)}</td><td><strong>{item.model_name || t('未知模型')}</strong><span>{item.channel_name || t('渠道 #{{id}}', { id: item.channel_id })} · {item.group || 'default'}</span></td><td><b>{numberText(item.prompt_tokens + item.completion_tokens)}</b><span>{numberText(item.prompt_tokens)} + {numberText(item.completion_tokens)}</span></td><td><b>{formatQuota(item.quota_display)}</b></td><td><b className={item.use_time > keySlowAfterSeconds ? 'text-bad' : ''}>{item.use_time.toFixed(2)}s</b><span>{t("首字")} {formatDuration(item.frt_ms)}</span></td><td>{item.is_stream ? t('流式') : t('非流式')}</td><td><ChevronRight size={15} /></td></tr>)}{!calls.length && <tr><td colSpan={7}><div className="empty-row">{t("没有匹配的调用记录")}</div></td></tr>}</tbody></table></div>
         </div>
         <aside className="key-call-detail">
-          {selected ? <><div className="key-detail-head"><span className="key-detail-icon"><TerminalSquare size={19} /></span><div><span>REQUEST INSPECTOR</span><h3>{selected.model_name || t('调用详情')}</h3></div><button onClick={() => setSelected(null)}><X size={16} /></button></div><dl><div><dt>{t("请求时间")}</dt><dd>{formatFullTime(selected.created_at)}</dd></div><div><dt>{t("渠道")}</dt><dd>{selected.channel_name || `#${selected.channel_id}`}</dd></div><div><dt>{t("总耗时 / 首字")}</dt><dd>{selected.use_time.toFixed(3)}s / {formatDuration(selected.frt_ms)}</dd></div><div><dt>Token</dt><dd>{selected.prompt_tokens} {t("输入 +")} {selected.completion_tokens} {t("输出")}</dd></div><div><dt>{t("计费额度")}</dt><dd>{formatQuota(selected.quota_display)} <small>({formatCompactNumber(selected.quota)})</small></dd></div><div><dt>{t("请求模式")}</dt><dd>{selected.is_stream ? t('流式') : t('非流式')} · {selected.group || 'default'}</dd></div></dl><div className="key-request-id"><span>REQUEST ID</span><code>{selected.request_id || '—'}</code><button onClick={() => copyText(selected.request_id)} disabled={!selected.request_id}><Copy size={14} />{t("复制")}</button></div>{selected.upstream_request_id && <div className="key-request-id"><span>UPSTREAM REQUEST ID</span><code>{selected.upstream_request_id}</code><button onClick={() => copyText(selected.upstream_request_id)}><Copy size={14} />{t("复制")}</button></div>}{selected.content && <div className="key-call-content"><span>{t("New API 记录")}</span><p>{selected.content}</p></div>}</> : <div className="key-detail-empty"><TerminalSquare size={26} /><strong>{t("选择一条调用记录")}</strong><span>{t("查看请求 ID、Token 拆分、计费额度与精确耗时。")}</span></div>}
+          {selected ? <><div className="key-detail-head"><span className="key-detail-icon"><TerminalSquare size={19} /></span><div><span>REQUEST INSPECTOR</span><h3>{selected.model_name || t('调用详情')}</h3></div><button onClick={() => setSelected(null)}><X size={16} /></button></div><dl><div><dt>{t("请求时间")}</dt><dd>{formatFullTime(selected.created_at)}</dd></div><div><dt>{t("渠道")}</dt><dd>{selected.channel_name || `#${selected.channel_id}`}</dd></div><div><dt>{t("总耗时 / 首字")}</dt><dd>{selected.use_time.toFixed(3)}s / {formatDuration(selected.frt_ms)}</dd></div><div><dt>Token</dt><dd>{numberText(selected.prompt_tokens)} {t("输入 +")} {numberText(selected.completion_tokens)} {t("输出")}</dd></div><div><dt>{t("计费额度")}</dt><dd>{formatQuota(selected.quota_display)} <small>({numberText(selected.quota)})</small></dd></div><div><dt>{t("请求模式")}</dt><dd>{selected.is_stream ? t('流式') : t('非流式')} · {selected.group || 'default'}</dd></div></dl><div className="key-request-id"><span>REQUEST ID</span><code>{selected.request_id || '—'}</code><button onClick={() => copyText(selected.request_id)} disabled={!selected.request_id}><Copy size={14} />{t("复制")}</button></div>{selected.upstream_request_id && <div className="key-request-id"><span>UPSTREAM REQUEST ID</span><code>{selected.upstream_request_id}</code><button onClick={() => copyText(selected.upstream_request_id)}><Copy size={14} />{t("复制")}</button></div>}{selected.content && <div className="key-call-content"><span>{t("New API 记录")}</span><p>{selected.content}</p></div>}</> : <div className="key-detail-empty"><TerminalSquare size={26} /><strong>{t("选择一条调用记录")}</strong><span>{t("查看请求 ID、Token 拆分、计费额度与精确耗时。")}</span></div>}
         </aside>
       </div>
     </>}
@@ -994,19 +1018,24 @@ function KeyUsageView() {
 
 type ResourceField = 'system_cpu' | 'system_memory' | 'system_disk';
 
-function MetricChart({ samples, field, color, label, description, threshold, icon }: { samples: ResourceSample[]; field: ResourceField; color: string; label: string; description: string; threshold: number; icon: ReactNode }) {
+function MetricChart({ samples, field, color, label, description, threshold, icon, currentValue, currentLabel, rangeEndLabel, summary }: { samples: ResourceSample[]; field: ResourceField; color: string; label: string; description: string; threshold: number; icon: ReactNode; currentValue: number | null | undefined; currentLabel: string; rangeEndLabel: string; summary: ResourceMetricSummary | undefined }) {
   const width = 1000;
   const height = 250;
   const paddingY = 14;
   const plotHeight = height - paddingY * 2;
   const gradientId = useId().replace(/:/g, '');
   const [activeIndex, setActiveIndex] = useState<number | null>(null);
-  const values = samples.map((sample) => Math.min(100, Math.max(0, Number(sample[field] ?? 0))));
-  const current = values[values.length - 1];
+  const values = samples.map((sample) => {
+    const value = Number(sample[field]);
+    return Number.isFinite(value) ? Math.min(100, Math.max(0, value)) : 0;
+  });
+  const currentNumber = Number(currentValue);
+  const current = currentValue == null || !Number.isFinite(currentNumber) ? null : Math.min(100, Math.max(0, currentNumber));
+  const trendCurrent = values[values.length - 1];
   const previous = values[values.length - 2];
-  const average = values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : null;
-  const peak = values.length ? Math.max(...values) : null;
-  const low = values.length ? Math.min(...values) : null;
+  const average = summary?.average ?? null;
+  const peak = summary?.max ?? null;
+  const low = summary?.min ?? null;
   const selectedIndex = activeIndex ?? Math.max(0, samples.length - 1);
   const selectedSample = samples[selectedIndex];
   const selectedValue = values[selectedIndex];
@@ -1015,8 +1044,8 @@ function MetricChart({ samples, field, color, label, description, threshold, ico
   const linePath = values.map((value, index) => `${index === 0 ? 'M' : 'L'} ${xAt(index)} ${yAt(value)}`).join(' ');
   const areaPath = linePath ? `${linePath} L ${width} ${height} L 0 ${height} Z` : '';
   const thresholdY = yAt(threshold);
-  const delta = current != null && previous != null ? current - previous : null;
-  const tone = current == null ? 'muted' : current >= threshold ? 'bad' : current >= threshold * .8 ? 'warn' : 'ok';
+  const delta = trendCurrent != null && previous != null ? trendCurrent - previous : null;
+  const tone = current == null ? 'muted' : current > threshold ? 'bad' : current >= threshold * .8 ? 'warn' : 'ok';
   const status = tone === 'bad' ? t('超过阈值') : tone === 'warn' ? t('接近阈值') : tone === 'ok' ? t('运行平稳') : t('等待数据');
   const updateSelection = (event: ReactPointerEvent<HTMLDivElement>) => {
     if (!samples.length) return;
@@ -1028,14 +1057,14 @@ function MetricChart({ samples, field, color, label, description, threshold, ico
     <article className={`chart-card chart-card-${tone}`} style={{ '--chart-color': color } as React.CSSProperties}>
       <header className="chart-heading">
         <div className="chart-title"><span className="chart-icon">{icon}</span><div><strong>{label}</strong><small>{description}</small></div></div>
-        <div className="chart-current"><span className={`chart-state chart-state-${tone}`}>{status}</span><strong>{current == null ? '—' : `${current.toFixed(1)}%`}</strong><small className={delta != null && delta > 0 ? 'trend-up' : 'trend-down'}>{delta == null ? t('暂无趋势') : `${delta > 0 ? '↑' : delta < 0 ? '↓' : '→'} ${Math.abs(delta).toFixed(1)}% ${t('较上次')}`}</small></div>
+        <div className="chart-current"><span className={`chart-state chart-state-${tone}`}>{currentLabel} · {status}</span><strong>{current == null ? '—' : `${current.toFixed(1)}%`}</strong><small className={delta != null && delta > 0 ? 'trend-up' : 'trend-down'}>{delta == null ? t('暂无趋势') : `${delta > 0 ? '↑' : delta < 0 ? '↓' : '→'} ${Math.abs(delta).toFixed(1)}% ${t('相邻时间桶变化')}`}</small></div>
       </header>
       <div className="chart-kpis"><span>{t("平均")} <b>{average == null ? '—' : `${average.toFixed(1)}%`}</b></span><span>{t("峰值")} <b>{peak == null ? '—' : `${peak.toFixed(1)}%`}</b></span><span>{t("最低")} <b>{low == null ? '—' : `${low.toFixed(1)}%`}</b></span><span>{t("阈值")} <b>{threshold}%</b></span></div>
       <div
         className="chart-stage"
         role="group"
         tabIndex={0}
-        aria-label={`${label} ${t('历史曲线')} · ${t('当前')} ${current == null ? t('无数据') : `${current.toFixed(1)}%`}`}
+        aria-label={`${label} ${t('历史曲线')} · ${currentLabel} ${current == null ? t('无数据') : `${current.toFixed(1)}%`}`}
         onPointerMove={updateSelection}
         onPointerLeave={() => setActiveIndex(null)}
         onFocus={() => samples.length && setActiveIndex(samples.length - 1)}
@@ -1056,21 +1085,21 @@ function MetricChart({ samples, field, color, label, description, threshold, ico
           {linePath && <path d={linePath} fill="none" stroke={color} strokeWidth="3" vectorEffect="non-scaling-stroke" />}
           {selectedSample && <><line x1={xAt(selectedIndex)} x2={xAt(selectedIndex)} y1="0" y2={height} className="chart-crosshair" /><circle cx={xAt(selectedIndex)} cy={yAt(selectedValue)} r="7" fill={color} className="chart-point" vectorEffect="non-scaling-stroke" /></>}
         </svg>
-        {selectedSample && activeIndex != null && <div className="chart-tooltip" style={{ left: `${Math.min(92, Math.max(8, xAt(selectedIndex) / width * 100))}%` }}><time>{formatFullTime(selectedSample.created_at)}</time><strong>{selectedValue.toFixed(1)}%</strong><span>{selectedValue >= threshold ? t('已超过告警阈值') : t('距阈值 {{value}}%', { value: (threshold - selectedValue).toFixed(1) })}</span></div>}
+        {selectedSample && activeIndex != null && <div className="chart-tooltip" style={{ left: `${Math.min(92, Math.max(8, xAt(selectedIndex) / width * 100))}%` }}><time>{formatFullTime(selectedSample.created_at)}</time><strong>{selectedValue.toFixed(1)}%</strong><span>{t('该时间桶平均值')} · {selectedValue > threshold ? t('已超过告警阈值') : t('距阈值 {{value}}%', { value: Math.max(0, threshold - selectedValue).toFixed(1) })}</span></div>}
       </div>
-      <div className="chart-axis"><span>{samples.length ? formatTime(samples[0].created_at) : 'PAST'}</span><span>{samples.length > 2 ? formatTime(samples[Math.floor(samples.length / 2)].created_at) : ''}</span><span>{samples.length ? formatTime(samples[samples.length - 1].created_at) : 'NOW'}</span></div>
+      <div className="chart-axis"><span>{samples.length ? formatTime(samples[0].created_at) : 'PAST'}</span><span>{samples.length > 2 ? formatTime(samples[Math.floor(samples.length / 2)].created_at) : ''}</span><span>{samples.length ? rangeEndLabel : '—'}</span></div>
     </article>
   );
 }
 
 function ResourcesView() {
-  const [samples, setSamples] = useState<ResourceSample[]>([]);
-  const [bucketSeconds, setBucketSeconds] = useState(0);
+  const [payload, setPayload] = useState<ResourcePayload | null>(null);
   const [error, setError] = useState('');
   const [range, setRange] = useState<TimeRange>(() => presetRange(1));
   const [loading, setLoading] = useState(false);
   const requestController = useRef<AbortController | null>(null);
   const liveRange = isLiveRange(range);
+  const refreshMilliseconds = Math.max(5_000, (payload?.sampling_interval_seconds || 15) * 1000);
   const load = useCallback(async () => {
     requestController.current?.abort();
     const controller = new AbortController();
@@ -1078,9 +1107,8 @@ function ResourcesView() {
     setLoading(true);
     try {
       const parameters = appendDateRange(new URLSearchParams(), range);
-      const payload = await api<{ samples: ResourceSample[]; bucket_seconds: number }>(`resources?${parameters.toString()}`, { signal: controller.signal });
-      setSamples(payload.samples);
-      setBucketSeconds(payload.bucket_seconds);
+      const response = await api<ResourcePayload>(`resources?${parameters.toString()}`, { signal: controller.signal });
+      setPayload(response);
       setError('');
     } catch (requestError) {
       if (requestError instanceof DOMException && requestError.name === 'AbortError') return;
@@ -1092,21 +1120,41 @@ function ResourcesView() {
   useEffect(() => {
     void load();
     if (!liveRange) return () => requestController.current?.abort();
-    const timer = window.setInterval(() => void load(), 15_000);
+    const timer = window.setInterval(() => void load(), refreshMilliseconds);
     return () => { window.clearInterval(timer); requestController.current?.abort(); };
-  }, [liveRange, load]);
-  const latest = samples[samples.length - 1];
+  }, [liveRange, load, refreshMilliseconds]);
+  const samples = payload?.samples || [];
+  const bucketSeconds = payload?.bucket_seconds || 0;
+  const latest = payload?.latest;
+  const thresholds = payload?.thresholds || { system_cpu: 85, system_memory: 85, system_disk: 80 };
+  const collectorStale = liveRange && payload?.collector_status === 'stale';
   const containers = latest?.containers || {};
-  const highest = Math.max(latest?.system_cpu || 0, latest?.system_memory || 0, latest?.system_disk || 0);
-  const resourceTone = highest >= 85 ? 'bad' : highest >= 68 ? 'warn' : 'ok';
-  const resourceLabel = resourceTone === 'bad' ? t('资源压力较高') : resourceTone === 'warn' ? t('资源需要关注') : t('资源运行平稳');
+  const resourceValues = [latest?.system_cpu, latest?.system_memory, latest?.system_disk]
+    .map(Number)
+    .filter(Number.isFinite);
+  const highest = resourceValues.length ? Math.max(...resourceValues) : null;
+  const pressure = latest ? Math.max(
+    Number(latest.system_cpu || 0) / Math.max(1, thresholds.system_cpu),
+    Number(latest.system_memory || 0) / Math.max(1, thresholds.system_memory),
+    Number(latest.system_disk || 0) / Math.max(1, thresholds.system_disk),
+  ) : null;
+  const resourceTone = collectorStale ? 'warn' : pressure == null ? 'muted' : pressure > 1 ? 'bad' : pressure >= .8 ? 'warn' : 'ok';
+  const resourceLabel = collectorStale
+    ? t('机器资源采集已过期')
+    : highest == null
+      ? t('等待资源数据')
+      : liveRange
+        ? resourceTone === 'bad' ? t('资源压力较高') : resourceTone === 'warn' ? t('资源需要关注') : t('资源运行平稳')
+        : resourceTone === 'bad' ? t('区间末样本超过阈值') : resourceTone === 'warn' ? t('区间末样本接近阈值') : t('区间末样本正常');
+  const sampleLabel = liveRange ? t('当前原始样本') : t('区间末原始样本');
+  const rangeEndLabel = liveRange ? t('现在') : t('区间结束');
   return (
     <section>
-      <div className="section-heading resource-heading"><div><span className="eyebrow">HOST & CONTAINER TELEMETRY</span><h2>{t("机器资源")}</h2></div><div className="resource-controls"><span className="source-note"><i className={loading ? 'source-pulse source-pulse-loading' : 'source-pulse'} />{liveRange ? t('图表粒度 {{value}} · {{count}} 个数据点', { value: formatElapsed(bucketSeconds), count: samples.length }) : t('历史区间不自动刷新 · {{count}} 个数据点', { count: samples.length })}</span><TimeRangeControl compact value={range} onChange={setRange} /></div></div>
+      <div className="section-heading resource-heading"><div><span className="eyebrow">HOST & CONTAINER TELEMETRY</span><h2>{t("机器资源")}</h2></div><div className="resource-controls"><span className="source-note"><i className={loading ? 'source-pulse source-pulse-loading' : 'source-pulse'} />{collectorStale ? t('资源采集已延迟 {{duration}}', { duration: formatElapsed(payload?.collector_age_seconds || 0) }) : range.mode === 'all' ? (payload?.actual_start ? t('当前保留自 {{time}} · {{count}} 个原始样本', { time: formatFullTime(payload.actual_start), count: payload.sample_count }) : t('等待资源数据')) : liveRange ? t('趋势按 {{value}} 分桶取平均 · 当前值与极值来自 {{count}} 个原始样本', { value: formatElapsed(bucketSeconds), count: payload?.sample_count || 0 }) : t('历史区间不自动刷新 · {{count}} 个原始样本', { count: payload?.sample_count || 0 })}{payload ? ` · ${t('样本覆盖 {{value}}%', { value: (payload.sample_coverage_ratio * 100).toFixed(1) })}` : ''}</span><TimeRangeControl compact value={range} onChange={setRange} /></div></div>
       {error && <div className="inline-error"><AlertTriangle size={16} />{error}</div>}
-      <div className={`resource-insight resource-insight-${resourceTone}`}><div className="resource-insight-mark"><Activity size={22} /></div><div><span>RESOURCE SIGNAL</span><strong>{resourceLabel}</strong><small>{latest ? t('最后采样 {{time}}', { time: formatFullTime(latest.created_at) }) : t('正在等待第一批资源样本')}</small></div><div className="resource-insight-score"><span>{t("最高负载")}</span><strong>{latest ? `${highest.toFixed(1)}%` : '—'}</strong></div></div>
-      <div className="metrics-grid resource-metrics"><MetricCard icon={<Cpu />} label="CPU" value={formatPercent(latest?.system_cpu)} detail={t("告警阈值 85%")} tone={(latest?.system_cpu || 0) > 85 ? 'bad' : 'neutral'} /><MetricCard icon={<MemoryStick />} label={t("内存")} value={formatPercent(latest?.system_memory)} detail={t('可用 {{value}} GB', { value: latest?.system_available_mb ? (latest.system_available_mb / 1024).toFixed(2) : '—' })} tone={(latest?.system_memory || 0) > 85 ? 'bad' : 'neutral'} /><MetricCard icon={<HardDrive />} label={t("系统盘")} value={formatPercent(latest?.system_disk)} detail={t("告警阈值 80%")} tone={(latest?.system_disk || 0) > 80 ? 'bad' : 'neutral'} /><MetricCard icon={<CircleGauge />} label="Swap" value={formatPercent(latest?.system_swap)} detail={t('最后采样 {{time}}', { time: formatTime(latest?.created_at || 0) })} /></div>
-      <div className="chart-grid"><MetricChart samples={samples} field="system_cpu" color="#39df94" label={t("CPU 使用率")} description={t("计算负载与调度压力")} threshold={85} icon={<Cpu size={18} />} /><MetricChart samples={samples} field="system_memory" color="#78a8ff" label={t("内存使用率")} description={t("物理内存实时占用")} threshold={85} icon={<MemoryStick size={18} />} /><MetricChart samples={samples} field="system_disk" color="#ffad32" label={t("系统盘使用率")} description={t("根分区存储容量")} threshold={80} icon={<HardDrive size={18} />} /></div>
+      <div className={`resource-insight resource-insight-${resourceTone}`}><div className="resource-insight-mark"><Activity size={22} /></div><div><span>RESOURCE SIGNAL</span><strong>{resourceLabel}</strong><small>{latest ? t('最后原始采样 {{time}} · 每 {{interval}} 采集', { time: formatFullTime(latest.created_at), interval: formatElapsed(payload?.sampling_interval_seconds || 0) }) : t('正在等待第一批资源样本')}</small></div><div className="resource-insight-score"><span>{sampleLabel}</span><strong>{highest == null ? '—' : `${highest.toFixed(1)}%`}</strong></div></div>
+      <div className="metrics-grid resource-metrics"><MetricCard icon={<Cpu />} label="CPU" value={formatPercent(latest?.system_cpu)} detail={t('告警阈值 {{value}}%', { value: thresholds.system_cpu })} tone={(latest?.system_cpu || 0) > thresholds.system_cpu ? 'bad' : 'neutral'} /><MetricCard icon={<MemoryStick />} label={t("内存")} value={formatPercent(latest?.system_memory)} detail={`${t('可用 {{value}} GB', { value: latest?.system_available_mb != null ? (latest.system_available_mb / 1024).toFixed(2) : '—' })} · ${t('阈值 {{value}}%', { value: thresholds.system_memory })}`} tone={(latest?.system_memory || 0) > thresholds.system_memory ? 'bad' : 'neutral'} /><MetricCard icon={<HardDrive />} label={t("系统盘")} value={formatPercent(latest?.system_disk)} detail={t('告警阈值 {{value}}%', { value: thresholds.system_disk })} tone={(latest?.system_disk || 0) > thresholds.system_disk ? 'bad' : 'neutral'} /><MetricCard icon={<CircleGauge />} label="Swap" value={formatPercent(latest?.system_swap)} detail={t('最后采样 {{time}}', { time: formatTime(latest?.created_at || 0) })} /></div>
+      <div className="chart-grid"><MetricChart samples={samples} field="system_cpu" color="#39df94" label={t("CPU 使用率")} description={t("计算负载与调度压力 · 曲线为桶平均")} threshold={thresholds.system_cpu} icon={<Cpu size={18} />} currentValue={latest?.system_cpu} currentLabel={sampleLabel} rangeEndLabel={rangeEndLabel} summary={payload?.summary?.system_cpu} /><MetricChart samples={samples} field="system_memory" color="#78a8ff" label={t("内存使用率")} description={t("物理内存实时占用 · 曲线为桶平均")} threshold={thresholds.system_memory} icon={<MemoryStick size={18} />} currentValue={latest?.system_memory} currentLabel={sampleLabel} rangeEndLabel={rangeEndLabel} summary={payload?.summary?.system_memory} /><MetricChart samples={samples} field="system_disk" color="#ffad32" label={t("系统盘使用率")} description={t("根分区存储容量 · 曲线为桶平均")} threshold={thresholds.system_disk} icon={<HardDrive size={18} />} currentValue={latest?.system_disk} currentLabel={sampleLabel} rangeEndLabel={rangeEndLabel} summary={payload?.summary?.system_disk} /></div>
       <div className="section-heading compact"><div><span className="eyebrow">DOCKER RUNTIME</span><h2>{t("容器状态")}</h2></div></div>
       <div className="container-grid">{Object.entries(containers).map(([name, metric]) => <ContainerCard key={name} name={name} metric={metric} />)}{!Object.keys(containers).length && <div className="empty-state"><Server size={26} /><strong>{t("暂无容器数据")}</strong><span>{t("检查 Docker 只读代理连接。")}</span></div>}</div>
     </section>
@@ -1152,6 +1200,7 @@ function IncidentsView() {
   const [page, setPage] = useState(0);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [generatedAt, setGeneratedAt] = useState(0);
+  const [retentionDays, setRetentionDays] = useState(365);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [acknowledgementNote, setAcknowledgementNote] = useState('');
@@ -1185,6 +1234,7 @@ function IncidentsView() {
       setSummary(payload.summary);
       setTotal(payload.total);
       setGeneratedAt(payload.generated_at);
+      setRetentionDays(payload.retention_days || 365);
       setSelectedId((current) => payload.items.some((item) => item.id === current) ? current : payload.items[0]?.id ?? null);
       setError('');
     } catch (requestError) {
@@ -1231,7 +1281,7 @@ function IncidentsView() {
     <section className="incidents-view">
       <div className="section-heading incident-heading">
         <div><span className="eyebrow">INCIDENT OPERATIONS</span><h2>{t("事件调查中心")}</h2><p>{t("从告警信号定位触发原因，并完整追踪恢复过程。")}</p></div>
-        <div className="incident-sync"><span><i className={loading ? 'source-pulse source-pulse-loading' : 'source-pulse'} />{t("30 秒自动刷新")}</span><small>{t("数据时间")} {formatFullTime(generatedAt)}</small><button className="secondary-button" onClick={() => void load()} disabled={loading}><RefreshCw size={14} className={loading ? 'spin' : ''} />{t("立即刷新")}</button></div>
+        <div className="incident-sync"><span><i className={loading ? 'source-pulse source-pulse-loading' : 'source-pulse'} />{t("30 秒自动刷新")}</span><small>{t('事件保留 {{days}} 天', { days: retentionDays })} · {t("数据时间")} {formatFullTime(generatedAt)}</small><button className="secondary-button" onClick={() => void load()} disabled={loading}><RefreshCw size={14} className={loading ? 'spin' : ''} />{t("立即刷新")}</button></div>
       </div>
       {error && <div className="inline-error"><AlertTriangle size={16} />{error}<button onClick={() => void load()}>{t("重试")}</button></div>}
 
@@ -1411,12 +1461,32 @@ export default function App() {
   }, [elevated, enabledConsolePageList, navigate, route.consolePage, tab, user]);
 
   const overall = useMemo(() => {
-    if (!summary) return { tone: 'muted' as const, label: t('正在同步') };
-    const providerIssue = summary.provider_status?.include_in_overall
+    const providerIssue = summary?.provider_status?.include_in_overall
       && buildProviderStatusContext(summary.provider_status).state === 'relevant-issue';
-    if (summary.channel_sync?.status === 'stale' || summary.channels.failed || summary.incidents.critical || providerIssue) return { tone: 'bad' as const, label: t('存在异常') };
-    if (summary.channels.unknown || summary.requests.slow) return { tone: 'warn' as const, label: t('需要关注') };
-    return { tone: 'ok' as const, label: t('运行正常') };
+    const health = overallHealth(summary, Boolean(providerIssue));
+    const label = health.state === 'syncing' ? t('正在同步') : health.state === 'critical' ? t('存在异常') : health.state === 'warning' ? t('需要关注') : t('运行正常');
+    const detail = health.reason === 'channel-sync-stale'
+      ? t('渠道清单同步中断')
+      : health.reason === 'failed-channels'
+        ? t('{{count}} 个可见渠道异常', { count: summary?.channels.failed || 0 })
+        : health.reason === 'critical-incidents'
+          ? t('{{count}} 个严重事件未恢复', { count: summary?.incidents.critical || 0 })
+        : health.reason === 'provider-issue'
+            ? t('业务相关官方组件异常')
+            : health.reason === 'delayed-channels'
+              ? t('{{count}} 个渠道探测延迟', { count: summary?.channels.delayed || 0 })
+            : health.reason === 'warning-incidents'
+              ? t('{{count}} 个关注事件未恢复', { count: summary?.incidents.warning || 0 })
+              : health.reason === 'unknown-channels'
+                ? t('{{count}} 个渠道等待有效探测', { count: summary?.channels.unknown || 0 })
+                : health.reason === 'log-collector-stale'
+                  ? t('使用日志采集已过期')
+                  : health.reason === 'resource-collector-stale'
+                    ? t('机器资源采集已过期')
+                : health.reason === 'healthy'
+                  ? t('全部可见渠道状态明确')
+                  : t('正在读取权威数据源');
+    return { ...health, label, detail };
   }, [summary]);
 
   async function logout() { await api('auth/logout', { method: 'POST' }).catch(() => undefined); setAuthState('guest'); setUser(null); setSummary(null); }
@@ -1465,7 +1535,7 @@ export default function App() {
           </nav>
         </aside>
         <div className="app-canvas">
-          <main className="content">{tab === 'console' && user?.console_available ? <ConsoleShell page={route.consolePage} pages={user.console_pages || {}} globalScope={Boolean(user.console_global_scope)} customerView={customerView} onNavigate={(consolePage) => navigate({ tab: 'console', settingsPage: 'status', consolePage })} /> : <><section className="hero"><div><div className="eyebrow">OPERATIONS / REAL-TIME</div><h1>{t("服务运行态势")}</h1><p>{t("真实渠道探测、真实消费日志、主机与容器资源。")}</p></div><div className={`overall-status overall-${overall.tone}`}><span className="status-beacon" /><div><small>OVERALL STATUS</small><strong>{overall.label}</strong></div><span>{summary ? formatTime(summary.generated_at) : t('同步中')}</span></div></section>
+          <main className="content">{tab === 'console' && user?.console_available ? <ConsoleShell page={route.consolePage} pages={user.console_pages || {}} globalScope={Boolean(user.console_global_scope)} customerView={customerView} onNavigate={(consolePage) => navigate({ tab: 'console', settingsPage: 'status', consolePage })} /> : <><section className="hero"><div><div className="eyebrow">OPERATIONS / REAL-TIME</div><h1>{t("服务运行态势")}</h1><p>{t("真实渠道探测、真实消费日志、主机与容器资源。")}</p></div><div className={`overall-status overall-${overall.tone}`} title={summary ? `${overall.detail} · ${formatFullTime(summary.generated_at)}` : overall.detail}><span className="status-beacon" /><div><small>OVERALL STATUS</small><strong>{overall.label}</strong></div><span>{overall.detail}</span></div></section>
             {error && <div className="inline-error"><AlertTriangle size={16} />{error}<button onClick={() => void loadCore()}>{t("重试")}</button></div>}
             {summary ? <>{tab === 'overview' && <Overview summary={summary} channels={channels} range={overviewRange} onRange={setOverviewRange} onChannel={setSelectedChannel} showProviderStatus={elevated} onProviderStatus={() => navigate({ tab: 'providerStatus', settingsPage: 'status', consolePage: 'overview' })} />}{tab === 'providerStatus' && summary.provider_status && <ProviderStatusView status={summary.provider_status} summary={summary} onOverview={() => navigate({ tab: 'overview', settingsPage: 'status', consolePage: 'overview' })} />}{tab === 'providerStatus' && !summary.provider_status && <div className="empty-state provider-unavailable"><Cloud size={28} /><strong>{t('官方状态当前不可见')}</strong><span>{t('该功能可能已关闭，或当前角色没有查看权限。')}</span><button className="secondary-button" type="button" onClick={() => navigate({ tab: 'overview', settingsPage: 'status', consolePage: 'overview' })}>{t('返回渠道总览')}</button></div>}{tab === 'keyUsage' && user?.key_usage_available && <KeyUsageView />}{tab === 'logs' && elevated && <LogsView channels={channels} />}{tab === 'resources' && elevated && <ResourcesView />}{tab === 'incidents' && elevated && <IncidentsView />}{tab === 'deliveries' && user?.role === 'admin' && <DeliveriesView />}{tab === 'channels' && elevated && <ChannelSettingsView />}{tab === 'settings' && user?.role === 'admin' && <SettingsView activePage={route.settingsPage} onActivePageChange={(settingsPage) => navigate({ tab: 'settings', settingsPage, consolePage: 'overview' })} />}</> : <div className="loading-panel"><RefreshCw className="spin" /><span>{t("正在读取第一批监控数据")}</span></div>}</>}
           </main>

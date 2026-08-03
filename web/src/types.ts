@@ -16,6 +16,8 @@ export type Channel = {
   models: string[];
   group: string;
   synced_at: number;
+  stale_after_seconds: number;
+  slow_after_seconds: number;
   latest: Observation | null;
   history: Observation[];
   availability: {
@@ -23,6 +25,10 @@ export type Channel = {
     start_timestamp: number;
     end_timestamp: number;
     all_time: boolean;
+    source: 'real' | 'builtin' | string;
+    coverage_start_at: number;
+    coverage_end_at: number;
+    retention_days: number;
     total: number;
     successes: number;
     percentage: number | null;
@@ -98,6 +104,14 @@ export type KeyUsageCall = {
 export type KeyUsageResult = {
   queried_at: number;
   quota_per_unit: number;
+  quota_per_unit_source: 'new_api_status';
+  configured_quota_per_unit: number;
+  quota_per_unit_matches_config: boolean;
+  slow_after_seconds: number;
+  summary_scope: 'recent_calls';
+  log_limit: number;
+  returned_calls: number;
+  logs_may_be_truncated: boolean;
   usage: {
     name: string;
     total_granted: number;
@@ -139,22 +153,33 @@ export type Summary = {
   channels: {
     total: number;
     healthy: number;
+    delayed: number;
     failed: number;
     unknown: number;
+    stale_after_seconds?: number;
+    slow_after_seconds?: number;
     last_checked_at: number;
   };
   requests: {
     window_seconds: number;
     total: number;
     slow: number;
+    slow_after_seconds: number;
     slow_ratio: number;
     average_seconds: number;
     p95_seconds: number;
     average_frt_ms: number | null;
     last_request_at: number;
+    collector_status: 'unknown' | 'starting' | 'ok' | 'stale' | string;
+    collector_age_seconds: number;
+    collector_stale_after_seconds: number;
+    last_collected_at: number;
   };
-  resources: ResourceSample & { containers?: Record<string, ContainerMetric> };
-  incidents: { open: number; critical: number };
+  resources: ResourceSample & {
+    containers?: Record<string, ContainerMetric>;
+    thresholds?: Record<'system_cpu' | 'system_memory' | 'system_disk', number>;
+  };
+  incidents: { open: number; critical: number; warning: number };
   provider_status?: ProviderStatus;
 };
 
@@ -236,6 +261,44 @@ export type ResourceSample = {
   system_available_mb: number | null;
   system_swap: number | null;
   containers?: Record<string, ContainerMetric>;
+  collector_status?: 'unknown' | 'starting' | 'ok' | 'stale' | string;
+  collector_age_seconds?: number;
+  collector_stale_after_seconds?: number;
+  last_collected_at?: number;
+};
+
+export type ResourceMetricSummary = {
+  min: number | null;
+  average: number | null;
+  max: number | null;
+};
+
+export type ResourcePayload = {
+  generated_at: number;
+  hours: number;
+  requested_start: number;
+  requested_end: number;
+  all_time: boolean;
+  actual_start: number;
+  actual_end: number;
+  coverage_ratio: number;
+  coverage_basis: 'expected_sample_count' | string;
+  sample_coverage_ratio: number;
+  span_coverage_ratio: number;
+  expected_sample_count: number;
+  bucket_seconds: number;
+  trend_aggregation: 'bucket_average' | string;
+  sample_count: number;
+  latest: ResourceSample | null;
+  summary: Record<'system_cpu' | 'system_memory' | 'system_disk' | 'system_swap', ResourceMetricSummary>;
+  collector_status: 'unknown' | 'starting' | 'ok' | 'stale' | string;
+  collector_age_seconds: number;
+  collector_stale_after_seconds: number;
+  last_collected_at: number;
+  samples: ResourceSample[];
+  sampling_interval_seconds: number;
+  retention_days: number;
+  thresholds: Record<'system_cpu' | 'system_memory' | 'system_disk', number>;
 };
 
 export type Incident = {
@@ -280,6 +343,7 @@ export type IncidentSummary = {
 
 export type IncidentPayload = {
   generated_at: number;
+  retention_days: number;
   total: number;
   limit: number;
   offset: number;

@@ -2,7 +2,7 @@ import { Activity, CircleDollarSign, Sigma } from 'lucide-react'
 import { useMemo, useState } from 'react'
 import { getLanguage, t } from '../i18n'
 import type { ConsoleSeriesItem } from './types'
-import { buildAnalyticsModelTimeline, compactNumber, quotaText } from './utils'
+import { buildAnalyticsModelTimeline, compactNumber, numberText, quotaText } from './utils'
 import type { AnalyticsMetric } from './utils'
 
 const WIDTH = 960
@@ -17,6 +17,11 @@ const METRICS: Array<{ id: AnalyticsMetric; label: string; icon: typeof Activity
 ]
 
 function metricText(metric: AnalyticsMetric, value: number, quotaPerUnit: number) {
+  if (metric === 'quota') return quotaText(value, quotaPerUnit)
+  return numberText(value)
+}
+
+function axisMetricText(metric: AnalyticsMetric, value: number, quotaPerUnit: number) {
   if (metric === 'quota') return quotaText(value, quotaPerUnit)
   return compactNumber(value)
 }
@@ -103,7 +108,7 @@ export function AnalyticsTrendChart({
           <defs>
             {stacked.map((item, index) => <linearGradient id={`analytics-series-${index}`} x1="0" y1="0" x2="0" y2="1" key={item.model}><stop offset="0" stopColor={item.color} stopOpacity="0.55" /><stop offset="1" stopColor={item.color} stopOpacity="0.08" /></linearGradient>)}
           </defs>
-          {[0, 0.25, 0.5, 0.75, 1].map((ratio) => <g key={ratio}><line className="analytics-grid-line" x1={PADDING.left} x2={WIDTH - PADDING.right} y1={y(maximum * ratio)} y2={y(maximum * ratio)} /><text className="analytics-axis-label" x={PADDING.left - 10} y={y(maximum * ratio) + 4} textAnchor="end">{metricText(metric, maximum * ratio, quotaPerUnit)}</text></g>)}
+          {[0, 0.25, 0.5, 0.75, 1].map((ratio) => <g key={ratio}><line className="analytics-grid-line" x1={PADDING.left} x2={WIDTH - PADDING.right} y1={y(maximum * ratio)} y2={y(maximum * ratio)} /><text className="analytics-axis-label" x={PADDING.left - 10} y={y(maximum * ratio) + 4} textAnchor="end">{axisMetricText(metric, maximum * ratio, quotaPerUnit)}</text></g>)}
           {stacked.map((item, index) => <path d={item.path} fill={`url(#analytics-series-${index})`} stroke={item.color} strokeOpacity="0.72" strokeWidth="1.25" key={item.model} />)}
           {totalsPath && <path d={totalsPath} className="analytics-total-line" fill="none" />}
           {points.length === 1 && <circle className="analytics-single-point" cx={x(0)} cy={y(points[0].total)} r="5" />}

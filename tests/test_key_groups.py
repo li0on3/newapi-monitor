@@ -218,6 +218,9 @@ class KeyUsageWorkspaceTests(unittest.TestCase):
         self.assertEqual(2, result["groups"][0]["key_count"])
         self.assertEqual(2, result["ungrouped"]["usage"]["requests"])
         self.assertEqual("current_multi_membership", result["usage_attribution"])
+        self.assertEqual("current_keys", result["summary_scope"])
+        self.assertEqual(100, result["excluded_deleted_key_usage"]["requests"])
+        self.assertEqual(9999, result["excluded_deleted_key_usage"]["quota"])
         self.assertNotIn("use_group", result["groups"][0])
         self.assertNotIn("99", result["token_usage"])
 

@@ -701,31 +701,36 @@ class StateStore:
             raise ValueError("invalid notification status")
         where: list[str] = []
         parameters: list[Any] = []
-        time_where: list[str] = []
-        time_parameters: list[Any] = []
+        facet_where: list[str] = []
+        facet_parameters: list[Any] = []
         if status != "all":
             where.append("status = ?")
             parameters.append(status)
         if destination != "all":
             where.append("destination = ?")
             parameters.append(destination)
+            facet_where.append("destination = ?")
+            facet_parameters.append(destination)
         normalized_query = query.strip()
         if normalized_query:
-            where.append("(subject LIKE ? OR body LIKE ? OR last_error LIKE ? OR delivery_key LIKE ?)")
+            search_clause = "(subject LIKE ? OR body LIKE ? OR last_error LIKE ? OR delivery_key LIKE ?)"
+            where.append(search_clause)
+            facet_where.append(search_clause)
             pattern = f"%{normalized_query}%"
             parameters.extend([pattern, pattern, pattern, pattern])
+            facet_parameters.extend([pattern, pattern, pattern, pattern])
         if start_timestamp is not None and int(start_timestamp) > 0:
             where.append("created_at >= ?")
             parameters.append(int(start_timestamp))
-            time_where.append("created_at >= ?")
-            time_parameters.append(int(start_timestamp))
+            facet_where.append("created_at >= ?")
+            facet_parameters.append(int(start_timestamp))
         if end_timestamp is not None and int(end_timestamp) > 0:
             where.append("created_at <= ?")
             parameters.append(int(end_timestamp))
-            time_where.append("created_at <= ?")
-            time_parameters.append(int(end_timestamp))
+            facet_where.append("created_at <= ?")
+            facet_parameters.append(int(end_timestamp))
         clause = f"WHERE {' AND '.join(where)}" if where else ""
-        time_clause = f"WHERE {' AND '.join(time_where)}" if time_where else ""
+        facet_clause = f"WHERE {' AND '.join(facet_where)}" if facet_where else ""
         page_limit = max(1, min(int(limit), 100))
         page_offset = max(0, int(offset))
         total = int(self.connection.execute(
@@ -737,8 +742,8 @@ class StateStore:
             [*parameters, page_limit, page_offset],
         ).fetchall()
         count_rows = self.connection.execute(
-            f"SELECT status, COUNT(*) AS total FROM notification_outbox {time_clause} GROUP BY status",
-            time_parameters,
+            f"SELECT status, COUNT(*) AS total FROM notification_outbox {facet_clause} GROUP BY status",
+            facet_parameters,
         ).fetchall()
         destination_rows = self.connection.execute(
             "SELECT DISTINCT destination FROM notification_outbox ORDER BY destination"

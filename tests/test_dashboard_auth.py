@@ -11,6 +11,37 @@ from starlette.requests import Request
 from dashboard_auth import AuthStore
 
 
+class HealthEndpointTests(unittest.TestCase):
+    def test_health_exposes_running_release_version(self):
+        snapshot = {"status": "ok", "timestamp": 1_700_000_000, "version": "1.12.0"}
+
+        with mock.patch.object(dashboard_app, "system_health_snapshot", return_value=snapshot):
+            response = dashboard_app.health()
+
+        self.assertEqual(200, response.status_code)
+        self.assertEqual(
+            b'{"status":"ok","timestamp":1700000000,"version":"1.12.0"}',
+            response.body,
+        )
+
+    def test_setup_health_also_exposes_running_release_version(self):
+        snapshot = {"status": "setup_required", "timestamp": 1_700_000_000, "version": "1.12.0"}
+
+        with mock.patch.object(dashboard_app, "system_health_snapshot", return_value=snapshot):
+            response = dashboard_app.health()
+
+        self.assertEqual(200, response.status_code)
+        self.assertEqual(
+            b'{"status":"setup_required","timestamp":1700000000,"version":"1.12.0"}',
+            response.body,
+        )
+
+    def test_embedded_release_version_matches_version_file(self):
+        expected = Path(dashboard_app.__file__).with_name("VERSION").read_text(encoding="utf-8").strip()
+
+        self.assertEqual(expected, dashboard_app.APP_VERSION)
+
+
 class AuthStoreTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -263,7 +294,10 @@ class DashboardRoleBoundaryTests(unittest.TestCase):
         ):
             result = dashboard_app.dashboard_summary(viewer)
 
-        repository.summary.assert_called_once_with(channel_ids={2})
+        repository.summary.assert_called_once_with(
+            channel_ids={2},
+            include_operational_incidents=False,
+        )
         self.assertNotIn("last_error", result["channel_sync"])
 
     def test_viewer_channel_payload_omits_operator_only_metadata(self):
@@ -284,6 +318,8 @@ class DashboardRoleBoundaryTests(unittest.TestCase):
             "models": ["model-a"],
             "group": "default",
             "synced_at": 100,
+            "stale_after_seconds": 900,
+            "slow_after_seconds": 30,
             "latest": {
                 "observed_at": 100,
                 "success": False,
@@ -311,6 +347,7 @@ class DashboardRoleBoundaryTests(unittest.TestCase):
         repository.channel.return_value = item
         settings = mock.Mock()
         settings.decorate_channels.side_effect = lambda items, **_: items
+        settings.runtime_values.return_value = {"retention_days": 90}
 
         with mock.patch.object(dashboard_app.runtime, "settings", settings), mock.patch(
             "dashboard_app.repository", return_value=repository
@@ -327,7 +364,8 @@ class DashboardRoleBoundaryTests(unittest.TestCase):
             self.assertEqual(
                 {
                     "channel_id", "name", "channel_type", "enabled", "raw_status", "models",
-                    "group", "synced_at", "latest", "history", "availability", "usage_24h",
+                    "group", "synced_at", "stale_after_seconds", "slow_after_seconds",
+                    "latest", "history", "availability", "usage_24h",
                 },
                 set(payload),
             )

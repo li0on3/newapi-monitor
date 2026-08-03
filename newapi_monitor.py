@@ -1255,12 +1255,12 @@ def build_periodic_report(
     failed_channels = [item for item in channel_items if not item.success]
     slow_channels = [
         item for item in channel_items
-        if item.success and item.elapsed_seconds >= channel_slow_seconds
+        if item.success and item.elapsed_seconds > channel_slow_seconds
     ]
     latency_items = sorted(
         list(latency),
         key=lambda item: (
-            not (item.p95_seconds >= slow_seconds or item.average_seconds >= slow_seconds),
+            not (item.p95_seconds > slow_seconds or item.average_seconds > slow_seconds),
             -item.p95_seconds,
             -item.slow_count,
             -item.count,
@@ -1269,7 +1269,7 @@ def build_periodic_report(
     risky_latency = [
         item
         for item in latency_items
-        if item.p95_seconds >= slow_seconds or item.average_seconds >= slow_seconds
+        if item.p95_seconds > slow_seconds or item.average_seconds > slow_seconds
     ]
 
     effective_resource_thresholds = {
@@ -1284,7 +1284,7 @@ def build_periodic_report(
     risky_resources = [
         key
         for key, threshold in effective_resource_thresholds.items()
-        if key in resources and float(resources[key]) >= threshold
+        if key in resources and float(resources[key]) > threshold
     ]
     container_status = str(resource_details.get("container_status") or "unknown")
     container_restarts = int(resource_details.get("container_restarts") or 0)
@@ -1330,8 +1330,8 @@ def build_periodic_report(
         lines.append("⚪ 暂无探测数据")
     for item in channel_items:
         if item.success:
-            icon = "🟠" if item.elapsed_seconds >= channel_slow_seconds else "✅"
-            note = " · 探测偏慢" if item.elapsed_seconds >= channel_slow_seconds else ""
+            icon = "🟠" if item.elapsed_seconds > channel_slow_seconds else "✅"
+            note = " · 探测偏慢" if item.elapsed_seconds > channel_slow_seconds else ""
             lines.append(f"{icon} {item.name} · {_human_duration(item.elapsed_seconds)}{note}")
         else:
             message = item.message.strip().replace("\n", " ") or "探测失败"
@@ -1342,7 +1342,7 @@ def build_periodic_report(
         lines.append("⚪ 当前周期暂无消费日志")
     for item in latency_items:
         slow_ratio = item.slow_count / item.count * 100 if item.count else 0.0
-        risky = item.p95_seconds >= slow_seconds or item.average_seconds >= slow_seconds
+        risky = item.p95_seconds > slow_seconds or item.average_seconds > slow_seconds
         icon = "🔴" if risky else "✅"
         first_response = "暂无" if item.average_frt_ms is None else _human_duration(item.average_frt_ms / 1000)
         lines.append(f"{icon} {item.channel_name} / {item.model_name}")
@@ -1368,7 +1368,7 @@ def build_periodic_report(
         for key, label in resource_labels:
             if key not in resources:
                 continue
-            icon = "🔴" if float(resources[key]) >= effective_resource_thresholds[key] else "✅"
+            icon = "🔴" if float(resources[key]) > effective_resource_thresholds[key] else "✅"
             metric_parts.append(f"{icon} {label} {float(resources[key]):.1f}%")
         lines.extend(metric_parts)
         if "system_available_mb" in resources:

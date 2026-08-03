@@ -41,7 +41,7 @@ class NotificationOutboxOperationsTests(unittest.TestCase):
         self.assertEqual(1, payload["total"])
         self.assertEqual("smtp offline", payload["items"][0]["last_error"])
         self.assertEqual(
-            {"pending": 1, "sending": 0, "delivered": 1, "dead": 1, "cancelled": 0},
+            {"pending": 0, "sending": 0, "delivered": 0, "dead": 1, "cancelled": 0},
             payload["counts"],
         )
 
@@ -73,6 +73,34 @@ class NotificationOutboxOperationsTests(unittest.TestCase):
         payload = self.store.notifications(start_timestamp=150, end_timestamp=250, now=300)
         self.assertEqual(1, payload["total"])
         self.assertEqual("new", payload["items"][0]["subject"])
+
+    def test_delivery_status_facets_follow_search_destination_and_time_filters(self):
+        ids = self.store.enqueue_notifications(
+            "渠道异常",
+            "upstream timeout",
+            ["email", "wecom_webhook"],
+            now=100,
+        )
+        self.store.connection.execute(
+            "UPDATE notification_outbox SET status = 'delivered', delivered_at = 120, updated_at = 120 WHERE id = ?",
+            (ids[0],),
+        )
+        self.store.enqueue_notifications("资源提醒", "memory pressure", ["email"], now=200)
+        self.store.connection.commit()
+
+        payload = self.store.notifications(
+            destination="email",
+            query="upstream",
+            start_timestamp=50,
+            end_timestamp=150,
+            now=300,
+        )
+
+        self.assertEqual(1, payload["total"])
+        self.assertEqual(
+            {"pending": 0, "sending": 0, "delivered": 1, "dead": 0, "cancelled": 0},
+            payload["counts"],
+        )
 
     def test_acknowledge_incident_records_actor_note_and_time(self):
         incident_id = self.store.record_alert_events(

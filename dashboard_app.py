@@ -36,6 +36,10 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
 )
 LOGGER = logging.getLogger("newapi-monitor-dashboard")
+try:
+    APP_VERSION = Path(__file__).with_name("VERSION").read_text(encoding="utf-8").strip()
+except OSError:
+    APP_VERSION = os.getenv("MONITOR_VERSION", "unknown").strip() or "unknown"
 
 
 class LoginPayload(BaseModel):
@@ -312,7 +316,7 @@ class ConsoleTokenPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str = Field(min_length=1, max_length=50)
-    remain_quota: int = Field(0, ge=0, le=9_000_000_000_000_000)
+    remain_quota: int = Field(0, ge=-9_000_000_000_000_000, le=9_000_000_000_000_000)
     expired_time: int = Field(-1, ge=-1, le=4_102_444_800)
     unlimited_quota: bool = False
     model_limits_enabled: bool = False
@@ -338,6 +342,12 @@ class ConsoleTokenPayload(BaseModel):
         if any(ord(character) < 32 for character in normalized):
             raise ValueError("text fields must not contain control characters")
         return normalized
+
+    @model_validator(mode="after")
+    def validate_console_quota(self) -> "ConsoleTokenPayload":
+        if not self.unlimited_quota and self.remain_quota < 0:
+            raise ValueError("remain_quota must be non-negative unless unlimited_quota is enabled")
+        return self
 
 
 class ConsoleTokenStatusPayload(BaseModel):
@@ -789,7 +799,8 @@ class Runtime:
         self.repository = DashboardRepository(
             self.state_db,
             slow_seconds=float(values["slow_request_seconds"]),
-            channel_stale_seconds=env_int("CHANNEL_STALE_SECONDS", 900),
+            channel_stale_seconds=max(300, int(values["channel_interval_seconds"]) * 3),
+            channel_slow_seconds=float(values["channel_slow_seconds"]),
         )
 
     def remote_addr(self, request: Request) -> str:
@@ -971,12 +982,20 @@ def health() -> JSONResponse:
     if details["status"] == "setup_required":
         return JSONResponse(
             status_code=200,
-            content={"status": details["status"], "timestamp": details["timestamp"]},
+            content={
+                "status": details["status"],
+                "timestamp": details["timestamp"],
+                "version": details["version"],
+            },
         )
     healthy = details["status"] == "ok"
     return JSONResponse(
         status_code=200 if healthy else 503,
-        content={"status": details["status"], "timestamp": details["timestamp"]},
+        content={
+            "status": details["status"],
+            "timestamp": details["timestamp"],
+            "version": details["version"],
+        },
     )
 
 
@@ -1026,6 +1045,7 @@ def system_health_snapshot() -> dict[str, Any]:
         "collectors": collectors,
         "storage": storage,
         "timestamp": int(time.time()),
+        "version": APP_VERSION,
     }
 
 
@@ -1236,6 +1256,7 @@ def query_key_usage(payload: KeyUsageQueryPayload, request: Request, user: Opera
     channel_names = {int(item["channel_id"]): str(item["name"]) for item in repository().channels()}
     for item in result["calls"]:
         item["channel_name"] = channel_names.get(int(item["channel_id"]), "")
+    result["slow_after_seconds"] = float(values.get("slow_request_seconds", 60))
     return result
 
 
@@ -1330,7 +1351,8 @@ def get_console_overview(request: Request, user: AuthenticatedUser) -> dict[str,
         usage = client.log_stat(
             session_cookie,
             user_id,
-            int(user.get("source_role") or 0),
+            1,
+            type=2,
             start_timestamp=now - 86400,
             end_timestamp=now,
         )
@@ -1342,8 +1364,13 @@ def get_console_overview(request: Request, user: AuthenticatedUser) -> dict[str,
         "user": self_info,
         "models": {"total": len(models), "items": models[:12]},
         "keys": keys,
-        "usage_24h": usage,
-        "scope": "global" if int(user.get("source_role") or 0) >= 10 else "self",
+        "usage_24h": {
+            **usage,
+            "scope": "self_consume",
+            "quota_window_seconds": 86400,
+            "rate_window_seconds": 60,
+        },
+        "scope": "self",
     }
 
 
@@ -1849,13 +1876,22 @@ def get_console_logs(
         result = client.list_logs(
             session_cookie, user_id, source_role, page=page, page_size=page_size, **filters,
         )
-        stat_filters_complete = not (request_id or upstream_request_id)
+        stat_filters_complete = log_type in {0, 2} and not (request_id or upstream_request_id)
         result["stat"] = (
             client.log_stat(session_cookie, user_id, source_role, **filters)
             if stat_filters_complete
             else None
         )
         result["stat_filters_complete"] = stat_filters_complete
+        result["stat_scope"] = "consume_only"
+        result["rate_window_seconds"] = 60
+        result["stat_unavailable_reason"] = (
+            "request_id_filter"
+            if request_id or upstream_request_id
+            else "non_consume_type"
+            if log_type not in {0, 2}
+            else ""
+        )
         result["quota_per_unit"] = client.status(session_cookie, user_id)["quota_per_unit"]
         result["scope"] = "global" if source_role >= 10 else "self"
         return result
@@ -1881,7 +1917,15 @@ def dashboard_summary(user: AuthenticatedUser) -> dict[str, Any]:
         audience=audience,
     )
     visible_channel_ids = {int(item["channel_id"]) for item in visible}
-    result = repository().summary(channel_ids=visible_channel_ids)
+    result = repository().summary(
+        channel_ids=visible_channel_ids,
+        include_operational_incidents=audience != "viewer",
+    )
+    result.setdefault("resources", {})["thresholds"] = {
+        "system_cpu": float(values.get("system_cpu_threshold", 85)),
+        "system_memory": float(values.get("system_memory_threshold", 85)),
+        "system_disk": float(values.get("system_disk_threshold", 80)),
+    }
     if audience == "viewer":
         result.get("channel_sync", {}).pop("last_error", None)
     provider_visible = bool(
@@ -1937,6 +1981,8 @@ def viewer_channel_payload(item: dict[str, Any]) -> dict[str, Any]:
         "models": list(item.get("models") or []),
         "group": item.get("group", ""),
         "synced_at": item.get("synced_at", 0),
+        "stale_after_seconds": item.get("stale_after_seconds", 900),
+        "slow_after_seconds": item.get("slow_after_seconds", 30),
         "latest": viewer_observation_payload(item.get("latest")),
         "history": [
             payload
@@ -2028,9 +2074,16 @@ def channels(
     if runtime.settings is None:
         if user["role"] == "viewer":
             raise HTTPException(status_code=503, detail="channel visibility settings are unavailable")
+        retention_days = int(runtime._bootstrap_settings().get("retention_days", 90))
+        for item in items:
+            item.setdefault("availability", {})["retention_days"] = retention_days
         return {"items": items}
+    values = runtime.settings.runtime_values()
     audience = "viewer" if user["role"] == "viewer" else "admin"
     items = runtime.settings.decorate_channels(items, audience=audience)
+    retention_days = int(values.get("retention_days", 90))
+    for item in items:
+        item.setdefault("availability", {})["retention_days"] = retention_days
     if audience == "viewer":
         items = [viewer_channel_payload(item) for item in items]
     return {"items": items}
@@ -2074,7 +2127,7 @@ def logs(
         )
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
-    return repository().logs(
+    result = repository().logs(
         limit=limit,
         offset=offset,
         channel_id=channel_id,
@@ -2084,6 +2137,16 @@ def logs(
         start_timestamp=start,
         end_timestamp=end,
     )
+    values = runtime.settings.runtime_values() if runtime.settings is not None else runtime._bootstrap_settings()
+    excluded = values.get("excluded_token_names", "")
+    result["data_scope"] = "user_requests"
+    result["excluded_token_names"] = [
+        str(item).strip()
+        for item in (excluded if isinstance(excluded, list) else str(excluded).split(","))
+        if str(item).strip()
+    ]
+    result["retention_days"] = int(values.get("retention_days", 90))
+    return result
 
 
 @app.get("/api/resources")
@@ -2103,7 +2166,21 @@ def resources(
         )
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
-    return repository().resources(start_timestamp=start, end_timestamp=end, all_time=is_all)
+    values = runtime.settings.runtime_values() if runtime.settings is not None else runtime._bootstrap_settings()
+    sampling_interval = int(values.get("resource_interval_seconds", 60))
+    result = repository().resources(
+        start_timestamp=start,
+        end_timestamp=end,
+        all_time=is_all,
+        sampling_interval_seconds=sampling_interval,
+    )
+    result["retention_days"] = int(values.get("retention_days", 90))
+    result["thresholds"] = {
+        "system_cpu": float(values.get("system_cpu_threshold", 85)),
+        "system_memory": float(values.get("system_memory_threshold", 85)),
+        "system_disk": float(values.get("system_disk_threshold", 80)),
+    }
+    return result
 
 
 @app.get("/api/incidents")
@@ -2132,7 +2209,7 @@ def incidents(
         )
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
-    return repository().incidents(
+    result = repository().incidents(
         status=status,
         severity=severity,
         category=category,
@@ -2143,6 +2220,9 @@ def incidents(
         limit=limit,
         offset=offset,
     )
+    values = runtime.settings.runtime_values() if runtime.settings is not None else runtime._bootstrap_settings()
+    result["retention_days"] = int(values.get("incident_retention_days", 365))
+    return result
 
 
 @app.post("/api/incidents/{incident_id}/acknowledge")
@@ -2198,7 +2278,7 @@ def notification_outbox(
         raise HTTPException(status_code=422, detail=str(error)) from error
     store = StateStore(runtime.state_db)
     try:
-        return store.notifications(
+        result = store.notifications(
             status=status,
             destination=destination,
             query=query,
@@ -2207,6 +2287,9 @@ def notification_outbox(
             start_timestamp=start,
             end_timestamp=end,
         )
+        values = runtime.settings.runtime_values() if runtime.settings is not None else runtime._bootstrap_settings()
+        result["retention_days"] = int(values.get("notification_retention_days", 30))
+        return result
     finally:
         store.connection.close()
 

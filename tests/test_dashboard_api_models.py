@@ -252,6 +252,10 @@ class DashboardApiModelTests(unittest.TestCase):
             }
         )
         self.assertEqual("Codex", token.name)
+        unlimited = ConsoleTokenPayload.model_validate(
+            {"name": "Unlimited", "remain_quota": -500000, "expired_time": -1, "unlimited_quota": True}
+        )
+        self.assertEqual(-500000, unlimited.remain_quota)
         self.assertEqual(1, ConsoleTokenStatusPayload.model_validate({"status": 1}).status)
         self.assertEqual([7, 8], ConsoleBatchPayload.model_validate({"ids": [7, 7, 8]}).ids)
 

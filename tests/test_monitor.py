@@ -759,6 +759,23 @@ class NotificationTests(unittest.TestCase):
         self.assertIn("1 项资源超过阈值", body)
         self.assertIn("🔴 内存 75.0%", body)
 
+    def test_periodic_report_uses_strict_exceeds_threshold_semantics(self):
+        subject, body = newapi_monitor.build_periodic_report(
+            [ChannelObservation(1, "Exact", True, 30.0, "ok")],
+            [newapi_monitor.LatencySummary(1, "Exact", "gpt", 1, 60.0, 60.0, 1000.0, 0)],
+            {"system_memory": 70.0},
+            {"container_status": "running", "container_restarts": 0},
+            slow_seconds=60,
+            channel_slow_seconds=30,
+            period_seconds=3600,
+            resource_thresholds={"system_memory": 70.0},
+            generated_at=1_750_000_000,
+        )
+
+        self.assertEqual("周期报告 · 运行正常", subject)
+        self.assertNotIn("探测偏慢", body)
+        self.assertNotIn("超过阈值", body)
+
     def test_wecom_application_fetches_token_and_sends_text_message(self):
         notifier = WeComAppNotifier("ww-test", 1000004, "app-secret", "@all", "", "")
 

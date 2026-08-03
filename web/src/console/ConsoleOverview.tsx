@@ -4,7 +4,7 @@ import { getLanguage, t } from '../i18n'
 import { consoleApi } from './api'
 import { ConsoleBadge, ConsoleEmpty, ConsoleError, ConsoleLoading, ConsoleMetric } from './ConsoleCommon'
 import type { ConsoleOverview as ConsoleOverviewData, ConsolePageKey } from './types'
-import { compactNumber, quotaText } from './utils'
+import { numberText, quotaText } from './utils'
 
 function dateTime(timestamp: number) {
   return new Intl.DateTimeFormat(getLanguage() === 'en' ? 'en-US' : 'zh-CN', {
@@ -39,9 +39,9 @@ export function ConsoleOverview({
   return <div className="console-page console-overview-page">
     <section className="console-metric-grid">
       <ConsoleMetric icon={<CircleDollarSign size={19} />} label={t('可用额度')} value={quotaText(data.user.quota, unit)} detail={`${t('累计使用')} ${quotaText(data.user.used_quota, unit)}`} tone="green" />
-      <ConsoleMetric icon={<Gauge size={19} />} label={t('累计请求')} value={compactNumber(data.user.request_count)} detail={`${t('最近 24 小时 RPM')} ${compactNumber(data.usage_24h.rpm)}`} tone="blue" />
-      {pages.keys !== false && <ConsoleMetric icon={<KeyRound size={19} />} label={t('API 密钥')} value={compactNumber(data.keys.total)} detail={`${t('当前页启用')} ${activeKeys}/${data.keys.items.length}`} tone="amber" />}
-      <ConsoleMetric icon={<Boxes size={19} />} label={t('可用模型')} value={compactNumber(data.models.total)} detail={data.user.group || t('默认分组')} />
+      <ConsoleMetric icon={<Gauge size={19} />} label={t('账号累计请求')} value={numberText(data.user.request_count)} detail={`${t('当前 RPM')} ${numberText(data.usage_24h.rpm)}`} tone="blue" />
+      {pages.keys !== false && <ConsoleMetric icon={<KeyRound size={19} />} label={t('API 密钥')} value={numberText(data.keys.total)} detail={`${t('当前页启用')} ${activeKeys}/${data.keys.items.length}`} tone="amber" />}
+      <ConsoleMetric icon={<Boxes size={19} />} label={t('可用模型')} value={numberText(data.models.total)} detail={data.user.group || t('默认分组')} />
     </section>
 
     <section className="console-overview-grid">
@@ -49,9 +49,9 @@ export function ConsoleOverview({
         <div className="console-panel-head"><div><span className="eyebrow">ACCOUNT SNAPSHOT</span><h3>{t('账号运行概览')}</h3></div><ConsoleBadge tone={data.user.status === 1 ? 'green' : 'red'}>{data.user.status === 1 ? t('正常') : t('已停用')}</ConsoleBadge></div>
         <div className="console-account-identity"><span>{(data.user.display_name || data.user.username).slice(0, 2).toUpperCase()}</span><div><strong>{data.user.display_name || data.user.username}</strong><small>@{data.user.username} · {data.user.group || t('默认分组')}</small></div></div>
         <dl className="console-detail-list">
-          <div><dt>{t('数据范围')}</dt><dd>{data.scope === 'global' ? t('全局管理视图') : t('仅当前账号')}</dd></div>
+          <div><dt>{t('数据范围')}</dt><dd>{t('仅当前账号')}</dd></div>
           <div><dt>{t('服务版本')}</dt><dd>{data.system.version || '—'}</dd></div>
-          <div><dt>{t('24 小时用量')}</dt><dd>{quotaText(data.usage_24h.quota, unit)}</dd></div>
+          <div><dt>{t('24 小时消费额度')}</dt><dd>{quotaText(data.usage_24h.quota, unit)}</dd></div>
           <div><dt>{t('最后同步')}</dt><dd>{dateTime(data.generated_at)}</dd></div>
         </dl>
         {pages.analytics !== false && <button className="console-action-link" type="button" onClick={() => onNavigate('analytics')}>{t('打开数据看板')}<ArrowRight size={15} /></button>}
