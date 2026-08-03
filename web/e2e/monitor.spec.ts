@@ -83,6 +83,25 @@ const systemStatus = {
   timestamp: now,
 };
 
+const analyticsSeries = Array.from({ length: 13 }, (_, index) => ({
+  created_at: now,
+  username: 'root',
+  model_name: `model-${index + 1}`,
+  count: index + 1,
+  quota: 100 - index,
+  token_used: (index + 1) * 10,
+}));
+
+const analyticsFlow = [
+  { username: 'root', node_name: 'node-a', token_id: 1, token_name: 'main', use_group: 'default', channel_id: 1, channel_name: 'one', model_name: 'model-1', count: 4, quota: 400, token_used: 40 },
+  { username: 'root', node_name: 'node-b', token_id: 1, token_name: 'main', use_group: 'default', channel_id: 2, channel_name: 'two', model_name: 'model-1', count: 3, quota: 300, token_used: 30 },
+  ...Array.from({ length: 13 }, (_, index) => ({
+    username: 'root', node_name: 'node-a', token_id: index + 2, token_name: `key-${index + 2}`,
+    use_group: 'default', channel_id: 1, channel_name: 'one', model_name: `model-${index + 1}`,
+    count: index + 1, quota: 49 - index, token_used: index + 1,
+  })),
+];
+
 function json(route: Route, body: unknown, status = 200) {
   return route.fulfill({
     status,
@@ -127,6 +146,24 @@ async function mockMonitorApi(page: Page, role: Role, authenticated = true) {
     if (path === 'access/users') return json(route, { items: [] });
     if (path === 'channel-settings') return json(route, channels);
     if (path === 'provider-status/openai') return json(route, { available: false });
+    if (path === 'console/analytics') return json(route, {
+      start_timestamp: now - 86_400,
+      end_timestamp: now,
+      scope: url.searchParams.get('scope') === 'self' ? 'self' : 'global',
+      series: analyticsSeries,
+      flow: analyticsFlow,
+      stat: { quota: 1300, rpm: 2, tpm: 300 },
+      summary: {
+        requests: analyticsSeries.reduce((total, item) => total + item.count, 0),
+        quota: 1300,
+        attributed_quota: 1222,
+        unattributed_quota: 78,
+        flow_quota: 1259,
+        tokens: analyticsSeries.reduce((total, item) => total + item.token_used, 0),
+        models: analyticsSeries.length,
+      },
+      quota_per_unit: 500000,
+    });
 
     return json(route, { detail: `Unhandled E2E API route: ${request.method()} ${path}` }, 404);
   });
@@ -177,4 +214,18 @@ test('退出后刷新仍保持未登录状态', async ({ page }) => {
   await page.reload();
   await expect(page.getByRole('heading', { name: 'API 服务中心' })).toBeVisible();
   await expect(page.getByRole('heading', { name: '服务运行态势' })).toHaveCount(0);
+});
+
+test('数据看板合并隐藏流向并让可见额度总量闭合', async ({ page }) => {
+  await mockMonitorApi(page, 'admin');
+  await page.goto('/monitor/console/analytics');
+
+  await expect(page.getByRole('heading', { name: '数据看板' })).toBeVisible();
+  await expect(page.getByRole('tab', { name: '全局' })).toHaveAttribute('aria-selected', 'true');
+  await expect(page.getByRole('tab', { name: '当前账号' })).toBeVisible();
+  await expect(page.getByText('总计 $0.0026')).toHaveCount(2);
+  await expect(page.getByText('其他 1 个模型')).toBeVisible();
+  await expect(page.getByText('其他 2 个流向')).toBeVisible();
+  await expect(page.getByText('最新请求待归集')).toHaveCount(2);
+  await expect(page.getByText('$0.0014')).toBeVisible();
 });

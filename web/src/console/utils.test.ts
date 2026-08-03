@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { buildAnalyticsModelTimeline, buildAnalyticsTimeline, logsToCsv } from './utils'
+import { buildAnalyticsFlowRows, buildAnalyticsModelTimeline, buildAnalyticsTimeline, summarizeFlowOverflow, logsToCsv } from './utils'
 
 describe('customer console analytics utilities', () => {
   test('groups duplicate time buckets without losing request or token totals', () => {
@@ -43,6 +43,40 @@ describe('customer console analytics utilities', () => {
     expect(result.points[0].values['其他模型']).toBe(10)
     expect(result.points[0].values[result.otherModelKey!]).toBe(4)
     expect(result.points[0].total).toBe(19)
+  })
+
+  test('merges flow rows split only by hidden channel and node dimensions', () => {
+    const result = buildAnalyticsFlowRows([
+      { username: 'alice', node_name: 'node-a', token_id: 7, token_name: 'main', use_group: 'default', channel_id: 1, channel_name: 'one', model_name: 'gpt-5.4', token_used: 10, count: 1, quota: 30 },
+      { username: 'alice', node_name: 'node-b', token_id: 7, token_name: 'main', use_group: 'default', channel_id: 2, channel_name: 'two', model_name: 'gpt-5.4', token_used: 20, count: 2, quota: 70 },
+      { username: 'bob', node_name: 'node-a', token_id: 8, token_name: 'backup', use_group: 'default', channel_id: 1, channel_name: 'one', model_name: 'gpt-5.5', token_used: 5, count: 1, quota: 10 },
+    ])
+
+    expect(result).toEqual([
+      { key: 'token:7\u0000default\u0000gpt-5.4', username: 'alice', token_id: 7, token_name: 'main', use_group: 'default', model_name: 'gpt-5.4', token_used: 30, count: 3, quota: 100 },
+      { key: 'token:8\u0000default\u0000gpt-5.5', username: 'bob', token_id: 8, token_name: 'backup', use_group: 'default', model_name: 'gpt-5.5', token_used: 5, count: 1, quota: 10 },
+    ])
+  })
+
+  test('summarizes hidden flow rows without losing quota or requests', () => {
+    const rows = Array.from({ length: 14 }, (_, index) => ({
+      key: `token:${index}`,
+      username: 'alice',
+      token_id: index,
+      token_name: `key-${index}`,
+      use_group: 'default',
+      model_name: 'gpt-5.4',
+      token_used: index + 1,
+      count: index + 2,
+      quota: 100 - index,
+    }))
+
+    expect(summarizeFlowOverflow(rows, 12)).toEqual({
+      count: 2,
+      token_used: 27,
+      requests: 29,
+      quota: 175,
+    })
   })
 
   test('exports logs as safe CSV with quotes and newlines escaped', () => {

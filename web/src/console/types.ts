@@ -138,7 +138,15 @@ export type ConsoleAnalytics = {
   series: ConsoleSeriesItem[]
   flow: ConsoleFlowItem[]
   stat: { quota: number; rpm: number; tpm: number }
-  summary: { requests: number; quota: number; tokens: number; models: number }
+  summary: {
+    requests: number
+    quota: number
+    attributed_quota: number
+    unattributed_quota: number
+    flow_quota: number
+    tokens: number
+    models: number
+  }
   quota_per_unit: number
 }
 

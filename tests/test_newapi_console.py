@@ -150,6 +150,52 @@ class NewAPIConsoleClientTests(unittest.TestCase):
         self.assertIn("/api/data/flow?", urls[1])
         self.assertIn("/api/log/stat?", urls[2])
 
+    def test_analytics_uses_log_quota_as_total_and_reports_projection_gap(self):
+        opener = RecordingOpener([
+            FakeResponse({"success": True, "data": [
+                {"created_at": 100, "model_name": "gpt-5.4", "count": 2, "quota": 50, "token_used": 20},
+            ]}),
+            FakeResponse({"success": True, "data": [
+                {"token_id": 3, "use_group": "default", "model_name": "gpt-5.4", "count": 2, "quota": 40, "token_used": 20},
+            ]}),
+            FakeResponse({"success": True, "data": {"quota": 70, "rpm": 2, "tpm": 20}}),
+        ])
+        client = NewAPIConsoleClient("https://newapi.example", opener=opener)
+
+        result = client.analytics("session", 9, 1, 100, 200)
+
+        self.assertEqual(70, result["summary"]["quota"])
+        self.assertEqual(50, result["summary"]["attributed_quota"])
+        self.assertEqual(20, result["summary"]["unattributed_quota"])
+        self.assertEqual(40, result["summary"]["flow_quota"])
+
+    def test_admin_can_query_their_own_analytics_scope(self):
+        opener = RecordingOpener([
+            FakeResponse({"success": True, "data": []}),
+            FakeResponse({"success": True, "data": []}),
+            FakeResponse({"success": True, "data": {"quota": 0, "rpm": 0, "tpm": 0}}),
+        ])
+        client = NewAPIConsoleClient("https://newapi.example", opener=opener)
+
+        result = client.analytics("session", 10, 10, 100, 200, scope="self")
+
+        self.assertEqual("self", result["scope"])
+        self.assertTrue(all("/self" in request.full_url for request, _ in opener.requests))
+        self.assertTrue(all("username=" not in request.full_url for request, _ in opener.requests))
+
+    def test_analytics_rejects_invalid_or_unauthorized_scope_before_request(self):
+        opener = RecordingOpener([])
+        client = NewAPIConsoleClient("https://newapi.example", opener=opener)
+
+        with self.assertRaises(NewAPIConsoleError) as unauthorized:
+            client.analytics("session", 9, 1, 100, 200, scope="global")
+        with self.assertRaises(NewAPIConsoleError) as invalid:
+            client.analytics("session", 9, 10, 100, 200, scope="invalid")
+
+        self.assertEqual(403, unauthorized.exception.status_code)
+        self.assertEqual(400, invalid.exception.status_code)
+        self.assertEqual([], opener.requests)
+
     def test_models_uses_the_current_users_authoritative_model_list(self):
         opener = RecordingOpener([
             FakeResponse({

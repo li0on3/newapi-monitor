@@ -1,6 +1,46 @@
-import type { ConsoleLog, ConsoleSeriesItem } from './types'
+import type { ConsoleFlowItem, ConsoleLog, ConsoleSeriesItem } from './types'
 
 export type AnalyticsMetric = 'requests' | 'tokens' | 'quota'
+
+export type AnalyticsFlowRow = Pick<ConsoleFlowItem,
+  'username' | 'token_id' | 'token_name' | 'use_group' | 'model_name' | 'token_used' | 'count' | 'quota'
+> & { key: string }
+
+export function buildAnalyticsFlowRows(flow: ConsoleFlowItem[]): AnalyticsFlowRow[] {
+  const rows = new Map<string, AnalyticsFlowRow>()
+  for (const item of flow) {
+    const identity = item.token_id > 0 ? `token:${item.token_id}` : `user:${item.username}`
+    const key = `${identity}\u0000${item.use_group}\u0000${item.model_name}`
+    const current = rows.get(key) || {
+      key,
+      username: item.username,
+      token_id: item.token_id,
+      token_name: item.token_name,
+      use_group: item.use_group,
+      model_name: item.model_name,
+      token_used: 0,
+      count: 0,
+      quota: 0,
+    }
+    current.token_used += Math.max(0, Number(item.token_used) || 0)
+    current.count += Math.max(0, Number(item.count) || 0)
+    current.quota += Math.max(0, Number(item.quota) || 0)
+    rows.set(key, current)
+  }
+  return [...rows.values()].sort((left, right) => right.quota - left.quota || left.key.localeCompare(right.key))
+}
+
+export function summarizeFlowOverflow(rows: AnalyticsFlowRow[], visibleLimit: number) {
+  return rows.slice(Math.max(0, visibleLimit)).reduce(
+    (summary, row) => ({
+      count: summary.count + 1,
+      token_used: summary.token_used + row.token_used,
+      requests: summary.requests + row.count,
+      quota: summary.quota + row.quota,
+    }),
+    { count: 0, token_used: 0, requests: 0, quota: 0 },
+  )
+}
 
 export function buildAnalyticsTimeline(series: ConsoleSeriesItem[]) {
   const buckets = new Map<number, { timestamp: number; requests: number; quota: number; tokens: number }>()

@@ -308,26 +308,37 @@ class NewAPIConsoleClient:
         start_timestamp: int,
         end_timestamp: int,
         username: str = "",
+        scope: str = "auto",
     ) -> dict[str, Any]:
         is_admin = source_role >= 10
+        requested_scope = scope.strip().lower()
+        if requested_scope not in {"auto", "global", "self"}:
+            raise NewAPIConsoleError(400, "invalid analytics scope")
+        if requested_scope == "global" and not is_admin:
+            raise NewAPIConsoleError(403, "global analytics requires an administrator")
+        use_global_scope = is_admin and requested_scope != "self"
         query = {
             "start_timestamp": start_timestamp,
             "end_timestamp": end_timestamp,
-            "username": username if is_admin else "",
+            "username": username if use_global_scope else "",
         }
-        series_path = "/api/data/" if is_admin else "/api/data/self"
-        flow_path = "/api/data/flow" if is_admin else "/api/data/flow/self"
-        stat_path = "/api/log/stat" if is_admin else "/api/log/self/stat"
+        series_path = "/api/data/" if use_global_scope else "/api/data/self"
+        flow_path = "/api/data/flow" if use_global_scope else "/api/data/flow/self"
+        stat_path = "/api/log/stat" if use_global_scope else "/api/log/self/stat"
         series_raw = self._request(session_cookie, user_id, "GET", series_path, query=query)
         flow_raw = self._request(session_cookie, user_id, "GET", flow_path, query=query)
         stat_raw = self._request(session_cookie, user_id, "GET", stat_path, query=query)
         series = [self._series_item(item) for item in series_raw] if isinstance(series_raw, list) else []
         flow = [self._flow_item(item) for item in flow_raw] if isinstance(flow_raw, list) else []
         stat = stat_raw if isinstance(stat_raw, dict) else {}
+        attributed_quota = sum(item["quota"] for item in series)
+        flow_quota = sum(item["quota"] for item in flow)
+        log_quota = self._number(stat.get("quota"))
+        total_quota = max(attributed_quota, flow_quota, log_quota)
         return {
             "start_timestamp": start_timestamp,
             "end_timestamp": end_timestamp,
-            "scope": "global" if is_admin else "self",
+            "scope": "global" if use_global_scope else "self",
             "series": series,
             "flow": flow,
             "stat": {
@@ -337,7 +348,10 @@ class NewAPIConsoleClient:
             },
             "summary": {
                 "requests": sum(item["count"] for item in series),
-                "quota": sum(item["quota"] for item in series),
+                "quota": total_quota,
+                "attributed_quota": attributed_quota,
+                "unattributed_quota": max(0, total_quota - attributed_quota),
+                "flow_quota": flow_quota,
                 "tokens": sum(item["token_used"] for item in series),
                 "models": len({item["model_name"] for item in series if item["model_name"]}),
             },
