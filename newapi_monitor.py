@@ -45,6 +45,7 @@ from monitoring_core.alerting import (
     summarize_logs,
 )
 from monitoring_core.delivery import AlertPublisher, NotificationOutboxWorker
+from monitoring_core.cpa_quota import CpaQuotaAlertTracker, CpaQuotaClient, CpaQuotaError, forecast_quota
 from monitoring_core.policies import channel_maintenance_state, quiet_hours_defer_until
 from monitoring_core.probe_protocol import ProbeProtocolValidator, validate_probe_json
 from monitoring_core.state_store import StateStore
@@ -641,6 +642,15 @@ class Config:
     openai_status_include_in_overall: bool
     openai_status_admin_visible: bool
     openai_status_viewer_visible: bool
+    cpa_quota_enabled: bool
+    cpa_base_url: str
+    cpa_management_key: str
+    cpa_quota_interval_seconds: int
+    cpa_quota_timeout_seconds: int
+    cpa_quota_alert_remaining_percent: float
+    cpa_quota_recovery_remaining_percent: float
+    cpa_quota_repeat_seconds: int
+    cpa_quota_activity_enabled: bool
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -802,6 +812,15 @@ class Config:
             openai_status_include_in_overall=bool(value("openai_status_include_in_overall", "OPENAI_STATUS_INCLUDE_IN_OVERALL", False)),
             openai_status_admin_visible=bool(value("openai_status_admin_visible", "OPENAI_STATUS_ADMIN_VISIBLE", True)),
             openai_status_viewer_visible=bool(value("openai_status_viewer_visible", "OPENAI_STATUS_VIEWER_VISIBLE", True)),
+            cpa_quota_enabled=bool(value("cpa_quota_enabled", "CPA_QUOTA_ENABLED", False)),
+            cpa_base_url=str(value("cpa_base_url", "CPA_BASE_URL", "http://host.docker.internal:8317")).rstrip("/"),
+            cpa_management_key=str(value("cpa_management_key", "CPA_MANAGEMENT_KEY", "")),
+            cpa_quota_interval_seconds=max(300, int(value("cpa_quota_interval_seconds", "CPA_QUOTA_INTERVAL_SECONDS", 1800))),
+            cpa_quota_timeout_seconds=max(3, min(60, int(value("cpa_quota_timeout_seconds", "CPA_QUOTA_TIMEOUT_SECONDS", 30)))),
+            cpa_quota_alert_remaining_percent=max(1.0, min(50.0, float(value("cpa_quota_alert_remaining_percent", "CPA_QUOTA_ALERT_REMAINING_PERCENT", 20.0)))),
+            cpa_quota_recovery_remaining_percent=max(1.0, min(100.0, float(value("cpa_quota_recovery_remaining_percent", "CPA_QUOTA_RECOVERY_REMAINING_PERCENT", 25.0)))),
+            cpa_quota_repeat_seconds=max(1800, int(value("cpa_quota_repeat_seconds", "CPA_QUOTA_REPEAT_SECONDS", 21600))),
+            cpa_quota_activity_enabled=bool(value("cpa_quota_activity_enabled", "CPA_QUOTA_ACTIVITY_ENABLED", True)),
         )
 
     def validate(self) -> None:
@@ -810,6 +829,8 @@ class Config:
             raise ValueError("CHANNEL_FAILURE_WINDOW_THRESHOLD must not exceed window size")
         if self.latency_failure_threshold > self.latency_window_size:
             raise ValueError("LATENCY_FAILURE_THRESHOLD must not exceed window size")
+        if self.cpa_quota_recovery_remaining_percent <= self.cpa_quota_alert_remaining_percent:
+            raise ValueError("CPA quota recovery threshold must exceed the alert threshold")
         if not self.access_token:
             missing.append("NEW_API_ACCESS_TOKEN")
         if self.user_id <= 0:
@@ -830,6 +851,11 @@ class Config:
                 missing.append("WECOM_APP_SECRET")
             if not any((self.wecom_to_user, self.wecom_to_party, self.wecom_to_tag)):
                 missing.append("WECOM_RECIPIENT")
+        if self.cpa_quota_enabled:
+            if not self.cpa_base_url:
+                missing.append("CPA_BASE_URL")
+            if not self.cpa_management_key:
+                missing.append("CPA_MANAGEMENT_KEY")
         if self.wecom_webhook_enabled and not self.wecom_webhook_url:
             missing.append("WECOM_WEBHOOK_URL")
         if self.feishu_app_enabled:
@@ -1838,12 +1864,25 @@ class MonitorApp:
                 "OpenAI 官方状态监控已关闭，该事件因监控范围变更结束。",
             )
             self.store.set_json("openai_status_state", {})
+        if not config.cpa_quota_enabled:
+            self.store.resolve_open_incidents(
+                "cpa:",
+                "CPA 周配额监控已关闭，该事件因监控范围变更结束。",
+            )
+            self.store.remove_collector("cpa_quota")
+            collector_alert_states = dict(self.store.get_json("collector_alert_states", {}))
+            collector_alert_states.pop("cpa_quota", None)
+            self.store.set_json("collector_alert_states", collector_alert_states)
         self.notifier = NotificationDispatcher(config)
         self.alert_publisher = AlertPublisher(
             self.store,
             self.notifier.destinations,
             notifiable_kinds=(
-                {"channel_failed", "channel_recovered", "latency_high", "latency_recovered"}
+                {
+                    "channel_failed", "channel_recovered", "latency_high", "latency_recovered",
+                    "cpa_quota_low", "cpa_quota_recovered",
+                    "cpa_quota_collection_failed", "cpa_quota_collection_recovered",
+                }
                 if config.experience_alerts_only else None
             ),
         )
@@ -1878,6 +1917,20 @@ class MonitorApp:
             recovery_threshold=config.openai_status_recovery_threshold,
             alerts_enabled=config.openai_status_alert_enabled,
         )
+        self.cpa_quota_client = (
+            CpaQuotaClient(
+                config.cpa_base_url,
+                config.cpa_management_key,
+                timeout_seconds=config.cpa_quota_timeout_seconds,
+            )
+            if config.cpa_quota_enabled else None
+        )
+        self.cpa_quota_tracker = CpaQuotaAlertTracker(
+            self.store.get_json("cpa_quota_alert_states", {}),
+            threshold_percent=config.cpa_quota_alert_remaining_percent,
+            recovery_percent=config.cpa_quota_recovery_remaining_percent,
+            repeat_seconds=config.cpa_quota_repeat_seconds,
+        )
         self.resource_collector = ResourceCollector(config.disk_path, config.docker_container_names)
         self.service_tracker = ServiceStateTracker(str(self.store.get_json("service_state", "unknown")))
         self.latency_tracker = LatencyStateTracker(
@@ -1909,6 +1962,11 @@ class MonitorApp:
             self.collector_thresholds["openai_status"] = max(
                 90,
                 config.openai_status_interval_seconds * 3,
+            )
+        if config.cpa_quota_enabled:
+            self.collector_thresholds["cpa_quota"] = max(
+                1800,
+                config.cpa_quota_interval_seconds * 3,
             )
         for collector_name, threshold in self.collector_thresholds.items():
             self.store.ensure_collector(collector_name, threshold)
@@ -2181,6 +2239,142 @@ class MonitorApp:
         )
         return snapshot
 
+    def collect_cpa_quota(self) -> dict[str, Any]:
+        if self.cpa_quota_client is None:
+            raise CpaQuotaError("CPA weekly quota monitoring is disabled")
+        observed_at = int(time.time())
+        credentials = self.cpa_quota_client.credentials()
+        if not credentials:
+            raise CpaQuotaError("CPA returned no supported active Codex or Antigravity credentials")
+        removed_accounts = self.store.reconcile_cpa_quota_accounts(
+            {credential.credential_id for credential in credentials}
+        )
+        if removed_accounts:
+            for credential_id in removed_accounts:
+                self.store.resolve_open_incidents(
+                    f"cpa:quota:{credential_id}:",
+                    "CPA 凭据已禁用或移除，该配额事件因监控范围变更结束。",
+                    now=observed_at,
+                )
+                self.cpa_quota_tracker.states = {
+                    key: value
+                    for key, value in self.cpa_quota_tracker.states.items()
+                    if not key.startswith(f"{credential_id}:")
+                }
+            LOGGER.info("removed %d inactive CPA quota accounts from the active scope", len(removed_accounts))
+
+        previous_states = json.loads(json.dumps(self.cpa_quota_tracker.states))
+        events: list[AlertEvent] = []
+        successes = 0
+        failures: list[dict[str, str]] = []
+        window_count = 0
+        for credential in credentials:
+            try:
+                windows = self.cpa_quota_client.weekly_windows(credential, observed_at)
+                if not windows:
+                    raise CpaQuotaError("credential returned no weekly quota window")
+                activity: dict[str, Any] = {}
+                if self.config.cpa_quota_activity_enabled:
+                    try:
+                        activity = self.cpa_quota_client.activity(credential.source, now=observed_at)
+                    except CpaQuotaError as error:
+                        LOGGER.warning(
+                            "CPA activity context unavailable: provider=%s account=%s error=%s",
+                            credential.provider,
+                            credential.account_label,
+                            error,
+                        )
+                samples = [{**window, "activity": activity} for window in windows]
+                active_window_states = {
+                    f"{credential.credential_id}:{sample['window_id']}"
+                    for sample in samples
+                }
+                removed_window_states = [
+                    state_key
+                    for state_key in self.cpa_quota_tracker.states
+                    if state_key.startswith(f"{credential.credential_id}:")
+                    and state_key not in active_window_states
+                ]
+                for state_key in removed_window_states:
+                    window_id = state_key.removeprefix(f"{credential.credential_id}:")
+                    self.store.resolve_open_incidents(
+                        f"cpa:quota:{credential.credential_id}:{window_id}",
+                        "CPA 周配额池已移除，该事件因监控范围变更结束。",
+                        now=observed_at,
+                    )
+                    self.cpa_quota_tracker.states.pop(state_key, None)
+                    previous_states.pop(state_key, None)
+                self.store.insert_cpa_quota_samples(samples)
+                self.store.record_cpa_quota_account(
+                    credential.credential_id,
+                    credential.provider,
+                    credential.account_label,
+                    success=True,
+                    observed_at=observed_at,
+                )
+                for sample in samples:
+                    history = self.store.cpa_quota_history(
+                        credential.credential_id,
+                        str(sample["window_id"]),
+                        since_timestamp=max(0, observed_at - 8 * 86_400),
+                    )
+                    forecast = forecast_quota(
+                        history,
+                        threshold_percent=self.config.cpa_quota_alert_remaining_percent,
+                        activity=activity,
+                    )
+                    events.extend(self.cpa_quota_tracker.evaluate(sample, forecast, now=observed_at))
+                successes += 1
+                window_count += len(samples)
+            except Exception as error:
+                self.store.record_cpa_quota_account(
+                    credential.credential_id,
+                    credential.provider,
+                    credential.account_label,
+                    success=False,
+                    error=str(error),
+                    observed_at=observed_at,
+                )
+                failures.append(
+                    {
+                        "provider": credential.provider,
+                        "account_label": credential.account_label,
+                        "error": str(error)[:500],
+                    }
+                )
+                LOGGER.warning(
+                    "CPA weekly quota collection failed: provider=%s account=%s error=%s",
+                    credential.provider,
+                    credential.account_label,
+                    error,
+                )
+
+        if successes == 0:
+            raise CpaQuotaError(f"all {len(credentials)} CPA quota credentials failed")
+        try:
+            self._send_events(events)
+        except Exception:
+            self.cpa_quota_tracker.states = previous_states
+            raise
+        self.store.set_json("cpa_quota_alert_states", self.cpa_quota_tracker.states)
+        result = {
+            "observed_at": observed_at,
+            "credential_count": len(credentials),
+            "success_count": successes,
+            "failure_count": len(failures),
+            "window_count": window_count,
+            "failures": failures,
+        }
+        self.store.set_json("cpa_quota_last_collection", result)
+        LOGGER.info(
+            "CPA weekly quota collection complete: credentials=%d success=%d failed=%d windows=%d",
+            len(credentials),
+            successes,
+            len(failures),
+            window_count,
+        )
+        return result
+
     def send_report(self) -> None:
         now = int(time.time())
         summary = self.store.latency_summary(now - self.config.report_interval_seconds, self.config.slow_request_seconds)
@@ -2234,6 +2428,7 @@ class MonitorApp:
         next_log = 0.0
         next_resource = 0.0
         next_openai_status = 0.0
+        next_cpa_quota = 0.0
         next_report = time.monotonic() + self.config.report_interval_seconds
         next_database_maintenance = 0.0
         try:
@@ -2276,6 +2471,20 @@ class MonitorApp:
                         self._record_collector_result("openai_status", False, str(error))
                         LOGGER.exception("OpenAI Status collection failed")
                     next_openai_status = now + self.config.openai_status_interval_seconds
+                refresh_requested_at = int(self.store.get_json("cpa_quota_refresh_requested_at", 0))
+                refresh_processed_at = int(self.store.get_json("cpa_quota_refresh_processed_at", 0))
+                cpa_refresh_due = refresh_requested_at > refresh_processed_at
+                if self.config.cpa_quota_enabled and (now >= next_cpa_quota or cpa_refresh_due):
+                    try:
+                        self.collect_cpa_quota()
+                        self._record_collector_result("cpa_quota", True)
+                    except Exception as error:
+                        self._record_collector_result("cpa_quota", False, str(error))
+                        LOGGER.exception("CPA weekly quota collection failed")
+                    finally:
+                        if cpa_refresh_due:
+                            self.store.set_json("cpa_quota_refresh_processed_at", refresh_requested_at)
+                    next_cpa_quota = now + self.config.cpa_quota_interval_seconds
                 if now >= next_report:
                     try:
                         self.send_report()

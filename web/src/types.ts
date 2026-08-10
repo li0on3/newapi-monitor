@@ -227,6 +227,109 @@ export type ProviderStatus = {
   monitored_component_ids?: string[];
 };
 
+export type CpaQuotaActivity = {
+  requests_1h: number;
+  requests_6h: number;
+  requests_24h: number;
+  tokens_1h: number;
+  tokens_6h: number;
+  tokens_24h: number;
+  pressure_ratio: number;
+};
+
+export type CpaQuotaForecast = {
+  status: 'collecting' | 'stable' | 'projected';
+  confidence: 'low' | 'medium' | 'high';
+  burn_percent_per_hour: number;
+  observed_burn_percent_per_hour: number;
+  seconds_to_threshold: number | null;
+  seconds_to_exhaustion: number | null;
+  threshold_at: number | null;
+  exhaustion_at: number | null;
+  reset_before_threshold: boolean;
+  reset_before_exhaustion: boolean;
+  sample_count: number;
+  sample_span_seconds: number;
+  pressure_ratio: number;
+};
+
+export type CpaQuotaHistoryPoint = {
+  observed_at: number;
+  remaining_percent: number;
+  used_percent: number;
+  reset_at: number;
+  activity?: Partial<CpaQuotaActivity>;
+};
+
+export type CpaQuotaWindow = {
+  credential_id: string;
+  provider: string;
+  account_label: string;
+  plan_label: string;
+  window_id: string;
+  window_name: string;
+  remaining_percent: number;
+  used_percent: number;
+  reset_at: number;
+  window_seconds: number;
+  observed_at: number;
+  activity: Partial<CpaQuotaActivity>;
+  history: CpaQuotaHistoryPoint[];
+  forecast: CpaQuotaForecast;
+  tone: 'healthy' | 'warning' | 'critical';
+};
+
+export type CpaQuotaAccount = {
+  credential_id: string;
+  provider: string;
+  account_label: string;
+  status: 'ok' | 'error';
+  last_attempt_at: number;
+  last_success_at: number;
+  consecutive_failures: number;
+  last_error: string;
+  windows: CpaQuotaWindow[];
+};
+
+export type CpaQuotaPayload = {
+  generated_at: number;
+  enabled: boolean;
+  configured: boolean;
+  source: 'cpa';
+  account_count: number;
+  window_count: number;
+  accounts: CpaQuotaAccount[];
+  interval_seconds: number;
+  repeat_seconds: number;
+  activity_enabled: boolean;
+  thresholds: {
+    alert_remaining_percent: number;
+    recovery_remaining_percent: number;
+  };
+  collector: {
+    status?: 'ok' | 'starting' | 'stale';
+    age_seconds?: number;
+    stale_after_seconds?: number;
+    last_success_at?: number;
+    consecutive_failures?: number;
+    last_error?: string;
+  };
+  last_collection: {
+    observed_at?: number;
+    credential_count?: number;
+    success_count?: number;
+    failure_count?: number;
+    window_count?: number;
+  };
+  summary: {
+    lowest_remaining_percent: number | null;
+    at_risk_windows: number;
+    healthy_windows: number;
+    error_accounts: number;
+    earliest_threshold_at: number;
+  };
+};
+
 export type LogItem = {
   created_at: number;
   channel_id: number;

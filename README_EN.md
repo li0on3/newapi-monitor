@@ -54,6 +54,7 @@ Every screenshot below is generated from the built-in synthetic demo dataset. It
 - Lets administrators configure separate administrator and regular-user channel scopes for Monitor Overview without stopping probes, log collection, or alerts.
 - Uses a neutral API Service Center identity for regular users, without New API branding or technical monitor modules; administrators and operators retain the full operations view.
 - Synchronizes OpenAI status, components, and incidents from the official JSON feed. A dedicated page separates workload-relevant components from global incidents, while the overview keeps only a compact contextual hint and real local probes remain authoritative.
+- Gives administrators an isolated CPA / CLIProxyAPI weekly-quota view for Codex and Antigravity accounts, with a default 20% alert, 25% recovery, and a non-alerting forecast based on real quota decline plus nearby request pressure.
 
 ## Quick Start
 
@@ -87,9 +88,11 @@ Publish `/monitor/` through an HTTPS reverse proxy and forward every nested path
 /monitor/incidents              Incidents
 /monitor/channels               Channel settings
 /monitor/upstream-status        OpenAI official status
+/monitor/cpa-quota              CPA weekly quota (administrators only)
 /monitor/system                 System settings
 /monitor/system/notifications   Notification center
 /monitor/system/providers       Upstream provider settings
+/monitor/system/cpa-quota       CPA weekly quota settings (administrators only)
 /monitor/system/console         New API page settings
 /monitor/console                Overview
 /monitor/deliveries             Alert Delivery Center (administrators only)
@@ -109,10 +112,10 @@ curl -fsS http://127.0.0.1:18081/api/health
 Healthy response:
 
 ```json
-{"status":"ok","timestamp":1784476800,"version":"1.12.1"}
+{"status":"ok","timestamp":1784476800,"version":"1.13.0"}
 ```
 
-Before the first-run wizard is completed, health returns HTTP 200 with `{"status":"setup_required","timestamp":1784476800,"version":"1.12.1"}` so orchestration remains healthy while collectors stay stopped. `version` comes from the read-only `VERSION` file inside the image and can be used for deployment and rollback verification.
+Before the first-run wizard is completed, health returns HTTP 200 with `{"status":"setup_required","timestamp":1784476800,"version":"1.13.0"}` so orchestration remains healthy while collectors stay stopped. `version` comes from the read-only `VERSION` file inside the image and can be used for deployment and rollback verification.
 
 HTTP 503 is returned when SQLite is unavailable, the monitoring worker has stopped, a collector has exceeded its dynamic stale threshold, the database exceeds its configured capacity, dead letters exist, or pending delivery is older than 15 minutes.
 
@@ -127,6 +130,10 @@ The overview also validates channel-catalog freshness. When synchronization is s
 | Resource sampling | 15 seconds |
 | Real channel probes | 5 minutes |
 | OpenAI official status | 60 seconds |
+| CPA weekly quota | 30 minutes; configurable down to 5 minutes |
+| CPA low-quota alert | Real remaining quota at or below 20% |
+| CPA low-quota recovery | Real remaining quota recovers to 25% |
+| CPA persistent reminder | At most once every 6 hours for the same incident |
 | Slow request | Any latency metric over 60 seconds |
 | Slow-request display | Total or first-token latency above 60 seconds; dashboard statistics only |
 | Severe first-token alert | At least 15 of the latest 20 measurable requests exceed 15 seconds |
@@ -144,7 +151,7 @@ The overview also validates channel-catalog freshness. When synchronization is s
 ## Data and Security
 
 - Prompt and response bodies are not stored. Only monitoring metrics and bounded error summaries are retained.
-- New API tokens, relay tokens, SMTP passwords, application secrets, webhook URLs, and signing secrets are encrypted in SQLite with `MONITOR_SECRET_KEY`.
+- New API tokens, relay tokens, the CPA management key, SMTP passwords, application secrets, webhook URLs, and signing secrets are encrypted in SQLite with `MONITOR_SECRET_KEY`.
 - The production container runs as non-root UID `10001`, with a read-only root filesystem and all Linux capabilities removed.
 - Docker access is restricted through a read-only Socket Proxy; the monitor does not mount the Docker socket directly.
 - State-changing APIs require authentication, role checks, strict Pydantic schemas, and a same-origin request header.
@@ -159,10 +166,11 @@ The overview also validates channel-catalog freshness. When synchronization is s
 - Configuration and role changes are audited, with secrets always masked.
 - Each OpenAI collection cycle only reads the fixed official `https://status.openai.com/api/v2/summary.json`, enforces response-size and timeout limits, and never accepts a configurable URL, preventing SSRF abuse.
 - Only the latest official-status snapshot is retained; incident progress is stored separately in the incident workspace, preventing unbounded SQLite growth at a 60-second polling interval.
+- The CPA weekly-quota page and APIs are administrator-only, and CPA incidents are isolated from New API Overall Status and the generic operator incident page. History stores only masked accounts, quota percentages, reset times, and aggregated request pressure, never `auth_index`, `project_id`, or upstream tokens.
 - Raw samples, resolved incidents, and notification delivery records have independent retention policies. Periodic pruning and WAL checkpoints bound storage growth, while System Settings shows database/WAL size, pending deliveries, and dead letters.
 - Log history uses ordered composite indexes for time and filter dimensions. Resource history aggregates bounded numeric buckets and returns the end-of-range container snapshot only on the final point, so long ranges do not depend on a large temporary filesystem.
 
-See [Data definitions and accuracy](docs/DATA_ACCURACY_EN.md) for authoritative sources, time ranges, attribution differences, and acceptance rules. See [New API pages architecture](docs/CUSTOMER_CONSOLE_EN.md) for API mapping, permission boundaries, and compatibility policy. See [SECURITY_EN.md](SECURITY_EN.md) for the wider security boundary, [ROADMAP_EN.md](ROADMAP_EN.md) for planned work, and [GITHUB_GUIDE_EN.md](GITHUB_GUIDE_EN.md) for the protected-branch workflow.
+See [Data definitions and accuracy](docs/DATA_ACCURACY_EN.md) for authoritative sources, time ranges, attribution differences, and acceptance rules. See [CPA weekly quota monitoring](docs/CPA_QUOTA_EN.md) for provider sources, forecast rules, and authorization isolation. See [New API pages architecture](docs/CUSTOMER_CONSOLE_EN.md) for API mapping, permission boundaries, and compatibility policy. See [SECURITY_EN.md](SECURITY_EN.md) for the wider security boundary, [ROADMAP_EN.md](ROADMAP_EN.md) for planned work, and [GITHUB_GUIDE_EN.md](GITHUB_GUIDE_EN.md) for the protected-branch workflow.
 
 ## Backup
 

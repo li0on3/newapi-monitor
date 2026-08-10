@@ -158,6 +158,41 @@ class StateStore:
             );
             CREATE INDEX IF NOT EXISTS idx_provider_status_time
                 ON provider_status_samples(provider, observed_at DESC, id DESC);
+
+            CREATE TABLE IF NOT EXISTS cpa_quota_accounts (
+                credential_id TEXT PRIMARY KEY,
+                provider TEXT NOT NULL,
+                account_label TEXT NOT NULL,
+                status TEXT NOT NULL,
+                last_attempt_at INTEGER NOT NULL,
+                last_success_at INTEGER NOT NULL DEFAULT 0,
+                consecutive_failures INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT NOT NULL DEFAULT '',
+                updated_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_cpa_quota_accounts_status
+                ON cpa_quota_accounts(status, updated_at DESC);
+
+            CREATE TABLE IF NOT EXISTS cpa_quota_samples (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                observed_at INTEGER NOT NULL,
+                credential_id TEXT NOT NULL,
+                provider TEXT NOT NULL,
+                account_label TEXT NOT NULL,
+                plan_label TEXT NOT NULL,
+                window_id TEXT NOT NULL,
+                window_name TEXT NOT NULL,
+                remaining_percent REAL NOT NULL,
+                used_percent REAL NOT NULL,
+                reset_at INTEGER NOT NULL,
+                window_seconds INTEGER NOT NULL,
+                activity_json TEXT NOT NULL DEFAULT '{}',
+                UNIQUE(credential_id, window_id, observed_at)
+            );
+            CREATE INDEX IF NOT EXISTS idx_cpa_quota_sample_latest
+                ON cpa_quota_samples(credential_id, window_id, observed_at DESC, id DESC);
+            CREATE INDEX IF NOT EXISTS idx_cpa_quota_sample_time
+                ON cpa_quota_samples(observed_at);
             """
         )
         incident_columns = {
@@ -265,6 +300,13 @@ class StateStore:
         current.setdefault("consecutive_failures", 0)
         current.setdefault("last_error", "")
         statuses[name] = current
+        self.set_json("collector_health", statuses)
+
+    def remove_collector(self, name: str) -> None:
+        statuses = dict(self.get_json("collector_health", {}))
+        if str(name) not in statuses:
+            return
+        statuses.pop(str(name), None)
         self.set_json("collector_health", statuses)
 
     def collector_health(self, now: int | None = None) -> dict[str, dict[str, Any]]:
@@ -378,6 +420,197 @@ class StateStore:
             ),
         )
         self.connection.commit()
+
+    def record_cpa_quota_account(
+        self,
+        credential_id: str,
+        provider: str,
+        account_label: str,
+        success: bool,
+        error: str = "",
+        observed_at: int | None = None,
+    ) -> None:
+        timestamp = int(time.time()) if observed_at is None else int(observed_at)
+        existing = self.connection.execute(
+            "SELECT last_success_at, consecutive_failures FROM cpa_quota_accounts WHERE credential_id = ?",
+            (credential_id,),
+        ).fetchone()
+        last_success_at = timestamp if success else int(existing["last_success_at"] or 0) if existing else 0
+        consecutive_failures = 0 if success else (int(existing["consecutive_failures"] or 0) if existing else 0) + 1
+        self.connection.execute(
+            """
+            INSERT INTO cpa_quota_accounts(
+                credential_id, provider, account_label, status, last_attempt_at,
+                last_success_at, consecutive_failures, last_error, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(credential_id) DO UPDATE SET
+                provider = excluded.provider,
+                account_label = excluded.account_label,
+                status = excluded.status,
+                last_attempt_at = excluded.last_attempt_at,
+                last_success_at = excluded.last_success_at,
+                consecutive_failures = excluded.consecutive_failures,
+                last_error = excluded.last_error,
+                updated_at = excluded.updated_at
+            """,
+            (
+                str(credential_id),
+                str(provider),
+                str(account_label),
+                "ok" if success else "error",
+                timestamp,
+                last_success_at,
+                consecutive_failures,
+                "" if success else str(error).strip()[:1000],
+                timestamp,
+            ),
+        )
+        self.connection.commit()
+
+    def insert_cpa_quota_samples(self, samples: Iterable[dict[str, Any]]) -> int:
+        inserted = 0
+        for sample in samples:
+            credential_id = str(sample.get("credential_id") or "").strip()
+            window_id = str(sample.get("window_id") or "").strip()
+            observed_at = int(sample.get("observed_at") or 0)
+            if not credential_id or not window_id or observed_at <= 0:
+                continue
+            cursor = self.connection.execute(
+                """
+                INSERT INTO cpa_quota_samples(
+                    observed_at, credential_id, provider, account_label, plan_label,
+                    window_id, window_name, remaining_percent, used_percent,
+                    reset_at, window_seconds, activity_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(credential_id, window_id, observed_at) DO UPDATE SET
+                    provider = excluded.provider,
+                    account_label = excluded.account_label,
+                    plan_label = excluded.plan_label,
+                    window_name = excluded.window_name,
+                    remaining_percent = excluded.remaining_percent,
+                    used_percent = excluded.used_percent,
+                    reset_at = excluded.reset_at,
+                    window_seconds = excluded.window_seconds,
+                    activity_json = excluded.activity_json
+                """,
+                (
+                    observed_at,
+                    credential_id,
+                    str(sample.get("provider") or ""),
+                    str(sample.get("account_label") or ""),
+                    str(sample.get("plan_label") or ""),
+                    window_id,
+                    str(sample.get("window_name") or "Weekly quota"),
+                    float(sample.get("remaining_percent") or 0),
+                    float(sample.get("used_percent") or 0),
+                    int(sample.get("reset_at") or 0),
+                    int(sample.get("window_seconds") or 0),
+                    json.dumps(sample.get("activity") or {}, ensure_ascii=False),
+                ),
+            )
+            inserted += max(0, int(cursor.rowcount or 0))
+        self.connection.commit()
+        return inserted
+
+    def reconcile_cpa_quota_accounts(self, active_credential_ids: set[str]) -> list[str]:
+        active = sorted(str(value) for value in active_credential_ids if str(value))
+        rows = self.connection.execute(
+            "SELECT credential_id FROM cpa_quota_accounts"
+        ).fetchall()
+        removed = [str(row["credential_id"]) for row in rows if str(row["credential_id"]) not in active]
+        if not removed:
+            return []
+        if active:
+            placeholders = ",".join("?" for _ in active)
+            self.connection.execute(
+                f"DELETE FROM cpa_quota_accounts WHERE credential_id NOT IN ({placeholders})",
+                active,
+            )
+        else:
+            self.connection.execute("DELETE FROM cpa_quota_accounts")
+        self.connection.commit()
+        return removed
+
+    def cpa_quota_history(
+        self,
+        credential_id: str,
+        window_id: str,
+        since_timestamp: int = 0,
+        limit: int = 500,
+    ) -> list[dict[str, Any]]:
+        rows = self.connection.execute(
+            """
+            SELECT observed_at, remaining_percent, used_percent, reset_at, activity_json
+            FROM cpa_quota_samples
+            WHERE credential_id = ? AND window_id = ? AND observed_at >= ?
+            ORDER BY observed_at ASC, id ASC
+            LIMIT ?
+            """,
+            (str(credential_id), str(window_id), max(0, int(since_timestamp)), max(1, min(int(limit), 2000))),
+        ).fetchall()
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            try:
+                item["activity"] = json.loads(str(item.pop("activity_json") or "{}"))
+            except json.JSONDecodeError:
+                item["activity"] = {}
+            result.append(item)
+        return result
+
+    def cpa_quota_snapshot(
+        self,
+        now: int | None = None,
+        history_seconds: int = 8 * 86_400,
+    ) -> dict[str, Any]:
+        timestamp = int(time.time()) if now is None else int(now)
+        account_rows = self.connection.execute(
+            """
+            SELECT credential_id, provider, account_label, status, last_attempt_at,
+                   last_success_at, consecutive_failures, last_error, updated_at
+            FROM cpa_quota_accounts
+            ORDER BY provider, account_label, credential_id
+            """
+        ).fetchall()
+        latest_rows = self.connection.execute(
+            """
+            SELECT sample.*
+            FROM cpa_quota_samples sample
+            WHERE sample.id = (
+                SELECT latest.id FROM cpa_quota_samples latest
+                WHERE latest.credential_id = sample.credential_id
+                  AND latest.window_id = sample.window_id
+                ORDER BY latest.observed_at DESC, latest.id DESC LIMIT 1
+            )
+            ORDER BY sample.provider, sample.account_label, sample.window_name, sample.window_id
+            """
+        ).fetchall()
+        windows_by_account: dict[str, list[dict[str, Any]]] = {}
+        for row in latest_rows:
+            item = dict(row)
+            item.pop("id", None)
+            try:
+                item["activity"] = json.loads(str(item.pop("activity_json") or "{}"))
+            except json.JSONDecodeError:
+                item["activity"] = {}
+            item["history"] = self.cpa_quota_history(
+                str(item["credential_id"]),
+                str(item["window_id"]),
+                since_timestamp=max(0, timestamp - max(86_400, int(history_seconds))),
+            )
+            windows_by_account.setdefault(str(item["credential_id"]), []).append(item)
+
+        accounts: list[dict[str, Any]] = []
+        for row in account_rows:
+            account = dict(row)
+            account["windows"] = windows_by_account.get(str(account["credential_id"]), [])
+            accounts.append(account)
+        return {
+            "generated_at": timestamp,
+            "account_count": len(accounts),
+            "window_count": sum(len(account["windows"]) for account in accounts),
+            "accounts": accounts,
+        }
 
     def record_provider_status(
         self,
@@ -850,6 +1083,13 @@ class StateStore:
         row = self.connection.execute("SELECT * FROM incidents WHERE id = ?", (int(incident_id),)).fetchone()
         return dict(row)
 
+    def incident_by_id(self, incident_id: int) -> dict[str, Any] | None:
+        row = self.connection.execute(
+            "SELECT * FROM incidents WHERE id = ?",
+            (int(incident_id),),
+        ).fetchone()
+        return dict(row) if row is not None else None
+
     @staticmethod
     def _notification_dict(row: sqlite3.Row) -> dict[str, Any]:
         item = dict(row)
@@ -1137,6 +1377,7 @@ class StateStore:
         self.connection.execute("DELETE FROM channel_observations WHERE observed_at < ?", (before_timestamp,))
         self.connection.execute("DELETE FROM resource_samples WHERE created_at < ?", (before_timestamp,))
         self.connection.execute("DELETE FROM provider_status_samples WHERE observed_at < ?", (before_timestamp,))
+        self.connection.execute("DELETE FROM cpa_quota_samples WHERE observed_at < ?", (before_timestamp,))
         if incident_before_timestamp is not None:
             self.connection.execute(
                 "DELETE FROM incidents WHERE status = 'resolved' AND resolved_at < ?",

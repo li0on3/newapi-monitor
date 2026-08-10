@@ -28,6 +28,17 @@ describe('dashboard routes', () => {
     })
   })
 
+  test('routes CPA weekly quota to an administrator-only module', () => {
+    expect(readRoute('/monitor/cpa-quota')).toEqual({
+      tab: 'cpaQuota',
+      settingsPage: 'status',
+      consolePage: 'overview',
+    })
+    expect(routes.canAccessCpaQuota('viewer')).toBe(false)
+    expect(routes.canAccessCpaQuota('operator')).toBe(false)
+    expect(routes.canAccessCpaQuota('admin')).toBe(true)
+  })
+
   test('routes each customer console page to a stable deep link', () => {
     expect(readRoute('/monitor/console')).toEqual({
       tab: 'console',

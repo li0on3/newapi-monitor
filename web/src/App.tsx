@@ -51,13 +51,14 @@ import { api, ApiError } from './api';
 import { getLanguage, setLanguage, t } from './i18n';
 import { buildProviderStatusContext, DEFAULT_OPENAI_COMPONENT_NAMES } from './provider-status';
 import { channelHealth, observationHealth, overallHealth } from './monitor-status';
-import { canAccessMonitorModules, defaultAuthorizedRoute, enabledConsolePages, readRoute, routePath } from './routes';
+import { canAccessCpaQuota, canAccessMonitorModules, defaultAuthorizedRoute, enabledConsolePages, readRoute, routePath } from './routes';
 import { ThemeSwitch } from './ThemeSwitch';
 import type { AppRoute, AppTab, ConsolePage, SettingsPage } from './routes';
 import type { AuthUser, Channel, ChannelMonitorConfig, ContainerMetric, Incident, IncidentPayload, IncidentSummary, KeyUsageCall, KeyUsageResult, LogItem, ProviderStatus, ResourceMetricSummary, ResourcePayload, ResourceSample, Summary, SystemHealth } from './types';
 import { ConsoleShell } from './console/ConsoleShell';
 import { numberText } from './console/utils';
 import { DeliveriesView } from './deliveries/DeliveriesView';
+import { CpaQuotaView } from './cpa/CpaQuotaView';
 import { SECRET_SETTING_KEYS, SETTING_SECTIONS } from './settings/catalog';
 import type { SettingSectionId } from './settings/catalog';
 
@@ -1433,7 +1434,7 @@ export default function App() {
   }, [coreRefreshSeconds, overviewRange, tab]);
 
   useEffect(() => {
-    if (authState !== 'ready' || tab === 'console' || (!elevated && tab !== 'overview')) return;
+    if (authState !== 'ready' || tab === 'console' || tab === 'cpaQuota' || (!elevated && tab !== 'overview')) return;
     void loadCore();
     const timer = window.setInterval(() => void loadCore(), coreRefreshSeconds * 1000);
     return () => { window.clearInterval(timer); coreRequestController.current?.abort(); };
@@ -1453,6 +1454,7 @@ export default function App() {
       || (tab === 'keyUsage' && user.key_usage_available)
       || ['logs', 'resources', 'incidents', 'channels'].includes(tab)
       || (tab === 'deliveries' && user.role === 'admin')
+      || (tab === 'cpaQuota' && canAccessCpaQuota(user.role))
       || (tab === 'settings' && user.role === 'admin')
     ));
     if (!consoleAllowed && !monitorAllowed) {
@@ -1514,12 +1516,15 @@ export default function App() {
     { id: 'providerStatus', label: t('官方状态'), Icon: Cloud, route: { tab: 'providerStatus', settingsPage: 'status', consolePage: 'overview' } as AppRoute, visible: elevated && Boolean(summary?.provider_status) },
     { id: 'settings', label: t('系统配置'), Icon: Settings, route: { tab: 'settings', settingsPage: route.settingsPage, consolePage: 'overview' } as AppRoute, visible: user?.role === 'admin' },
   ].filter((item) => item.visible);
+  const cpaNavItems = [
+    { id: 'cpaQuota', label: t('周配额'), Icon: CircleGauge, route: { tab: 'cpaQuota', settingsPage: 'status', consolePage: 'overview' } as AppRoute, visible: canAccessCpaQuota(user?.role || '') },
+  ].filter((item) => item.visible);
 
   return (
     <div className="app-shell">
       <header className="topbar">
         <div className="brand"><div className="brand-mark"><Activity size={21} /></div><div><span>{customerView ? 'API' : 'NEW API'}</span><strong>{customerView ? 'CONSOLE' : 'MONITOR'}</strong></div></div>
-        <div className="top-actions"><ThemeSwitch compact /><LanguageSwitch compact />{tab !== 'console' && <div className="refresh-state"><RefreshCw className={refreshing ? 'spin' : ''} size={14} /><span>{countdown}s</span></div>}<span className="user-chip">{user?.display_name || user?.username}<small>{user?.role}</small></span><button className="icon-button" onClick={() => void logout()} title={t("退出登录")}><LogOut size={17} /></button></div>
+        <div className="top-actions"><ThemeSwitch compact /><LanguageSwitch compact />{tab !== 'console' && tab !== 'cpaQuota' && <div className="refresh-state"><RefreshCw className={refreshing ? 'spin' : ''} size={14} /><span>{countdown}s</span></div>}<span className="user-chip">{user?.display_name || user?.username}<small>{user?.role}</small></span><button className="icon-button" onClick={() => void logout()} title={t("退出登录")}><LogOut size={17} /></button></div>
       </header>
       <div className="app-layout">
         <aside className="app-sidebar">
@@ -1532,14 +1537,18 @@ export default function App() {
               <div className="app-nav-section-title"><span>{t('监控')}</span><small>{monitorNavItems.length}</small></div>
               {monitorNavItems.map(({ id, label, Icon, route: itemRoute }) => <button key={id} className={tab === itemRoute.tab ? 'active' : ''} onClick={() => navigate(itemRoute)}><span className="nav-icon"><Icon size={17} /></span><span>{label}</span></button>)}
             </section>}
+            {cpaNavItems.length > 0 && <section className="app-nav-section app-nav-section-cpa" aria-label="CPA">
+              <div className="app-nav-section-title"><span>CPA</span><small>{cpaNavItems.length}</small></div>
+              {cpaNavItems.map(({ id, label, Icon, route: itemRoute }) => <button key={id} className={tab === itemRoute.tab ? 'active' : ''} onClick={() => navigate(itemRoute)}><span className="nav-icon"><Icon size={17} /></span><span>{label}</span></button>)}
+            </section>}
           </nav>
         </aside>
         <div className="app-canvas">
-          <main className="content">{tab === 'console' && user?.console_available ? <ConsoleShell page={route.consolePage} pages={user.console_pages || {}} globalScope={Boolean(user.console_global_scope)} customerView={customerView} onNavigate={(consolePage) => navigate({ tab: 'console', settingsPage: 'status', consolePage })} /> : <><section className="hero"><div><div className="eyebrow">OPERATIONS / REAL-TIME</div><h1>{t("服务运行态势")}</h1><p>{t("真实渠道探测、真实消费日志、主机与容器资源。")}</p></div><div className={`overall-status overall-${overall.tone}`} title={summary ? `${overall.detail} · ${formatFullTime(summary.generated_at)}` : overall.detail}><span className="status-beacon" /><div><small>OVERALL STATUS</small><strong>{overall.label}</strong></div><span>{overall.detail}</span></div></section>
+          <main className="content">{tab === 'console' && user?.console_available ? <ConsoleShell page={route.consolePage} pages={user.console_pages || {}} globalScope={Boolean(user.console_global_scope)} customerView={customerView} onNavigate={(consolePage) => navigate({ tab: 'console', settingsPage: 'status', consolePage })} /> : tab === 'cpaQuota' && user?.role === 'admin' ? <CpaQuotaView onConfigure={() => navigate({ tab: 'settings', settingsPage: 'cpaQuota', consolePage: 'overview' })} /> : <><section className="hero"><div><div className="eyebrow">OPERATIONS / REAL-TIME</div><h1>{t("服务运行态势")}</h1><p>{t("真实渠道探测、真实消费日志、主机与容器资源。")}</p></div><div className={`overall-status overall-${overall.tone}`} title={summary ? `${overall.detail} · ${formatFullTime(summary.generated_at)}` : overall.detail}><span className="status-beacon" /><div><small>OVERALL STATUS</small><strong>{overall.label}</strong></div><span>{overall.detail}</span></div></section>
             {error && <div className="inline-error"><AlertTriangle size={16} />{error}<button onClick={() => void loadCore()}>{t("重试")}</button></div>}
             {summary ? <>{tab === 'overview' && <Overview summary={summary} channels={channels} range={overviewRange} onRange={setOverviewRange} onChannel={setSelectedChannel} showProviderStatus={elevated} onProviderStatus={() => navigate({ tab: 'providerStatus', settingsPage: 'status', consolePage: 'overview' })} />}{tab === 'providerStatus' && summary.provider_status && <ProviderStatusView status={summary.provider_status} summary={summary} onOverview={() => navigate({ tab: 'overview', settingsPage: 'status', consolePage: 'overview' })} />}{tab === 'providerStatus' && !summary.provider_status && <div className="empty-state provider-unavailable"><Cloud size={28} /><strong>{t('官方状态当前不可见')}</strong><span>{t('该功能可能已关闭，或当前角色没有查看权限。')}</span><button className="secondary-button" type="button" onClick={() => navigate({ tab: 'overview', settingsPage: 'status', consolePage: 'overview' })}>{t('返回渠道总览')}</button></div>}{tab === 'keyUsage' && user?.key_usage_available && <KeyUsageView />}{tab === 'logs' && elevated && <LogsView channels={channels} />}{tab === 'resources' && elevated && <ResourcesView />}{tab === 'incidents' && elevated && <IncidentsView />}{tab === 'deliveries' && user?.role === 'admin' && <DeliveriesView />}{tab === 'channels' && elevated && <ChannelSettingsView />}{tab === 'settings' && user?.role === 'admin' && <SettingsView activePage={route.settingsPage} onActivePageChange={(settingsPage) => navigate({ tab: 'settings', settingsPage, consolePage: 'overview' })} />}</> : <div className="loading-panel"><RefreshCw className="spin" /><span>{t("正在读取第一批监控数据")}</span></div>}</>}
           </main>
-          <footer><span>{customerView ? t('数据源：真实调用、渠道探测与资源采集') : <>{t("数据源：New API 管理接口 / 真实 Relay 请求 / Linux")} & Docker / OpenAI Status</>}</span><span>{t('告警策略：渠道连续 5 次失败或 10 次内失败 5 次；20 次内 15 次首字超过 15 秒')}</span></footer>
+          <footer><span>{tab === 'cpaQuota' ? t('数据源：CPA 配额接口 / Token Usage Tracker') : customerView ? t('数据源：真实调用、渠道探测与资源采集') : <>{t("数据源：New API 管理接口 / 真实 Relay 请求 / Linux")} & Docker / OpenAI Status</>}</span><span>{tab === 'cpaQuota' ? t('CPA 告警策略：按页面配置的剩余阈值、恢复回差与重复周期执行') : t('告警策略：渠道连续 5 次失败或 10 次内失败 5 次；20 次内 15 次首字超过 15 秒')}</span></footer>
         </div>
       </div>
       {selectedChannel && <DetailDrawer channel={selectedChannel} customerView={customerView} onClose={() => setSelectedChannel(null)} />}

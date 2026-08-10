@@ -223,6 +223,32 @@ class DashboardApiModelTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             SettingsUpdatePayload.model_validate({"openai_status_component_ids": ["x" * 129]})
 
+    def test_cpa_quota_settings_are_admin_bounded_and_reject_credential_urls(self):
+        settings = SettingsUpdatePayload.model_validate(
+            {
+                "cpa_quota_enabled": True,
+                "cpa_base_url": "http://host.docker.internal:8317",
+                "cpa_management_key": "management-secret",
+                "cpa_quota_interval_seconds": 1800,
+                "cpa_quota_alert_remaining_percent": 20,
+                "cpa_quota_recovery_remaining_percent": 25,
+                "cpa_quota_repeat_seconds": 21600,
+            }
+        )
+        self.assertEqual(1800, settings.cpa_quota_interval_seconds)
+
+        with self.assertRaises(ValidationError):
+            SettingsUpdatePayload.model_validate({"cpa_base_url": "http://user:pass@example.com:8317"})
+        with self.assertRaises(ValidationError):
+            SettingsUpdatePayload.model_validate({"cpa_quota_interval_seconds": 30})
+        with self.assertRaises(ValidationError):
+            SettingsUpdatePayload.model_validate(
+                {
+                    "cpa_quota_alert_remaining_percent": 30,
+                    "cpa_quota_recovery_remaining_percent": 20,
+                }
+            )
+
     def test_viewer_cannot_use_privileged_dependencies(self):
         viewer = {"username": "viewer", "role": "viewer"}
 
@@ -236,6 +262,18 @@ class DashboardApiModelTests(unittest.TestCase):
 
         operator = {"username": "operator", "role": "operator"}
         self.assertEqual(operator, require_operator(operator))
+
+    def test_cpa_quota_endpoints_use_the_admin_dependency(self):
+        routes = {
+            route.path: route
+            for route in dashboard_app.app.routes
+            if getattr(route, "path", "").startswith("/api/cpa-quota/")
+        }
+
+        self.assertEqual({"/api/cpa-quota/summary", "/api/cpa-quota/refresh"}, set(routes))
+        for route in routes.values():
+            dependencies = [dependency.call for dependency in route.dependant.dependencies]
+            self.assertIn(require_admin, dependencies)
 
     def test_console_token_payloads_are_strict_and_bounded(self):
         token = ConsoleTokenPayload.model_validate(

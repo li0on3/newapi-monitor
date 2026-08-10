@@ -53,6 +53,7 @@
 - 管理员可分别配置管理端和用户端的监控总览渠道清单；隐藏渠道只影响对应角色的卡片与状态汇总，不停止探测、日志采集或告警。
 - 普通用户界面使用中性“API 服务中心”身份，不展示 New API 品牌和技术模块；管理员与运维员仍保留完整运维视图。
 - 通过 OpenAI 官方 JSON 状态接口同步整体状态、组件和事件；独立页面区分“业务相关组件”和“OpenAI 全局事件”，总览只保留轻量参考提示，本地真实渠道始终是主要判断依据。
+- 管理员可独立监控 CPA / CLIProxyAPI 的 Codex 与 Antigravity 周配额：默认剩余 20% 告警、25% 恢复，并结合真实配额下降和附近请求压力给出不单独触发告警的容量预测。
 
 ## 快速部署
 
@@ -105,9 +106,11 @@ sudo monitorctl reset-admin
 /monitor/deliveries             告警投递中心（仅管理员）
 /monitor/channels               渠道配置
 /monitor/upstream-status        OpenAI 官方状态
+/monitor/cpa-quota              CPA 周配额（仅管理员）
 /monitor/system                 系统配置
 /monitor/system/notifications   通知中心
 /monitor/system/providers       上游官方状态配置
+/monitor/system/cpa-quota       CPA 周配额配置（仅管理员）
 /monitor/system/console         New API 功能页配置
 /monitor/console                概览
 /monitor/console/analytics      数据看板
@@ -128,16 +131,16 @@ curl -fsS http://127.0.0.1:18081/api/health
 正常：
 
 ```json
-{"status":"ok","timestamp":1784476800,"version":"1.12.1"}
+{"status":"ok","timestamp":1784476800,"version":"1.13.0"}
 ```
 
-首次安装尚未完成向导时返回 HTTP 200 和 `{"status":"setup_required","timestamp":1784476800,"version":"1.12.1"}`，便于容器健康检查通过，但采集线程尚未启动。`version` 来自镜像内只读的 `VERSION` 文件，可用于部署验收和回滚核对。
+首次安装尚未完成向导时返回 HTTP 200 和 `{"status":"setup_required","timestamp":1784476800,"version":"1.13.0"}`，便于容器健康检查通过，但采集线程尚未启动。`version` 来自镜像内只读的 `VERSION` 文件，可用于部署验收和回滚核对。
 
 以下任一情况返回 HTTP 503：
 
 - SQLite 无法读取；
 - 监控主线程停止；
-- 渠道同步、渠道探测、日志、资源或已启用的 OpenAI 官方状态采集超过动态失效阈值。
+- 渠道同步、渠道探测、日志、资源、已启用的 OpenAI 官方状态或 CPA 周配额采集超过动态失效阈值。
 - 数据库超过配置容量、出现告警死信，或待投递告警积压超过 15 分钟。
 
 管理员可以在“系统配置 → 运行状态”查看每个采集器最后成功时间、连续失败次数、错误摘要和失效阈值。
@@ -153,6 +156,10 @@ curl -fsS http://127.0.0.1:18081/api/health
 | 资源采样 | 15 秒 |
 | 渠道真实探测 | 5 分钟 |
 | OpenAI 官方状态 | 60 秒 |
+| CPA 周配额 | 30 分钟；最低可配置 5 分钟 |
+| CPA 低配额告警 | 真实剩余不高于 20% |
+| CPA 低配额恢复 | 真实剩余恢复到 25% |
+| CPA 持续提醒 | 同一低配额事件最多每 6 小时一次 |
 | 慢请求展示 | 总耗时或首字超过 60 秒，仅用于页面统计 |
 | 首字严重告警 | 最近 20 次可测请求中至少 15 次首字超过 15 秒 |
 | 首字恢复 | 连续 10 次首字不超过 15 秒 |
@@ -171,7 +178,7 @@ curl -fsS http://127.0.0.1:18081/api/health
 ## 数据与安全
 
 - 不保存模型提示词和响应正文，只保存监控所需指标与错误摘要。
-- New API 管理 Token、Relay Token、SMTP 密码、企微/飞书应用 Secret、Webhook 地址和签名密钥在 SQLite 中使用 `MONITOR_SECRET_KEY` 加密。
+- New API 管理 Token、Relay Token、CPA 管理密钥、SMTP 密码、企微/飞书应用 Secret、Webhook 地址和签名密钥在 SQLite 中使用 `MONITOR_SECRET_KEY` 加密。
 - 生产容器以 UID `10001` 非 Root 用户运行，根文件系统只读，移除全部 Linux capabilities。
 - Docker Socket 不直接暴露给监控程序，只通过只读 Socket Proxy 提供必要接口。
 - 状态变更接口使用严格 Pydantic Schema、角色校验和同源请求校验头。
@@ -188,10 +195,11 @@ curl -fsS http://127.0.0.1:18081/api/health
 - 配置变更和角色变更写入审计表，秘密字段始终脱敏。
 - OpenAI Status 采集器每轮只读取固定的 `https://status.openai.com/api/v2/summary.json`，限制响应体与超时时间，不接受用户自定义目标 URL，避免形成 SSRF 能力。
 - 官方状态只保留最新快照，事件进展单独写入事件中心，避免 60 秒采集在长期运行后造成 SQLite 无界增长。
+- CPA 周配额页面和 API 仅管理员可见；配额事件与 New API 总览、通用事件页隔离。历史只保存脱敏账号、配额百分比、重置时间和聚合请求压力，不保存 `auth_index`、`project_id` 或上游 Token。
 - 原始采样、已恢复事件和投递记录采用独立保留策略；定期执行清理和 WAL checkpoint，并在系统配置中展示数据库/WAL 容量、待投递数量和死信数量。
 - 日志历史使用按时间与筛选维度排列的复合索引；资源历史只聚合有界数值桶，并仅在最后一个点返回区间末端容器快照，避免长区间查询依赖大容量临时盘。
 
-每个页面的权威数据源、时间范围、归集差额和验收规则见 [数据口径与准确性](docs/DATA_ACCURACY.md)。New API 功能页的接口映射、权限边界和兼容策略见 [New API 功能页架构](docs/CUSTOMER_CONSOLE.md)。详细安全边界见 [SECURITY.md](SECURITY.md)，后续计划见 [ROADMAP.md](ROADMAP.md)，GitHub 维护流程见 [GITHUB_GUIDE.md](GITHUB_GUIDE.md)。
+每个页面的权威数据源、时间范围、归集差额和验收规则见 [数据口径与准确性](docs/DATA_ACCURACY.md)。CPA 配额来源、预测口径和权限隔离见 [CPA 周配额监控](docs/CPA_QUOTA.md)。New API 功能页的接口映射、权限边界和兼容策略见 [New API 功能页架构](docs/CUSTOMER_CONSOLE.md)。详细安全边界见 [SECURITY.md](SECURITY.md)，后续计划见 [ROADMAP.md](ROADMAP.md)，GitHub 维护流程见 [GITHUB_GUIDE.md](GITHUB_GUIDE.md)。
 
 ## 备份
 

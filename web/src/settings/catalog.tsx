@@ -1,4 +1,4 @@
-import { CircleGauge, KeyRound, Network, RefreshCw, SlidersHorizontal, TerminalSquare } from 'lucide-react';
+import { CircleGauge, Gauge, KeyRound, Network, RefreshCw, SlidersHorizontal, TerminalSquare } from 'lucide-react';
 import type { ReactNode } from 'react';
 import { t } from '../i18n';
 
@@ -10,7 +10,7 @@ export type SettingField = {
   hint?: string;
 };
 
-export type SettingSectionId = 'connection' | 'console' | 'keyUsage' | 'collection' | 'thresholds' | 'advanced';
+export type SettingSectionId = 'connection' | 'cpaQuota' | 'console' | 'keyUsage' | 'collection' | 'thresholds' | 'advanced';
 
 export const SECRET_SETTING_KEYS = [
   'new_api_access_token',
@@ -21,6 +21,7 @@ export const SECRET_SETTING_KEYS = [
   'feishu_app_secret',
   'feishu_webhook_url',
   'feishu_webhook_secret',
+  'cpa_management_key',
 ];
 
 export const SETTING_SECTIONS: Array<{
@@ -33,6 +34,17 @@ export const SETTING_SECTIONS: Array<{
 }> = [
   { id: 'connection', title: t('New API 连接'), short: t('连接与凭据'), icon: <Network size={18} />, description: t('管理接口只读同步与真实探测凭据。敏感字段不会回显。'), fields: [
     { key: 'new_api_base_url', label: t('New API 地址') }, { key: 'new_api_user_id', label: t('管理用户 ID'), type: 'number' }, { key: 'new_api_access_token', label: t('管理访问令牌'), type: 'password', hint: t('留空保持原值') }, { key: 'relay_api_token', label: t('真实探测令牌'), type: 'password', hint: t('留空保持原值') },
+  ] },
+  { id: 'cpaQuota', title: t('CPA 周配额'), short: t('独立容量监控'), icon: <Gauge size={18} />, description: t('独立读取 CLIProxyAPI / API Management 的周配额，不参与 New API 渠道总览。页面与接口仅管理员可见。'), fields: [
+    { key: 'cpa_quota_enabled', label: t('启用 CPA 周配额监控'), type: 'boolean', hint: t('启用后按低频周期采集，关闭不会影响 CPA 或 New API') },
+    { key: 'cpa_base_url', label: t('CPA 地址'), hint: t('推荐 http://host.docker.internal:8317') },
+    { key: 'cpa_management_key', label: t('CPA 管理密钥'), type: 'password', hint: t('留空保持原值；只在服务端使用并加密保存') },
+    { key: 'cpa_quota_activity_enabled', label: t('结合附近请求压力预测'), type: 'boolean', hint: t('读取 Token Usage Tracker 的近 1 小时与 6 小时数据，不改变 CPA 配置') },
+    { key: 'cpa_quota_interval_seconds', label: t('配额采集间隔（秒）'), type: 'number', hint: t('默认 1800 秒；配额变化慢，无需高频请求') },
+    { key: 'cpa_quota_timeout_seconds', label: t('单次请求超时（秒）'), type: 'number', hint: t('默认 30 秒，单账号失败不会阻断其他账号') },
+    { key: 'cpa_quota_alert_remaining_percent', label: t('剩余配额告警阈值（%）'), type: 'number', hint: t('默认剩余 20% 时告警') },
+    { key: 'cpa_quota_recovery_remaining_percent', label: t('恢复阈值（%）'), type: 'number', hint: t('默认 25%，通过回差避免阈值附近反复告警') },
+    { key: 'cpa_quota_repeat_seconds', label: t('持续低配额重复提醒（秒）'), type: 'number', hint: t('默认 21600 秒，同一低配额事件最多每 6 小时提醒一次') },
   ] },
   { id: 'console', title: t('New API 功能页'), short: t('页面与访问策略'), icon: <TerminalSquare size={18} />, description: t('控制概览、数据看板、API 密钥和使用日志的可见范围与敏感操作频率。所有业务权限仍由 New API Session 最终校验。'), fields: [
     { key: 'console_enabled', label: t('启用 New API 功能页'), type: 'boolean', hint: t('关闭后入口和全部 BFF 接口同时停用') },

@@ -28,6 +28,7 @@ from dashboard_settings import SECRET_KEYS, SettingsStore
 from dashboard_setup import NewAPIProvisioner, SetupError, verify_setup_token
 from dashboard_sso import NewAPISessionVerifier
 from dashboard_time_range import resolve_time_range
+from monitoring_core.cpa_quota import forecast_quota
 from newapi_monitor import Config, DEFAULT_OPENAI_COMPONENT_NAMES, MonitorApp, NotificationDispatcher, OpenAIStatusClient, StateStore, env_bool, env_int
 
 
@@ -194,6 +195,15 @@ class SettingsUpdatePayload(BaseModel):
     openai_status_include_in_overall: bool | None = None
     openai_status_admin_visible: bool | None = None
     openai_status_viewer_visible: bool | None = None
+    cpa_quota_enabled: bool | None = None
+    cpa_base_url: str | None = Field(None, min_length=8, max_length=2048)
+    cpa_management_key: str | None = Field(None, max_length=4096)
+    cpa_quota_interval_seconds: int | None = Field(None, ge=300, le=86400)
+    cpa_quota_timeout_seconds: int | None = Field(None, ge=3, le=60)
+    cpa_quota_alert_remaining_percent: float | None = Field(None, ge=1, le=50)
+    cpa_quota_recovery_remaining_percent: float | None = Field(None, ge=2, le=100)
+    cpa_quota_repeat_seconds: int | None = Field(None, ge=1800, le=604800)
+    cpa_quota_activity_enabled: bool | None = None
 
     @field_validator("openai_status_component_ids")
     @classmethod
@@ -209,16 +219,16 @@ class SettingsUpdatePayload(BaseModel):
                 normalized.append(item)
         return normalized
 
-    @field_validator("new_api_base_url")
+    @field_validator("new_api_base_url", "cpa_base_url")
     @classmethod
     def validate_base_url(cls, value: str | None) -> str | None:
         if value is None:
             return None
         parsed = urllib.parse.urlsplit(value.strip())
         if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-            raise ValueError("new_api_base_url must be an absolute HTTP(S) URL")
+            raise ValueError("base URL must be an absolute HTTP(S) URL")
         if parsed.username or parsed.password or parsed.query or parsed.fragment:
-            raise ValueError("new_api_base_url must not contain credentials, query or fragment")
+            raise ValueError("base URL must not contain credentials, query or fragment")
         return value.strip().rstrip("/")
 
     @field_validator("notification_quiet_hours_timezone")
@@ -240,6 +250,12 @@ class SettingsUpdatePayload(BaseModel):
             and self.notification_quiet_hours_start == self.notification_quiet_hours_end
         ):
             raise ValueError("quiet hours start and end must be different")
+        if (
+            self.cpa_quota_alert_remaining_percent is not None
+            and self.cpa_quota_recovery_remaining_percent is not None
+            and self.cpa_quota_recovery_remaining_percent <= self.cpa_quota_alert_remaining_percent
+        ):
+            raise ValueError("CPA quota recovery threshold must exceed the alert threshold")
         return self
 
     @field_validator("wecom_webhook_url")
@@ -580,6 +596,17 @@ class Runtime:
             )
             state_store.set_json("openai_status_state", {})
             state_store.connection.close()
+        if not bool(values.get("cpa_quota_enabled", False)):
+            state_store = StateStore(self.state_db)
+            state_store.resolve_open_incidents(
+                "cpa:",
+                "CPA 周配额监控已关闭，该事件因监控范围变更结束。",
+            )
+            state_store.remove_collector("cpa_quota")
+            collector_alert_states = dict(state_store.get_json("collector_alert_states", {}))
+            collector_alert_states.pop("cpa_quota", None)
+            state_store.set_json("collector_alert_states", collector_alert_states)
+            state_store.connection.close()
         configured = bool(
             str(values.get("new_api_base_url") or "").strip()
             and str(values.get("new_api_access_token") or "").strip()
@@ -783,6 +810,15 @@ class Runtime:
             "openai_status_include_in_overall": env_bool("OPENAI_STATUS_INCLUDE_IN_OVERALL", False),
             "openai_status_admin_visible": env_bool("OPENAI_STATUS_ADMIN_VISIBLE", True),
             "openai_status_viewer_visible": env_bool("OPENAI_STATUS_VIEWER_VISIBLE", True),
+            "cpa_quota_enabled": env_bool("CPA_QUOTA_ENABLED", False),
+            "cpa_base_url": os.getenv("CPA_BASE_URL", "http://host.docker.internal:8317").rstrip("/"),
+            "cpa_management_key": os.getenv("CPA_MANAGEMENT_KEY", ""),
+            "cpa_quota_interval_seconds": env_int("CPA_QUOTA_INTERVAL_SECONDS", 1800),
+            "cpa_quota_timeout_seconds": env_int("CPA_QUOTA_TIMEOUT_SECONDS", 30),
+            "cpa_quota_alert_remaining_percent": float(os.getenv("CPA_QUOTA_ALERT_REMAINING_PERCENT", "20")),
+            "cpa_quota_recovery_remaining_percent": float(os.getenv("CPA_QUOTA_RECOVERY_REMAINING_PERCENT", "25")),
+            "cpa_quota_repeat_seconds": env_int("CPA_QUOTA_REPEAT_SECONDS", 21600),
+            "cpa_quota_activity_enabled": env_bool("CPA_QUOTA_ACTIVITY_ENABLED", True),
         }
 
     def monitor_config(self) -> Config:
@@ -2053,6 +2089,98 @@ def test_openai_provider_status(_: AdminUser) -> dict[str, Any]:
     }
 
 
+@app.get("/api/cpa-quota/summary")
+def cpa_quota_summary(_: AdminUser) -> dict[str, Any]:
+    values = runtime.settings.runtime_values() if runtime.settings is not None else runtime._bootstrap_settings()
+    enabled = bool(values.get("cpa_quota_enabled", False))
+    configured = bool(
+        str(values.get("cpa_base_url") or "").strip()
+        and str(values.get("cpa_management_key") or "").strip()
+    )
+    threshold = float(values.get("cpa_quota_alert_remaining_percent", 20))
+    recovery = float(values.get("cpa_quota_recovery_remaining_percent", 25))
+    interval_seconds = max(300, int(values.get("cpa_quota_interval_seconds", 1800)))
+    store = StateStore(runtime.state_db)
+    try:
+        snapshot = store.cpa_quota_snapshot()
+        collector = store.collector_health().get("cpa_quota", {})
+        last_collection = store.get_json("cpa_quota_last_collection", {})
+    finally:
+        store.connection.close()
+
+    windows: list[dict[str, Any]] = []
+    for account in snapshot["accounts"]:
+        for window in account["windows"]:
+            forecast = forecast_quota(
+                window.get("history") or [],
+                threshold_percent=threshold,
+                activity=dict(window.get("activity") or {}),
+            )
+            window["forecast"] = forecast
+            remaining = float(window.get("remaining_percent") or 0)
+            window["tone"] = "critical" if remaining <= threshold else "warning" if remaining <= recovery else "healthy"
+            windows.append(window)
+
+    lowest_remaining = min((float(item.get("remaining_percent") or 0) for item in windows), default=None)
+    projected_thresholds = [
+        int(item["forecast"].get("threshold_at") or 0)
+        for item in windows
+        if item["forecast"].get("status") == "projected"
+        and not item["forecast"].get("reset_before_threshold")
+        and int(item["forecast"].get("threshold_at") or 0) > 0
+    ]
+    return {
+        **snapshot,
+        "enabled": enabled,
+        "configured": configured,
+        "source": "cpa",
+        "collector": collector,
+        "last_collection": last_collection,
+        "interval_seconds": interval_seconds,
+        "repeat_seconds": max(1800, int(values.get("cpa_quota_repeat_seconds", 21600))),
+        "activity_enabled": bool(values.get("cpa_quota_activity_enabled", True)),
+        "thresholds": {
+            "alert_remaining_percent": threshold,
+            "recovery_remaining_percent": recovery,
+        },
+        "summary": {
+            "lowest_remaining_percent": lowest_remaining,
+            "at_risk_windows": sum(float(item.get("remaining_percent") or 0) <= threshold for item in windows),
+            "healthy_windows": sum(float(item.get("remaining_percent") or 0) > threshold for item in windows),
+            "error_accounts": sum(str(account.get("status") or "") == "error" for account in snapshot["accounts"]),
+            "earliest_threshold_at": min(projected_thresholds, default=0),
+        },
+    }
+
+
+@app.post("/api/cpa-quota/refresh")
+def refresh_cpa_quota(request: Request, user: AdminUser) -> dict[str, Any]:
+    values = runtime.settings.runtime_values() if runtime.settings is not None else runtime._bootstrap_settings()
+    if not bool(values.get("cpa_quota_enabled", False)):
+        raise HTTPException(status_code=409, detail="CPA weekly quota monitoring is disabled")
+    if not str(values.get("cpa_management_key") or "").strip():
+        raise HTTPException(status_code=409, detail="CPA management key is not configured")
+    timestamp = int(time.time())
+    store = StateStore(runtime.state_db)
+    try:
+        last_requested = int(store.get_json("cpa_quota_refresh_requested_at", 0))
+        if timestamp - last_requested < 60:
+            raise HTTPException(status_code=429, detail="CPA quota refresh is limited to once per minute")
+        store.set_json("cpa_quota_refresh_requested_at", timestamp)
+    finally:
+        store.connection.close()
+    if runtime.settings is not None:
+        runtime.settings.record_audit(
+            str(user["username"]),
+            "cpa.quota.refresh",
+            "cpa-quota",
+            {},
+            {"queued_at": timestamp},
+            runtime.remote_addr(request),
+        )
+    return {"queued": True, "requested_at": timestamp}
+
+
 @app.get("/api/channels")
 def channels(
     user: AuthenticatedUser,
@@ -2219,6 +2347,7 @@ def incidents(
         end_timestamp=end,
         limit=limit,
         offset=offset,
+        excluded_prefixes=("cpa:",),
     )
     values = runtime.settings.runtime_values() if runtime.settings is not None else runtime._bootstrap_settings()
     result["retention_days"] = int(values.get("incident_retention_days", 365))
@@ -2234,6 +2363,11 @@ def acknowledge_incident(
 ) -> dict[str, Any]:
     store = StateStore(runtime.state_db)
     try:
+        existing = store.incident_by_id(incident_id)
+        if existing is None:
+            raise KeyError("incident not found")
+        if str(existing.get("incident_key") or "").startswith("cpa:") and user["role"] != "admin":
+            raise KeyError("incident not found")
         incident = store.acknowledge_incident(
             incident_id,
             actor=str(user["username"]),
@@ -2378,6 +2512,7 @@ def update_settings(payload: SettingsUpdatePayload, request: Request, user: Admi
     try:
         candidate = runtime.settings.runtime_values()
         openai_status_was_enabled = bool(candidate.get("openai_status_enabled", True))
+        cpa_quota_was_enabled = bool(candidate.get("cpa_quota_enabled", False))
         updates = payload.model_dump(exclude_unset=True)
         candidate.update({
             key: value for key, value in updates.items()
@@ -2396,6 +2531,7 @@ def update_settings(payload: SettingsUpdatePayload, request: Request, user: Admi
             "notification_max_attempts",
             "openai_status_interval_seconds", "openai_status_timeout_seconds",
             "openai_status_failure_threshold", "openai_status_recovery_threshold",
+            "cpa_quota_interval_seconds", "cpa_quota_timeout_seconds", "cpa_quota_repeat_seconds",
         ):
             if int(candidate[key]) <= 0:
                 raise ValueError(f"{key} must be greater than zero")
@@ -2403,6 +2539,7 @@ def update_settings(payload: SettingsUpdatePayload, request: Request, user: Admi
             "slow_request_seconds", "latency_first_response_seconds", "channel_slow_seconds",
             "system_cpu_threshold", "system_memory_threshold", "system_disk_threshold",
             "container_cpu_threshold", "container_memory_threshold",
+            "cpa_quota_alert_remaining_percent", "cpa_quota_recovery_remaining_percent",
         ):
             if float(candidate[key]) <= 0:
                 raise ValueError(f"{key} must be greater than zero")
@@ -2421,6 +2558,18 @@ def update_settings(payload: SettingsUpdatePayload, request: Request, user: Admi
             "OpenAI 官方状态监控已关闭，该事件因监控范围变更结束。",
         )
         state_store.set_json("openai_status_state", {})
+        state_store.connection.close()
+    if cpa_quota_was_enabled and not bool(values.get("cpa_quota_enabled", False)):
+        state_store = StateStore(runtime.state_db)
+        state_store.resolve_open_incidents(
+            "cpa:",
+            "CPA 周配额监控已关闭，该事件因监控范围变更结束。",
+        )
+        state_store.set_json("cpa_quota_alert_states", {})
+        state_store.remove_collector("cpa_quota")
+        collector_alert_states = dict(state_store.get_json("collector_alert_states", {}))
+        collector_alert_states.pop("cpa_quota", None)
+        state_store.set_json("collector_alert_states", collector_alert_states)
         state_store.connection.close()
     return {"values": values, "version": runtime.settings.version(), "reloading": True}
 

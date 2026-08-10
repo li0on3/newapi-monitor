@@ -233,6 +233,32 @@ class DashboardRepositoryTests(unittest.TestCase):
 
         self.assertEqual(before["incidents"], summary["incidents"])
 
+    def test_cpa_quota_incidents_are_isolated_from_new_api_summary_and_event_page(self):
+        before = self.repository.summary(now=1_700_000_100)
+        store = StateStore(self.db_path)
+        store.record_alert_events(
+            [
+                AlertEvent(
+                    "cpa_quota_low",
+                    "CPA weekly quota low",
+                    "remaining 20%",
+                    key="cpa:quota:credential:weekly",
+                    severity="warning",
+                )
+            ],
+            now=1_700_000_000,
+        )
+        store.connection.close()
+
+        summary = self.repository.summary(now=1_700_000_100)
+        incidents = self.repository.incidents(
+            now=1_700_000_100,
+            excluded_prefixes=("cpa:",),
+        )
+
+        self.assertEqual(before["incidents"], summary["incidents"])
+        self.assertNotIn("cpa:", "\n".join(item["incident_key"] for item in incidents["items"]))
+
     def test_summary_marks_stale_channel_observations_unknown(self):
         repository = DashboardRepository(
             self.db_path,

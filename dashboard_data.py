@@ -109,7 +109,7 @@ class DashboardRepository:
 
         incident_rows = [
             row for row in incident_rows
-            if not str(row["incident_key"]).startswith("provider:")
+            if not str(row["incident_key"]).startswith(("provider:", "cpa:"))
         ]
         if not include_operational_incidents:
             incident_rows = [
@@ -686,6 +686,7 @@ class DashboardRepository:
         limit: int = 50,
         offset: int = 0,
         now: int | None = None,
+        excluded_prefixes: tuple[str, ...] = (),
     ) -> dict[str, Any]:
         current_time = int(time.time()) if now is None else now
         page_limit = max(1, min(limit, 100))
@@ -711,6 +712,8 @@ class DashboardRepository:
         prepared: list[dict[str, Any]] = []
         for row in rows:
             item = dict(row)
+            if excluded_prefixes and str(item["incident_key"]).startswith(excluded_prefixes):
+                continue
             item_category = self._incident_category(str(item["incident_key"]), str(item["kind"]))
             if severity in {"info", "warning", "critical"} and item["severity"] != severity:
                 continue
