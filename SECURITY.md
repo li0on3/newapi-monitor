@@ -22,7 +22,7 @@
 - 监控端口默认只绑定 `127.0.0.1`，公网访问必须经过 HTTPS 反向代理。
 - 必须配置精确的 `DASHBOARD_ALLOWED_HOSTS`，不得在生产使用 `*`。
 - `.env` 权限应为 `0600`，不得提交到 Git。
-- 必须保留并备份 `MONITOR_SECRET_KEY`；它用于加密数据库中的 New API、Relay 和 SMTP 密钥。
+- 必须保留并备份 `MONITOR_SECRET_KEY`；它用于加密数据库中的 New API、Relay、CPA、SMTP 和通知渠道密钥。
 - Docker Socket 只能通过只读 Socket Proxy 暴露，不得将 Socket 直接挂载给生产监控容器。
 - 紧急管理员只用于 New API SSO 不可用时的恢复操作，密码应单独保管并定期轮换。
 - 上传公开仓库前运行 `python manage.py doctor` 并检查 `git status --ignored`。
@@ -33,6 +33,8 @@
 ## 信任边界
 
 监控管理员能够修改 New API 地址、探测规则和 SMTP 设置，因此管理员账号等同于基础设施高权限账号。角色映射、登录审计和配置审计不能替代账号安全。
+
+CPA 周配额模块只允许管理员访问，并只向固定的 Codex/Antigravity 配额接口发起受控请求。CPA 管理请求禁止重定向并限制超时和响应体；`auth_index`、`project_id`、管理密钥和上游 Token 不持久化到配额历史或返回浏览器。CPA 管理接口本身仍应只监听可信网络。
 
 Key 用量查询默认仅管理员可见，并采用服务端 POST 转发、固定上游路径、按用户和来源地址限流。原始 Key 不写入监控数据库、URL、配置审计或接口响应；最低角色只能设为运维员或管理员。
 

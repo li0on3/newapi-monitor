@@ -1,6 +1,6 @@
-export type AppTab = 'overview' | 'console' | 'keyUsage' | 'logs' | 'resources' | 'incidents' | 'deliveries' | 'channels' | 'providerStatus' | 'settings';
+export type AppTab = 'overview' | 'console' | 'keyUsage' | 'logs' | 'resources' | 'incidents' | 'deliveries' | 'channels' | 'providerStatus' | 'cpaQuota' | 'settings';
 export type ConsolePage = 'overview' | 'analytics' | 'keys' | 'logs';
-export type SettingsPage = 'status' | 'overview' | 'notifications' | 'providers' | 'console' | 'connection' | 'keyUsage' | 'collection' | 'thresholds' | 'advanced' | 'access' | 'audit';
+export type SettingsPage = 'status' | 'overview' | 'notifications' | 'providers' | 'cpaQuota' | 'console' | 'connection' | 'keyUsage' | 'collection' | 'thresholds' | 'advanced' | 'access' | 'audit';
 
 export type AppRoute = {
   tab: AppTab;
@@ -18,6 +18,7 @@ const TAB_PATHS: Record<AppTab, string> = {
   deliveries: 'deliveries',
   channels: 'channels',
   providerStatus: 'upstream-status',
+  cpaQuota: 'cpa-quota',
   settings: 'system',
 };
 
@@ -27,6 +28,7 @@ const SETTINGS_PATHS: Record<SettingsPage, string> = {
   overview: 'overview',
   notifications: 'notifications',
   providers: 'providers',
+  cpaQuota: 'cpa-quota',
   console: 'console',
   connection: 'connection',
   keyUsage: 'key-usage',
@@ -52,6 +54,10 @@ export function enabledConsolePages(pages: Partial<Record<ConsolePage, boolean>>
 
 export function canAccessMonitorModules(role: string): boolean {
   return role === 'operator' || role === 'admin';
+}
+
+export function canAccessCpaQuota(role: string): boolean {
+  return role === 'admin';
 }
 
 export function canAccessMonitorOverview(role: string): boolean {

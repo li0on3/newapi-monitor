@@ -569,6 +569,7 @@ class CollectorFreshnessTracker:
             "channel_probe": "渠道探测",
             "logs": "使用日志",
             "resources": "机器资源",
+            "cpa_quota": "CPA 周配额",
         }
         for name, detail in collectors.items():
             current = str(detail.get("status") or "starting")
@@ -580,22 +581,24 @@ class CollectorFreshnessTracker:
                 body = f"最后成功采集距今 {age}s，失效阈值 {threshold}s。"
                 if error:
                     body += f"\n最近错误：{error}"
+                cpa_collector = name == "cpa_quota"
                 events.append(
                     AlertEvent(
-                        "collector_stale",
+                        "cpa_quota_collection_failed" if cpa_collector else "collector_stale",
                         f"采集器异常：{labels.get(name, name)}",
                         body,
-                        key=f"collector:{name}",
+                        key="cpa:collector" if cpa_collector else f"collector:{name}",
                         severity="critical" if name in {"channel_sync", "channel_probe"} else "warning",
                     )
                 )
             elif current == "ok" and previous == "stale":
+                cpa_collector = name == "cpa_quota"
                 events.append(
                     AlertEvent(
-                        "collector_recovered",
+                        "cpa_quota_collection_recovered" if cpa_collector else "collector_recovered",
                         f"采集器恢复：{labels.get(name, name)}",
                         f"{labels.get(name, name)}采集已恢复，最新数据距今 {int(detail.get('age_seconds') or 0)}s。",
-                        key=f"collector:{name}",
+                        key="cpa:collector" if cpa_collector else f"collector:{name}",
                         severity="info",
                         recovery=True,
                     )

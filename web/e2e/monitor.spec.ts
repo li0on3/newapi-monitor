@@ -83,6 +83,48 @@ const systemStatus = {
   timestamp: now,
 };
 
+const cpaQuota = {
+  generated_at: now,
+  enabled: true,
+  configured: true,
+  source: 'cpa',
+  account_count: 1,
+  window_count: 1,
+  interval_seconds: 1800,
+  repeat_seconds: 21600,
+  activity_enabled: true,
+  collector: { status: 'ok', age_seconds: 15, stale_after_seconds: 5400, last_success_at: now },
+  last_collection: { observed_at: now, credential_count: 1, success_count: 1, failure_count: 0, window_count: 1 },
+  thresholds: { alert_remaining_percent: 20, recovery_remaining_percent: 25 },
+  summary: { lowest_remaining_percent: 66, at_risk_windows: 0, healthy_windows: 1, error_accounts: 0, earliest_threshold_at: 0 },
+  accounts: [{
+    credential_id: 'demo-credential',
+    provider: 'codex',
+    account_label: 'de***@example.com',
+    status: 'ok',
+    last_attempt_at: now,
+    last_success_at: now,
+    consecutive_failures: 0,
+    last_error: '',
+    windows: [{
+      credential_id: 'demo-credential', provider: 'codex', account_label: 'de***@example.com', plan_label: 'Pro',
+      window_id: 'base:secondary', window_name: 'Main weekly quota', remaining_percent: 66, used_percent: 34,
+      reset_at: now + 3 * 86_400, window_seconds: 604_800, observed_at: now, tone: 'healthy',
+      activity: { requests_1h: 18, requests_6h: 72, requests_24h: 220, tokens_1h: 12000, tokens_6h: 50000, tokens_24h: 160000, pressure_ratio: 1.25 },
+      history: [
+        { observed_at: now - 7200, remaining_percent: 70, used_percent: 30, reset_at: now + 3 * 86_400 },
+        { observed_at: now, remaining_percent: 66, used_percent: 34, reset_at: now + 3 * 86_400 },
+      ],
+      forecast: {
+        status: 'projected', confidence: 'medium', burn_percent_per_hour: 2, observed_burn_percent_per_hour: 2,
+        seconds_to_threshold: 82800, seconds_to_exhaustion: 118800, threshold_at: now + 82800,
+        exhaustion_at: now + 118800, reset_before_threshold: true, reset_before_exhaustion: true,
+        sample_count: 2, sample_span_seconds: 7200, pressure_ratio: 1.25,
+      },
+    }],
+  }],
+};
+
 const analyticsSeries = Array.from({ length: 13 }, (_, index) => ({
   created_at: now,
   username: 'root',
@@ -146,6 +188,7 @@ async function mockMonitorApi(page: Page, role: Role, authenticated = true) {
     if (path === 'access/users') return json(route, { items: [] });
     if (path === 'channel-settings') return json(route, channels);
     if (path === 'provider-status/openai') return json(route, { available: false });
+    if (path === 'cpa-quota/summary') return json(route, cpaQuota);
     if (path === 'console/analytics') return json(route, {
       start_timestamp: now - 86_400,
       end_timestamp: now,
@@ -216,6 +259,24 @@ test('普通用户只能看到授权的服务页面并阻止直达管理路由',
   await expect(page.getByRole('button', { name: '机器资源' })).toHaveCount(0);
   await expect(page.getByRole('button', { name: '系统配置' })).toHaveCount(0);
   await expect(page.getByText('NEW API')).toHaveCount(0);
+});
+
+test('CPA 周配额使用独立管理员页面且普通用户不能直达', async ({ page }) => {
+  await mockMonitorApi(page, 'admin');
+  await page.goto('/monitor/cpa-quota');
+
+  await expect(page).toHaveURL(/\/monitor\/cpa-quota$/);
+  await expect(page.getByRole('heading', { name: 'CPA 周配额' })).toBeVisible();
+  await expect(page.getByText('de***@example.com')).toBeVisible();
+  await expect(page.getByText('66%').first()).toBeVisible();
+  await expect(page.getByRole('heading', { name: '服务运行态势' })).toHaveCount(0);
+
+  const viewer = await page.context().browser()!.newPage();
+  await mockMonitorApi(viewer, 'viewer');
+  await viewer.goto('/monitor/cpa-quota');
+  await expect(viewer).toHaveURL(/\/monitor\/$/);
+  await expect(viewer.getByRole('button', { name: '周配额' })).toHaveCount(0);
+  await viewer.close();
 });
 
 test('退出后刷新仍保持未登录状态', async ({ page }) => {

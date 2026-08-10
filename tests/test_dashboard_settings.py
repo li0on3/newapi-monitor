@@ -203,6 +203,25 @@ class SettingsStoreTests(unittest.TestCase):
         self.assertNotIn("secret-key", serialized)
         self.assertNotIn("feishu-secret", serialized)
 
+    def test_encrypts_cpa_management_key_and_never_returns_it(self):
+        encrypted_db = str(Path(self.temp_dir.name) / "cpa-settings.db")
+        store = SettingsStore(
+            encrypted_db,
+            defaults={"cpa_management_key": "cpa-management-secret"},
+            secret_key="test-secret-key-with-at-least-32-bytes",
+        )
+
+        self.assertEqual("cpa-management-secret", store.runtime_values()["cpa_management_key"])
+        self.assertEqual("********", store.public_values()["cpa_management_key"])
+        connection = sqlite3.connect(encrypted_db)
+        try:
+            raw = connection.execute(
+                "SELECT value_json FROM monitor_settings WHERE key = 'cpa_management_key'"
+            ).fetchone()[0]
+        finally:
+            connection.close()
+        self.assertNotIn("cpa-management-secret", raw)
+
     def test_operational_audit_redacts_nested_credentials_without_reloading_collectors(self):
         before_version = self.store.version()
 

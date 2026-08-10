@@ -20,6 +20,7 @@ SECRET_KEYS = {
     "feishu_app_secret",
     "feishu_webhook_url",
     "feishu_webhook_secret",
+    "cpa_management_key",
 }
 MONITOR_ROLES = {"viewer", "operator", "admin"}
 WORKER_SETTING_KEYS = {
@@ -51,6 +52,10 @@ WORKER_SETTING_KEYS = {
     "openai_status_timeout_seconds", "openai_status_min_impact",
     "openai_status_component_ids", "openai_status_failure_threshold",
     "openai_status_recovery_threshold",
+    "cpa_quota_enabled", "cpa_base_url", "cpa_management_key",
+    "cpa_quota_interval_seconds", "cpa_quota_timeout_seconds",
+    "cpa_quota_alert_remaining_percent", "cpa_quota_recovery_remaining_percent",
+    "cpa_quota_repeat_seconds", "cpa_quota_activity_enabled",
 }
 WORKER_CHANNEL_KEYS = {
     "probe_enabled", "probe_model", "probe_path", "probe_format", "probe_prompt",

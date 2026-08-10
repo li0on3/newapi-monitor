@@ -41,6 +41,8 @@ services:
       - ${MONITOR_ENV_FILE:-.env}
     environment:
       DOCKER_HOST: tcp://docker-proxy:2375
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       - "${MONITOR_BIND_ADDRESS:-127.0.0.1}:${MONITOR_PORT:-18081}:8080"
     volumes:

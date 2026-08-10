@@ -17,7 +17,7 @@ Include the affected version or commit, impact and prerequisites, a minimal repr
 - The monitor binds to `127.0.0.1` by default and must be exposed through an HTTPS reverse proxy.
 - Configure an exact `DASHBOARD_ALLOWED_HOSTS`; never use `*` in production.
 - Keep `.env` at permission mode `0600` and never commit it.
-- Back up `MONITOR_SECRET_KEY`; it encrypts sensitive database settings.
+- Back up `MONITOR_SECRET_KEY`; it encrypts sensitive New API, relay, CPA, SMTP, and notification settings stored in the database.
 - Expose Docker only through the restricted Socket Proxy. Never mount the production Docker socket directly into the monitor container.
 - Keep emergency administrator credentials separate and rotate them regularly.
 - Run `python manage.py doctor` and inspect `git status --ignored` before publishing or deploying.
@@ -28,6 +28,8 @@ Include the affected version or commit, impact and prerequisites, a minimal repr
 ## Trust Boundaries
 
 Monitor administrators can change New API endpoints, probe rules, and notification credentials. Treat monitor administrators as infrastructure-privileged identities.
+
+The CPA weekly-quota module is administrator-only and permits controlled calls only to fixed Codex/Antigravity quota endpoints. CPA management requests reject redirects and bound timeout and response size. `auth_index`, `project_id`, the management key, and upstream tokens are never persisted in quota history or returned to the browser. The CPA management interface itself should remain restricted to trusted networks.
 
 API key usage lookup is admin-only by default and can be lowered only to operators. It uses POST forwarding, fixed upstream paths, and per-user/source rate limits. Raw keys are not stored in the database, URLs, audits, or API responses.
 

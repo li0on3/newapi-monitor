@@ -4,6 +4,25 @@
 
 ## Unreleased
 
+## 1.13.0 - 2026-08-10
+
+### Added
+
+- Added isolated administrator-only CPA / CLIProxyAPI weekly-quota and settings pages for active Codex and Antigravity credentials, weekly pools, reset times, history, and manual collection.
+- Added low-frequency collection every 30 minutes by default, alerts at or below 20% real remaining quota, recovery at 25%, and persistent reminders at most once every 6 hours by default.
+- Added forecasts based on real quota decline within one reset cycle with a bounded adjustment from Token Usage Tracker 1-hour/6-hour pressure. Forecasts provide capacity context and never alert alone.
+- Added bilingual source, forecast, deployment, security, and production-acceptance documentation. Linux Docker can reach a same-host CPA through `host.docker.internal` by default.
+
+### Changed
+
+- CPA quota state, incidents, and pages are fully isolated from New API channel overview and Overall Status. Operators and regular users cannot read CPA quota APIs or incidents.
+- One CPA account failure no longer blocks successful accounts; the collector fails only when every supported active account fails. Thresholds, intervals, timeout, recovery, and repeat timing are dynamically configurable.
+
+### Security
+
+- The CPA management key is encrypted with `MONITOR_SECRET_KEY`, never echoed, and used through requests that reject redirects and bound timeout and response size.
+- Quota history and browser responses exclude `auth_index`, `project_id`, management keys, and upstream tokens, retaining only irreversible account IDs, masked labels, and aggregates.
+
 ## 1.12.1 - 2026-08-03
 
 ### Fixed

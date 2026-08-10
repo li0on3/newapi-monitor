@@ -4,7 +4,7 @@ This document defines the authoritative source, calculation, freshness, and hist
 
 ## Core rules
 
-1. **Prefer the authoritative source.** New API read-only endpoints own channels, accounts, keys, consumption logs, and billed quota. Local sampling owns host resources. The official Status API owns OpenAI status.
+1. **Prefer the authoritative source.** New API read-only endpoints own channels, accounts, keys, consumption logs, and billed quota. Provider quota responses returned through CPA own CPA weekly limits. Local sampling owns host resources. The official Status API owns OpenAI status.
 2. **Separate totals from attribution.** Analytics request and quota totals come from live consumption logs. Model, token, key, and group attribution comes from New API hourly aggregation. Any temporary difference is rendered as a separate reconciliation row.
 3. **Separate current values from trends.** Resource current values and extrema use raw samples. Long-range charts use time-bucket averages and never present those averages as instantaneous peaks.
 4. **Unknown is not failed.** Missing or stale probe samples are shown as unprobed or stale, never silently converted to healthy or failed.
@@ -23,6 +23,7 @@ This document defines the authoritative source, calculation, freshness, and hist
 | Incidents | Monitor state machines and collectors | Trigger reason, recovery reason, state, acknowledgement, and metadata | Resolved incidents default to 365-day retention; time filters use incident start time |
 | Alert delivery | Durable SQLite outbox | Pending, sending, delivered, dead-letter, and cancelled states come from actual records; status facets follow time, destination, and search filters but ignore the selected status tab | Delivered and dead-letter records default to 30-day retention; full pagination is supported |
 | OpenAI status | `https://status.openai.com/api/v2/summary.json` | Upstream context only; only configured workload-relevant components may affect overall status | Defaults to 60-second polling and never overrides local channel evidence |
+| CPA weekly quota | CPA `auth-files` plus fixed provider quota APIs; optional Token Usage Tracker | Only weekly Codex/Antigravity pools are retained; real remaining percentage is authoritative for alerts; request volume is forecast context only | Collected every 30 minutes by default and retained with raw samples; administrator-only and excluded from New API overall status |
 | New API account overview | `/api/status`, `/api/user/self`, `/api/token/`, `/api/log/self/stat` | Always the current signed-in account; account requests, balances, and 24-hour consumption never mix with global usage | RPM and TPM are current 60-second rates, not totals for the selected history range |
 | Analytics totals | `/api/log/` or `/api/log/self` and matching `stat` | Exact live consumption-log request and quota totals for the selected interval | Matches the currently queryable New API logs |
 | Analytics model/token/flow | `/api/data/`, `/api/data/flow`, and self variants | New API hourly attribution; differences caused by aggregation lag, time-bucket boundaries, retention scope, or missing historical dimensions such as group are shown separately | Regular-user ranges over 30 days are split to respect the upstream limit; any failed chunk fails the whole query |
@@ -60,6 +61,14 @@ Sample coverage is calculated from raw sample count and the configured sampling 
 
 “Exceeds threshold” consistently means strictly greater than (`>`). A value equal to the threshold is not presented by the UI, periodic report, or alert state machine as over the limit.
 
+### CPA weekly quota
+
+- Displayed remaining percentages must match weekly provider quota windows. Daily limits, five-hour windows, and locally inferred token usage must never be presented as weekly quota.
+- Low-quota incidents are triggered only by real remaining percentage, `<= 20%` by default; forecasts never open a low-quota incident.
+- Forecasts require real samples spanning at least two hours in the same reset cycle, and nearby request pressure may apply only a bounded adjustment.
+- Disabled or removed CPA credentials leave the active dashboard scope immediately. Old samples remain only until retention pruning and cannot keep affecting state or alerts.
+- CPA collection failures may degrade platform collector health but must never alter New API channel counts or Overall Status.
+
 ## Release acceptance
 
-Every release runs the complete backend suite, frontend suite and build, Playwright E2E, Docker Compose validation, image build, production health checks, same-window log reconciliation, channel-catalog reconciliation, latest-resource reconciliation, and desktop/mobile public-page checks.
+Every release runs the complete backend suite, frontend suite and build, Playwright E2E, Docker Compose validation, image build, production health checks, same-window log reconciliation, channel-catalog reconciliation, latest-resource reconciliation, active CPA credential/weekly-quota reconciliation, and desktop/mobile public-page checks.
