@@ -1,4 +1,4 @@
-FROM oven/bun:1.3.14-alpine AS dashboard-build
+FROM oven/bun:1.4.0-alpine AS dashboard-build
 
 WORKDIR /build
 COPY web/package.json web/bun.lock ./
@@ -6,7 +6,7 @@ RUN bun install --frozen-lockfile
 COPY web/ ./
 RUN bun run build
 
-FROM python:3.13.14-alpine3.23
+FROM python:3.14.7-alpine3.23
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
